@@ -1969,6 +1969,16 @@ impl Sessions {
         (!live.is_empty()).then(|| crate::session::persist::sessions_cwd_dir(&cwd).join(live))
     }
 
+    /// 这一页的日志（`chat_history.jsonl`）落在哪个目录：子代理是父会话目录下的
+    /// `subagents/<id>/`（[`Self::attach_child_dir`]），主会话是 [`Self::disk_session_dir`]。
+    /// 都没落盘是 `None`。压缩把段文件写在这里，并在摘要里指向这里的原始日志。
+    pub fn transcript_dir(&self) -> Option<std::path::PathBuf> {
+        if let Some(dir) = self.child_dir.lock().unwrap().clone() {
+            return Some(dir);
+        }
+        self.disk_session_dir()
+    }
+
     /// `$DOCK_HOME/sessions/<cwd-key>/<id>/` for the live thread, when disk-backed.
     pub fn disk_session_dir(&self) -> Option<std::path::PathBuf> {
         let cwd = self.disk_cwd.lock().unwrap().clone()?;

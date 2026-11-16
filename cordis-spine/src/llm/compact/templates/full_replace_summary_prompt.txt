@@ -14,4 +14,11 @@ Think through the conversation in your private reasoning before writing; do NOT 
 8. Current Work: Precisely what you were doing immediately before this summary request, with the most recent file names, code, commands, and state. Be specific enough that work can resume mid-stream.
 9. Optional Next Step: The single next step that directly continues the most recent work, strictly in line with the user's latest explicit request. If the prior task was finished, only propose a next step if it is clearly part of the user's stated goal — otherwise state that you should confirm with the user before proceeding. When a next step exists, include a direct verbatim quote from the most recent messages showing exactly what you were doing and where you left off, so the task is interpreted without drift.
 
+CRITICAL — the successor does NOT get the tool calls or tool outputs from this conversation. Every assistant turn and every tool result is discarded, and so is every user message except the first one and the most recent one; only those two user messages and this summary survive. Nothing you leave out can be recovered by re-reading the transcript, and tool outputs shown to you above are truncated previews. Therefore:
+
+- In section 8, list the specific tools already run (with their arguments) and what each returned or established. A successor that cannot see a tool result will re-run the same `read_file`, `grep`, or `bash` command and waste a whole round trip — the single most common failure mode after compaction.
+- In section 3, include the actual code you wrote or read that matters for continuing (not just "read auth.rs").
+- In section 6, keep every user message between the first and the most recent one, as close to verbatim as you can, especially corrections, constraints, and changed requirements — the summary is the only place they survive.
+- State plainly what has already been verified (tests run and passed, commands whose output you already inspected) so the successor does not redo it. Also state what was tried and did NOT work, to prevent repeating it.
+
 IMPORTANT: Do NOT call or use any tools. Respond with ONLY the <summary>...</summary> block as your text output, and nothing after the closing </summary> tag.
