@@ -961,7 +961,8 @@ impl Sampler for ToolsThenText {
                     tool_calls: vec![ToolCall {
                         id: format!("c{i}"),
                         name: "echo".into(),
-                        arguments: "x".into(),
+                        // 每步参数不同：原样重复同一个调用会被当成原地打转停下。
+                        arguments: format!(r#"{{"step":{i}}}"#),
                     }],
                     ..LlmOutput::default()
                 }
@@ -1249,6 +1250,82 @@ async fn a_failed_sample_skips_turn_end_and_stays_failed() {
     );
 }
 
+/// 一轮不再有步数上限：以前第 256 步就被截断（`Error::MaxSteps`），长任务做到一半
+/// 停下，用户只能再发一句「继续」。每一步都在推进（参数不同）就一直跑到模型回话。
+#[tokio::test]
+async fn a_long_turn_is_not_cut_at_256_steps() {
+    let b = boot_recorded(|i| match i {
+        0..300 => call_tool(&format!("c{i}"), "edit_fake", &format!(r#"{{"step":{i}}}"#)),
+        _ => say("三百步做完了"),
+    })
+    .await;
+    assert_eq!(
+        b.run("干活").await,
+        TurnOutcome::Text("三百步做完了".into())
+    );
+    assert_eq!(b.samples(), 301);
+    assert!(
+        !b.reminders().iter().any(|r| r.contains("完全相同的参数")),
+        "每一步都不一样，不该被当成原地打转"
+    );
+}
+
+/// 连着几步原样重复同一个调用：先提醒一次，还不改就停下这一轮。`todo_write` 在紧档：
+/// 第 4 次之后提醒，第 8 次之后停。停下按失败收尾，原因放 `error`，不进模型历史，
+/// 也不跑 `agent/turn-end`（清单开着也不记账）。
+#[tokio::test]
+async fn repeating_the_same_call_is_nudged_then_stopped() {
+    let b = boot_recorded(|i| call_tool(&format!("c{i}"), "todo_write", OPEN_LIST)).await;
+    let out = b
+        .root
+        .require::<LoopHandle>(AGENT_LOOP)
+        .unwrap()
+        .run("干活")
+        .await;
+    match out {
+        Err(Error::Stationary { ref tool, run }) => {
+            assert_eq!((tool.as_str(), run), ("todo_write", 8));
+        }
+        other => panic!("原样重复 8 次要停下：{other:?}"),
+    }
+    assert_eq!(b.samples(), 8, "停下之后不再采样");
+
+    let nudges: Vec<String> = b
+        .reminders()
+        .into_iter()
+        .filter(|r| r.contains("完全相同的参数"))
+        .collect();
+    assert_eq!(nudges.len(), 1, "同一串重复只提醒一次：{nudges:?}");
+    assert!(nudges[0].contains("连着 4 步") && nudges[0].contains("`todo_write`"));
+    let histories = b.histories.lock().unwrap();
+    let carries_nudge = |h: &Vec<cordis_spine::LogEvent>| {
+        h.iter().any(|e| {
+            matches!(e, cordis_spine::LogEvent::SystemReminder(t) if t.contains("完全相同的参数"))
+        })
+    };
+    assert!(!carries_nudge(&histories[3]), "第 4 次调用之前还不该提醒");
+    assert!(
+        carries_nudge(&histories[4]),
+        "第 4 次调用的结果落完之后、第 5 次采样之前提醒"
+    );
+
+    match last_turn_end(&b.root) {
+        Some(cordis_spine::TurnEndStatus::Failed(why)) => {
+            assert!(
+                why.contains("看起来卡住了") && why.contains("`todo_write`"),
+                "{why}"
+            )
+        }
+        other => panic!("停下要记成失败：{other:?}"),
+    }
+    assert_eq!(b.bookkeeping(), 0, "停下的一轮不跑回合末记账");
+    let texts = model_texts(&b.root.require::<Sessions>(SESSIONS).unwrap().events());
+    assert!(
+        texts.is_empty(),
+        "停下的说明不能变成模型说过的话：{texts:?}"
+    );
+}
+
 /// The model ignores the bookkeeping step (answers with text again): the turn
 /// still ends after that one step — no second round, no work.
 #[tokio::test]
@@ -1380,7 +1457,8 @@ async fn a_stale_list_gets_a_mid_turn_nudge() {
                 };
                 match i {
                     0 => call("todo_write", OPEN_LIST),
-                    i if i <= rounds => call("echo", "x"),
+                    // 每步参数不同：原样重复同一个调用会被当成原地打转停下。
+                    i if i <= rounds => call("echo", &format!(r#"{{"step":{i}}}"#)),
                     _ => LlmOutput {
                         text: "done".into(),
                         ..LlmOutput::default()
@@ -1450,7 +1528,8 @@ impl Sampler for Grind {
                     tool_calls: vec![ToolCall {
                         id: format!("c{i}"),
                         name: "echo".into(),
-                        arguments: "x".into(),
+                        // 每步参数不同：原样重复同一个调用会被当成原地打转停下。
+                        arguments: format!(r#"{{"step":{i}}}"#),
                     }],
                     ..LlmOutput::default()
                 };
@@ -3072,9 +3151,13 @@ impl Sampler for GoalScript {
     ) -> BoxFuture<'a, LlmOutput> {
         let i = self.n.fetch_add(1, Ordering::SeqCst);
         let (name, arguments) = if Some(i) == self.done_at {
-            ("update_goal", r#"{"completed":true,"message":"做完了"}"#)
+            (
+                "update_goal",
+                r#"{"completed":true,"message":"做完了"}"#.to_string(),
+            )
         } else if (self.work)(i) && self.done_at.is_none_or(|d| i < d) {
-            ("list_dir", "{}")
+            // 每步参数不同：原样重复同一个调用会被当成原地打转停下。
+            ("list_dir", format!(r#"{{"step":{i}}}"#))
         } else {
             return Box::pin(async move {
                 LlmOutput {
@@ -3088,7 +3171,7 @@ impl Sampler for GoalScript {
                 tool_calls: vec![ToolCall {
                     id: format!("g{i}"),
                     name: name.into(),
-                    arguments: arguments.into(),
+                    arguments,
                 }],
                 ..LlmOutput::default()
             }

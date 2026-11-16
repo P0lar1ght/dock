@@ -169,7 +169,7 @@ flowchart TB
 
 ### 一轮怎么跑
 
-TUI 从不持有循环：按键变成 `SessionCommand` 交给 `session_actor` 管队列，actor 每次取一条调 `agent-loop` 的 `LoopHandle`。默认 driver `GrokStep` 跑一轮采样，安全上限 256 步；换 driver 只换 `agent-loop` 这颗插件，不动 actor。每一环都是 waterfall——监听必须把控制权交给下一环，不要悄悄吞掉链。
+TUI 从不持有循环：按键变成 `SessionCommand` 交给 `session_actor` 管队列，actor 每次取一条调 `agent-loop` 的 `LoopHandle`。默认 driver `GrokStep` 跑一轮采样，没有步数上限，连着原样重复同一步才会被停下；换 driver 只换 `agent-loop` 这颗插件，不动 actor。每一环都是 waterfall——监听必须把控制权交给下一环，不要悄悄吞掉链。
 
 ```mermaid
 flowchart LR

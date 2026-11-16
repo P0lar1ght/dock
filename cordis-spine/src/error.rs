@@ -10,8 +10,18 @@ pub enum Error {
     #[error("agent/pre-step rejected the prompt")]
     PreStepRejected,
 
+    /// 循环已经没有步数上限，现在不会再产生。留着只是让已经写了 `MaxSteps` 分支的
+    /// 代码还能编过；新增的 [`Error::Stationary`] 仍会让没有通配分支的穷尽 `match`
+    /// 编不过（`Error` 没有 `#[non_exhaustive]`）。
     #[error("loop exceeded {max} sampling steps without a text reply")]
     MaxSteps { max: usize },
+
+    /// 连着好几步发出完全相同的工具调用，循环停下了这一轮（见 `agent::stationarity`）。
+    /// 文案就是给用户看的说明：`end_turn` 用它记失败原因。
+    #[error(
+        "连续 {run} 步用完全相同的参数调用 `{tool}`，看起来卡住了，已停下。发一条新消息可继续。"
+    )]
+    Stationary { tool: String, run: u32 },
 
     #[error("turn cancelled")]
     Cancelled,
