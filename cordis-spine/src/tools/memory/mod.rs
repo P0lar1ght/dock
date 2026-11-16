@@ -472,12 +472,14 @@ fn memory_get(memory: &Memory, call: ToolCall) -> ToolResult {
 
 /// `memory_get` 的 `path` 指的是哪个文件。
 ///
-/// 磁盘上有这个路径就是它（`memory_search` 给的都是绝对路径）。没有的话当成笔记引用：
+/// 绝对路径、且磁盘上有这个文件就是它（`memory_search` 给的都是绝对路径）。其余当成笔记引用：
 /// 笔记里的 `[[链接]]`、笔记名，或 `MEMORY.md` 索引里那种相对 scope 的路径
 /// （`topics/prefs.md`），在全局和当前工作区里找。找不到原样返回，由读文件那一步报错。
+///
+/// 相对路径不先拿进程的当前目录去对：项目里碰巧有同一个相对路径的文件时会被它截走。
 fn note_path(root: &MemoryRoot, path: &str) -> PathBuf {
     let literal = PathBuf::from(path);
-    if literal.is_file() {
+    if literal.is_absolute() && literal.is_file() {
         return literal;
     }
     let workspace = dock_memory::vault::workspace_scope_id(&root.slug);
@@ -689,6 +691,36 @@ mod tests {
         assert!(missing.starts_with("Error:"), "{missing}");
         let outside = get("/etc/hosts");
         assert!(outside.starts_with("Error:"), "{outside}");
+    }
+
+    /// 相对路径要按笔记引用解析，不能先拿进程的当前目录去对：项目里碰巧有同一个相对路径的文件时，
+    /// 原来会把那个文件当成要读的（随后被「不在记忆目录里」拒掉），记忆里那篇就读不到了。
+    /// cargo test 的当前目录是 crate 根，那里有 `README.md`。
+    #[test]
+    fn memory_get_resolves_relative_paths_as_notes_even_if_cwd_has_them() {
+        let _env = cordis_base::test_env::scoped()
+            .home()
+            .set("DOCK_MEMORY", "1");
+        assert!(
+            std::path::Path::new("README.md").is_file(),
+            "测试前提：当前目录有 README.md"
+        );
+        let mem = Memory::new();
+        let root = mem.root();
+        root.ensure_layout().unwrap();
+        let note = root.global.topics.join("readme.md");
+        std::fs::write(&note, "# 读我\n\n记忆里的那篇。\n").unwrap();
+        let out = memory_get(
+            &mem,
+            ToolCall {
+                id: "g".into(),
+                name: "memory_get".into(),
+                arguments: serde_json::json!({ "path": "README.md" }).to_string(),
+            },
+        )
+        .content;
+        assert!(out.contains("记忆里的那篇"), "{out}");
+        assert!(out.contains(&note.display().to_string()), "{out}");
     }
 
     #[test]

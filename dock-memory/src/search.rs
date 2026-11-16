@@ -584,6 +584,7 @@ mod tests {
                 MemoryIndex::open_or_create_with_dimensions(&root.search_db(), 8).unwrap();
             let _ = idx.reindex_tree(&root);
             if !idx.vec_available() {
+                eprintln!("skipping: sqlite-vec not available");
                 return;
             }
             let provider = MockEmbeddingProvider { dimensions: 8 };
