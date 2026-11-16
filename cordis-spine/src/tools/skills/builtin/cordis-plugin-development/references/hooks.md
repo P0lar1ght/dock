@@ -25,7 +25,7 @@ dock；下次启动也会自动加载。
 | --- | --- | --- | --- |
 | `session/event` | 会话日志追加之后，异步 | 一行文本，见下 | 忽略 |
 | `agent/step-start` | 回合里**每次采样之前** | `#{ step, identity, main }` | 字符串 = 注入一条 `<system-reminder>`；`()` = 没意见 |
-| `agent/turn-end` | 回合想结束时 | `#{ text, rounds, ended_with_text, queued_followups, identity, main }` | 字符串 = 注入提醒并让回合继续；`()` = 让它结束 |
+| `agent/turn-end` | 模型回了正文、回合想结束时（采样出错、只有推理、原样重复被停下都不触发；所以 `ended_with_text` 恒为 `true`） | `#{ text, rounds, ended_with_text, queued_followups, identity, main }` | 字符串 = 注入提醒并让回合继续；`()` = 让它结束 |
 
 ### `session/event`
 

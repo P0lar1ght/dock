@@ -203,7 +203,7 @@ order: 10
 ## 仍比 Grok 薄（CLI 面）
 
 - `/goal`：模型可用 `update_goal(objective)` 自己开目标；continuation 已接上（内循环 + 整轮结束后隐藏 GoalSummary）。尚未自动 spawn Grok 的 `goal plan writer` / classifier / strategist
-- 一轮采样安全上限 256 步（Grok 默认不限 `max_turns`）；撞上限时滚动区留下说明，而不是静默停
+- 一轮采样没有步数上限（同 Grok 默认）；连着几步原样重复同一个工具调用时先提醒模型，还不改就停下，滚动区留一条错误色的说明（Grok 是静默结束）。没有 `--max-turns` / `max_turns`
 - **LLM 请求失败**：滚动区画一条错误色的 `◆ 请求失败` + 详情。详情存在 `LlmOutput::error` 而**不是** `text` 里——三条 wire builder（messages / responses / chat）都以 `text` 非空或有 tool_call 为门槛，所以失败详情**不会被回放给模型**，也不会每轮重复付它的 token；但它跟着会话落盘，`/resume` 之后仍看得见上次为什么断的。**三条 wire 的流内错误也走这里**：provider 在 SSE 中途发的错误事件（messages 的 `{"type":"error"}`、responses 的 `error` / `response.failed`、chat/completions 的 `{"error":{…}}`）都只进 `error`。chat/completions 那条原先把解不成 chunk 的帧**无条件丢弃**，于是这一轮完全空白地收场——没有文本也没有报错，界面上像是应用坏了；现在认得出错误信封就记下来，认不出才丢。详情会走一遍错误的 `source()` 链（reqwest 的 `Display` 只印 `error sending request for url (…)` 这层壳，真正的 `connection reset by peer` / `dns error` / `certificate verify failed` 在链里），并带上分类前缀（`[连接失败]` / `[超时]` / `[传输]`）。HTTP 状态码错误另带 `request-id`（依次试 `request-id` / `x-request-id` / `cf-ray` / `x-amzn-requestid`）——**传输层失败没有响应，也就没有 request-id**，别在那种错误里找
 - **重试**：传输层失败（连接重置 / DNS / TLS / 连接超时）与 HTTP 503 都重试，最多 3 次、800ms 线性递增，期间可被 Stop 取消。请求拼错（builder 错误）不重试。LLM 的 `reqwest::Client` 是**进程级共用**的（连接池复用，避免每次请求重做 DNS+TCP+TLS 握手），只设 20s `connect_timeout`、**不设整体 timeout**（响应是 SSE 长流，全局超时会把正常的长回答拦腰砍断）
 - 提问 overlay：有 Other，自由输入比 Grok pager 简单

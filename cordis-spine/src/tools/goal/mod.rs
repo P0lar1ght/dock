@@ -19,7 +19,9 @@ use cordis_base::types::{
 };
 
 /// Grok keeps `/goal` on an outer turn loop until `update_goal(completed)` (or
-/// cancel). The agent loop's `MAX_STEPS` is per round, not per goal.
+/// cancel). The agent loop has no step cap of its own; a round that keeps
+/// repeating the same tool call is stopped (`agent::stationarity`) and does
+/// not get a GoalSummary continuation.
 const MAX_GOAL_ROUNDS: usize = 64;
 
 pub use command::{goal_command, start_goal};

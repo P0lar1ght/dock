@@ -922,15 +922,17 @@ pub const ORDER_TURN_END_DYNAMIC: i32 = 50;
 /// `ToolExecute` rows, and "voted but forgot to append" cannot happen.
 #[derive(Clone, Debug, Default)]
 pub struct TurnEnd {
-    /// The model's closing text. Empty when `ended_with_text` is false.
+    /// The model's closing text.
     pub text: String,
     /// How many times this turn has already been continued. Handlers use it to
     /// self-limit; the loop's own cap is a backstop, not a budget to lean on.
     pub rounds: usize,
-    /// True = the model answered with non-empty text and no tool calls. False =
-    /// the step budget ran out (the model is stuck in a tool loop). The loop
-    /// never runs `agent/turn-end` on a failed request or on a sample that
-    /// carried nothing but reasoning, so `true` really means "it answered".
+    /// Always true now: the model answered with non-empty text and no tool
+    /// calls. The loop has no step budget any more (it used to call
+    /// `agent/turn-end` with `false` when 256 steps ran out), and it never runs
+    /// `agent/turn-end` on a failed request, on a sample that carried nothing
+    /// but reasoning, or after it stopped a turn that kept repeating the same
+    /// tool call. Kept so existing plugins that read it still compile.
     pub ended_with_text: bool,
     /// The user already queued the next message. Handlers **must** respect
     /// this: when the user is steering, do not grab the wheel.

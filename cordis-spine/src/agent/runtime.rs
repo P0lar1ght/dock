@@ -27,15 +27,11 @@ use cordis_base::types::{
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
-/// Grok `max_turns` defaults to `None` (unlimited). Dock keeps a high safety
-/// cap so a runaway tool loop can still be Esc-cancelled and leaves a visible
-/// note instead of hanging. The old cap of 8 cut ordinary coding turns short.
-const MAX_STEPS: usize = 256;
 /// 连着几次采样都是 [`Sampled::Empty`] 就停下。
 ///
 /// 只回了推理的一步什么都没交出来；重采是一次新的请求，算一步。连着这么多次
-/// 都这样，就当这条线上的模型答不出东西，按失败收尾，跟 [`MAX_STEPS`] 一样看得
-/// 见而不是静音。中间只要有一步交出了东西就重新数。
+/// 都这样，就当这条线上的模型答不出东西，按失败收尾，看得见而不是静音。中间只要
+/// 有一步交出了东西就重新数。
 const MAX_EMPTY_SAMPLES: usize = 3;
 /// 空采样之后、重采之前落的提醒。
 ///
@@ -156,14 +152,16 @@ async fn grok_sample_loop(
     let mut cache_key = system_cache_key(ctx);
     let mut rounds = 0usize;
     let mut steps = 0usize;
-    let mut last_text = String::new();
     // 连着几次 [`Sampled::Empty`]。交出东西的一步（工具调用或正文）清零；跨
     // turn-end 续跑不清零，要清也得先有一步正文。
     let mut empty_streak = 0usize;
+    // 没有步数上限（grok-build 的 `max_turns` 默认不限，Codex 也不设）。兜底是连续
+    // 相同步检测：原地打转先提醒，还不改就停下，见 `agent::stationarity`。
+    let mut identical = super::stationarity::IdenticalSteps::default();
     loop {
         tokio::task::yield_now().await;
-        let mut ended_with_text = false;
-        for _ in 0..MAX_STEPS {
+        // 内层一步一步采样，只在模型回了正文（[`Sampled::Reply`]）时带着它出来。
+        let last_text = loop {
             abort_if_cancelled(ctx, sessions)?;
             drain_parent_mailbox(ctx, sessions);
             drain_steers(ctx, sessions);
@@ -228,9 +226,8 @@ async fn grok_sample_loop(
                 Sampled::Tools(calls) => calls,
                 Sampled::Reply(text) => {
                     empty_streak = 0;
-                    last_text = text;
-                    ended_with_text = true;
-                    break;
+                    identical.reset();
+                    break text;
                 }
                 Sampled::Empty => {
                     empty_streak += 1;
@@ -253,6 +250,7 @@ async fn grok_sample_loop(
                 Sampled::Failed(text) => return Ok(TurnOutcome::Text(text)),
             };
             empty_streak = 0;
+            let step = super::stationarity::Step::of(&calls);
             // 连在一起的只读调用（读文件、搜索、看目录…）一起跑，别的一颗一颗跑，结果
             // 按模型给的顺序记（参考 Codex：能并行的拿读锁，别的拿写锁）。
             for batch in parallel_batches(calls) {
@@ -286,23 +284,35 @@ async fn grok_sample_loop(
                     return Err(Error::Cancelled);
                 }
             }
-        }
+            // 这一步的结果都落完了才判断，提醒 / 停下不会夹在 tool_calls 和结果中间。
+            match identical.observe(step) {
+                super::stationarity::Verdict::Go => {}
+                super::stationarity::Verdict::Nudge(reminder) => {
+                    sessions.append(LogEvent::SystemReminder(reminder));
+                }
+                super::stationarity::Verdict::Stop { tool, run } => {
+                    let stop = Error::Stationary { tool, run };
+                    // 跟空采样一样把说明放 `error`：看得见（TUI 按出错画），不进模型
+                    // 历史。返回 `Err` 让 actor 不排 goal 续跑——续跑只会把卡住的循环
+                    // 重新拉起来（grok-build 同样不排）。
+                    sessions.append(LogEvent::LlmStream(cordis_base::types::LlmOutput {
+                        error: Some(stop.to_string()),
+                        ..cordis_base::types::LlmOutput::default()
+                    }));
+                    return Err(stop);
+                }
+            }
+        };
         // 模型要收尾时还有插话没送达（这一步采样期间到的）：不收尾，送达后再采
         // 一步——插话是给这一轮的，不该等到下一轮（Codex 的 pending input 同理）。
-        if ended_with_text && sessions.has_steers() {
+        if sessions.has_steers() {
             continue;
         }
         // `agent/turn-end`: goal / todo / anything else gets a say before the
         // turn hands control back. The loop only counts rounds and appends the
         // winning reminder — the policy lives in the handlers.
         if rounds < MAX_TURN_END_ROUNDS {
-            if let Some(mut round) = turn_end_decision(
-                ctx,
-                sessions,
-                if ended_with_text { &last_text } else { "" },
-                rounds,
-                ended_with_text,
-            ) {
+            if let Some(mut round) = turn_end_decision(ctx, sessions, &last_text, rounds) {
                 rounds += 1;
                 let Some(only) = round.only_tools.clone() else {
                     sessions.append(LogEvent::SystemReminder(round.reminder));
@@ -323,25 +333,13 @@ async fn grok_sample_loop(
                     match bookkeeping_step(ctx, sessions, llm, tools, &system, specs, &only).await {
                         Ok(()) => {}
                         // 这一轮已经答完了：记账时按 Stop 只是不记了，不把它记成取消。
-                        Err(Error::Cancelled) if ended_with_text => {}
+                        Err(Error::Cancelled) => {}
                         Err(err) => return Err(err),
                     }
                 }
-                if ended_with_text {
-                    return Ok(TurnOutcome::Text(last_text));
-                }
             }
         }
-        if ended_with_text {
-            return Ok(TurnOutcome::Text(last_text));
-        }
-        sessions.append(LogEvent::LlmStream(cordis_base::types::LlmOutput {
-            text: format!(
-                "本轮已连续采样 {MAX_STEPS} 步仍无文本回复，已停下。发一条新消息可继续。"
-            ),
-            ..cordis_base::types::LlmOutput::default()
-        }));
-        return Err(Error::MaxSteps { max: MAX_STEPS });
+        return Ok(TurnOutcome::Text(last_text));
     }
 }
 
@@ -473,12 +471,12 @@ fn turn_end_decision(
     sessions: &Sessions,
     text: &str,
     rounds: usize,
-    ended_with_text: bool,
 ) -> Option<TurnEndRound> {
+    // `ended_with_text` 恒为真：没有步数上限之后，只有模型回了正文才走到这里。
     let end = TurnEnd::new(
         text,
         rounds,
-        ended_with_text,
+        true,
         sessions.has_queued_followups(),
         sessions.identity(),
     );
