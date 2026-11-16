@@ -40,7 +40,9 @@ use history::{
 };
 
 pub use history::estimate_text_tokens;
-pub(crate) use history::{estimate_context_tokens, estimate_reasoning, VISIBLE_NOTICE};
+pub(crate) use history::{
+    estimate_context_tokens, estimate_reasoning, tool_image_count, VISIBLE_NOTICE,
+};
 use prompt::{build_summary_prompt_kind, SummaryPromptKind};
 use summary::is_degenerate_summary;
 

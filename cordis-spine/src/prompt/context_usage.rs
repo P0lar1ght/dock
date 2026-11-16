@@ -9,7 +9,7 @@ use cordis::Context;
 
 use crate::host::settings::AppSettings;
 use crate::llm::compact::{
-    estimate_context_tokens, estimate_reasoning, estimate_text_tokens,
+    estimate_context_tokens, estimate_reasoning, estimate_text_tokens, tool_image_count,
     DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT, VISIBLE_NOTICE,
 };
 use crate::names::{MEMORY, SESSIONS, SETTINGS, SKILLS, SYSTEM_PROMPT, TOOLS};
@@ -302,12 +302,15 @@ pub(crate) fn context_tokens_used(ctx: &Context, system: &str) -> u64 {
 
 struct Measure {
     system: u64,
-    /// 模型历史，含推理。
+    /// 模型历史，含推理与工具结果里的图。
     history: u64,
     /// `history` 里推理那一份。
     reasoning: u64,
+    /// `history` 里工具结果图片那一份。
+    tool_images: u64,
     tools: u64,
     tool_count: u64,
+    /// 用户消息附带的图。不在 `history` 里，另算。
     images: u64,
     used: u64,
 }
@@ -315,19 +318,20 @@ struct Measure {
 fn measure(ctx: &Context, system: &str) -> Measure {
     let system_tokens = estimate_text_tokens(system);
     let sessions = ctx.get::<Sessions>(SESSIONS);
-    let (history, reasoning, images, anchor) = match sessions.as_ref() {
+    let (history, reasoning, tool_images, images, anchor) = match sessions.as_ref() {
         Some(sessions) => {
             let events = sessions.model_history();
             (
                 estimate_context_tokens("", &events),
                 reasoning_tokens(&events),
+                tool_image_count(&events).saturating_mul(IMAGE_TOKEN_ESTIMATE),
                 sessions
                     .model_user_image_count()
                     .saturating_mul(IMAGE_TOKEN_ESTIMATE),
                 sessions.context_anchor(),
             )
         }
-        None => (0, 0, 0, None),
+        None => (0, 0, 0, 0, None),
     };
     // Hidden extras (MCP + deferred local) stay registered for `use_tool`
     // but are omitted from the sampler tools array. Occupancy matches that send.
@@ -349,6 +353,7 @@ fn measure(ctx: &Context, system: &str) -> Measure {
         system: system_tokens,
         history,
         reasoning,
+        tool_images,
         tools,
         tool_count: specs.len() as u64,
         images,
@@ -407,8 +412,12 @@ fn snapshot_and_fit(ctx: &Context, parts: &PromptAssembly) -> (ContextSnapshot, 
         Fit { num: 0, den: 0 }
     };
     let system_prompt_tokens = fit.apply(system_prompt_tokens);
-    // 推理归「附加开销」那一格（见 `overhead_detail`），不进消息。
-    let message_tokens = fit.apply(m.history.saturating_sub(m.reasoning));
+    // 推理与工具结果里的图归「附加开销」那一格（见 `overhead_detail`），不进消息。
+    let message_tokens = fit.apply(
+        m.history
+            .saturating_sub(m.reasoning)
+            .saturating_sub(m.tool_images),
+    );
     let tool_definitions_count = m.tool_count;
     let tool_definitions_tokens = fit.apply(m.tools);
     let mut categories = extra_categories(ctx, parts);
@@ -621,10 +630,12 @@ fn overhead_detail(ctx: &Context, snap: &ContextSnapshot) -> OccupancyDetail {
             matches!(e, LogEvent::LlmStream(o) if !o.reasoning.is_empty() || !o.reasoning_items.is_empty())
         })
         .count() as u64;
+    // 用户消息附带的图 + 工具结果里的图（截图），都按张估。
     let image_n = ctx
         .get::<Sessions>(SESSIONS)
         .map(|s| s.model_user_image_count())
-        .unwrap_or(0);
+        .unwrap_or(0)
+        .saturating_add(tool_image_count(&history));
     let image_tok = image_n.saturating_mul(IMAGE_TOKEN_ESTIMATE);
     // 行一律给生估算，由 `fit_rows` 统一缩。快照里的 `tool_definitions_tokens`
     // 已经缩过，直接用会被缩两遍，和工具那一片对不上。
@@ -1378,6 +1389,79 @@ mod tests {
         let grown = estimate_context_tokens("", std::slice::from_ref(&tool));
         sessions.append(tool);
         assert_eq!(context_tokens_used(&ctx, ""), 6_000 + grown);
+    }
+
+    /// 一条带 `n` 张图的工具结果（截图类工具的样子），正文是 `"ok"`。
+    fn tool_with_images(id: &str, n: usize) -> LogEvent {
+        let image = || cordis_base::types::UserImage {
+            digest: None,
+            mime: "image/png".into(),
+            data: std::sync::Arc::from(vec![0u8; 64].into_boxed_slice()),
+            width: 1,
+            height: 1,
+        };
+        LogEvent::ToolExecute {
+            id: id.into(),
+            name: "read_file".into(),
+            arguments: "{}".into(),
+            content: "ok".into(),
+            images: (0..n).map(|_| image()).collect(),
+            is_error: false,
+        }
+    }
+
+    /// 没锚点时（刚恢复 / 刚压缩 / 上游不报用量）占用全靠估算，工具结果里的图每次
+    /// 请求都重发，要算进去。显示上和用户图片一起归「推理/开销」那一格的「图片」行，
+    /// 不进「消息」——和推理同一个处理。
+    #[tokio::test]
+    async fn tool_result_images_count_without_an_anchor() {
+        let ctx = Context::new();
+        crate::bundle::install_fakes(&ctx).await.unwrap();
+        let sessions = ctx.get::<Sessions>(SESSIONS).unwrap();
+        sessions.set_window(1_000_000);
+        sessions.append(LogEvent::User("go".into()));
+        let system = assembled_parts(&ctx).render();
+        let before = context_tokens_used(&ctx, &system);
+        let messages_before = snapshot_context(&ctx).message_tokens;
+
+        sessions.append(tool_with_images("c1", 3));
+        let text = estimate_text_tokens("ok");
+        assert_eq!(
+            context_tokens_used(&ctx, &system),
+            before + text + 3 * IMAGE_TOKEN_ESTIMATE
+        );
+        let snap = snapshot_context(&ctx);
+        assert_eq!(
+            snap.message_tokens,
+            messages_before + text,
+            "图不进消息那一格"
+        );
+        let row = occupancy_detail(&ctx, OccupancyKind::Overhead)
+            .groups
+            .into_iter()
+            .flat_map(|g| g.rows)
+            .find(|r| r.label == "图片")
+            .expect("开销明细有图片那一行");
+        assert_eq!(row.tokens, Some(3 * IMAGE_TOKEN_ESTIMATE));
+        assert!(row.note.unwrap_or_default().starts_with("3 张"));
+    }
+
+    /// 锚点只记到上一次请求为止；之后新来的截图得靠估算增量补上，否则自动压缩
+    /// 判定一直慢一步。
+    #[tokio::test]
+    async fn anchored_usage_counts_images_added_after_the_anchor() {
+        let ctx = Context::new();
+        crate::bundle::install_fakes(&ctx).await.unwrap();
+        let sessions = ctx.get::<Sessions>(SESSIONS).unwrap();
+        sessions.append(LogEvent::User("go".into()));
+        sample_with_usage(&sessions, 5_000, 1_000);
+        assert_eq!(context_tokens_used(&ctx, ""), 6_000);
+
+        sessions.append(tool_with_images("c1", 2));
+        assert_eq!(
+            context_tokens_used(&ctx, ""),
+            6_000 + estimate_text_tokens("ok") + 2 * IMAGE_TOKEN_ESTIMATE
+        );
     }
 
     /// 子代理那条路（`usage_from`）与主会话（`snapshot_context`）必须是同一个数：
