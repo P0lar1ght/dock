@@ -8,3 +8,4 @@ import "./mcp-apps";
 import "./preset-draft";
 import "./workflows";
 import "./turn-changes";
+import "./memory-graph";

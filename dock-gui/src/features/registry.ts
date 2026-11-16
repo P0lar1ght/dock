@@ -10,6 +10,7 @@
 // - 轮次脚注：一轮结束后、回复操作行上面的卡片（这一轮改了哪些文件）。
 // - 文件预览：文件面板按文件名找预览器（表格、文档）。
 // - 文件编辑器：文件面板里改文本文件用的编辑器（只有一个）。
+// - 侧栏整页：导航里多一项，点开盖住会话区的一整页（记忆图谱）。
 //
 // 加新类型：在这里加一张表 + 一个宿主插槽，别让宿主 import 功能目录。
 
@@ -30,6 +31,39 @@ export interface FeatureHost {
 const noHost: FeatureHost = { openPanel() {}, closePanel() {}, toast() {} };
 export const FeatureHostContext = createContext<FeatureHost>(noHost);
 export const useFeatureHost = () => useContext(FeatureHostContext);
+
+// ---- 侧栏整页 ----
+
+export interface NavPageProps {
+  /** 侧栏收起时左上角浮着窗口按钮：页头让开。 */
+  insetLeft: boolean;
+  /** 正在看的项目目录（没有会话时是最近用过的那个）；一个都没有是 `null`。 */
+  cwd: string | null;
+  /** 侧栏「项目」里的目录（页面里切项目用）。 */
+  projects: { name: string; path: string }[];
+}
+
+export interface NavPageEntry {
+  /** 页面 id；导航里的 key 是 `feature:<id>`。 */
+  id: string;
+  label: string;
+  icon: LucideIcon;
+  Page: ComponentType<NavPageProps>;
+}
+
+const navPages: NavPageEntry[] = [];
+
+export function registerNavPage(entry: NavPageEntry) {
+  navPages.push(entry);
+}
+
+export const navPageEntries = () => navPages;
+
+/** 导航 key（`feature:<id>`）对应的整页；不是功能登记的页回 `undefined`。 */
+export function navPageFor(key: string | null): NavPageEntry | undefined {
+  if (!key?.startsWith("feature:")) return undefined;
+  return navPages.find((p) => `feature:${p.id}` === key);
+}
 
 // ---- 右侧面板 ----
 
