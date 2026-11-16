@@ -1131,6 +1131,123 @@ async fn a_closed_list_lets_the_turn_end() {
     assert!(sentinel_reminders(&root).is_empty());
 }
 
+fn thinks(reasoning: &str) -> LlmOutput {
+    LlmOutput {
+        reasoning: reasoning.into(),
+        reasoning_ms: Some(1200),
+        ..LlmOutput::default()
+    }
+}
+
+fn last_turn_end(root: &Context) -> Option<cordis_spine::TurnEndStatus> {
+    root.require::<Sessions>(SESSIONS)
+        .unwrap()
+        .events()
+        .into_iter()
+        .rev()
+        .find_map(|e| match e {
+            cordis_spine::LogEvent::TurnEnd(status) => Some(status),
+            _ => None,
+        })
+}
+
+/// 采样只回了推理、正文和工具调用都空：这不是回复，不能当成模型的收尾。
+/// 以前它被当成「答完了」，清单还开着就触发回合末记账，模型记完账这一轮就
+/// 结束，聊天框里什么都没有（模型把工具调用写进推理通道时就是这样）。
+///
+/// 重采之前要先落一条提醒：chat / messages 两条 wire 会把只有推理的一步回放成
+/// assistant 消息，原样重采的话请求以一条空正文的 assistant 结尾。
+#[tokio::test]
+async fn a_reasoning_only_sample_is_resampled_behind_a_reminder() {
+    let b = boot_recorded(|i| match i {
+        0 => call_tool("c0", "todo_write", OPEN_LIST),
+        1 => thinks("清单列好了，接着读代码"),
+        2 => call_tool("c2", "todo_write", CLOSE_LIST),
+        _ => say("查完了"),
+    })
+    .await;
+    assert_eq!(b.run("干活").await, TurnOutcome::Text("查完了".into()));
+    assert_eq!(b.samples(), 4, "推理那一步之后要接着采");
+    assert_eq!(b.bookkeeping(), 0, "只有推理的一步不该触发回合末记账");
+    let retry = b.histories.lock().unwrap()[2].clone();
+    assert!(
+        matches!(
+            retry.last(),
+            Some(cordis_spine::LogEvent::SystemReminder(t)) if t.contains("没有正文也没有工具调用")
+        ),
+        "重采的请求要以提醒结尾，不能以只有推理的 assistant 结尾：{:?}",
+        retry.last()
+    );
+    assert_eq!(
+        last_turn_end(&b.root),
+        Some(cordis_spine::TurnEndStatus::Completed)
+    );
+}
+
+/// 连着几次都只有推理：这一轮按失败收尾（原因放在 `error` 里，不进模型历史），
+/// 也不跑 `agent/turn-end`——清单还开着也不插记账步。
+#[tokio::test]
+async fn reasoning_only_samples_end_the_turn_as_failed_without_bookkeeping() {
+    let b = boot_recorded(|i| match i {
+        0 => call_tool("c0", "todo_write", OPEN_LIST),
+        _ => thinks("下一步跑测试"),
+    })
+    .await;
+    assert_eq!(b.run("干活").await, TurnOutcome::Text(String::new()));
+    assert_eq!(
+        b.samples(),
+        4,
+        "开清单一步 + 连续 3 次空采样，不再多采一步记账"
+    );
+    assert_eq!(b.bookkeeping(), 0, "没答完的一轮不记账");
+    match last_turn_end(&b.root) {
+        Some(cordis_spine::TurnEndStatus::Failed(why)) => {
+            assert!(why.contains("只给了推理"), "{why}")
+        }
+        other => panic!("连续空采样要记成失败：{other:?}"),
+    }
+    let texts: Vec<String> = b
+        .root
+        .require::<Sessions>(SESSIONS)
+        .unwrap()
+        .events()
+        .into_iter()
+        .filter_map(|e| match e {
+            cordis_spine::LogEvent::LlmStream(out) => Some(out.text),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        texts.iter().all(String::is_empty),
+        "停下的说明不能变成模型说过的话：{texts:?}"
+    );
+}
+
+/// 采样本身出错（429 之类）不是模型要收尾：不跑 `agent/turn-end`。以前它照样
+/// 触发记账步；记账那次采样成功的话，`end_turn` 只看最后一次采样，这一轮的
+/// 失败就被盖成了「完成」。
+#[tokio::test]
+async fn a_failed_sample_skips_turn_end_and_stays_failed() {
+    let b = boot_recorded(|i| match i {
+        0 => call_tool("c0", "todo_write", OPEN_LIST),
+        1 => LlmOutput {
+            error: Some("HTTP 429 Too Many Requests".into()),
+            ..LlmOutput::default()
+        },
+        _ => call_tool("c2", "todo_write", CLOSE_LIST),
+    })
+    .await;
+    assert_eq!(b.run("干活").await, TurnOutcome::Text(String::new()));
+    assert_eq!(b.samples(), 2, "出错之后不再采样");
+    assert_eq!(b.bookkeeping(), 0, "出错的一轮不记账");
+    assert_eq!(
+        last_turn_end(&b.root),
+        Some(cordis_spine::TurnEndStatus::Failed(
+            "HTTP 429 Too Many Requests".into()
+        ))
+    );
+}
+
 /// The model ignores the bookkeeping step (answers with text again): the turn
 /// still ends after that one step — no second round, no work.
 #[tokio::test]

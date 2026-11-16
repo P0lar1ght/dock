@@ -927,8 +927,10 @@ pub struct TurnEnd {
     /// How many times this turn has already been continued. Handlers use it to
     /// self-limit; the loop's own cap is a backstop, not a budget to lean on.
     pub rounds: usize,
-    /// False = the step budget ran out (the model is stuck in a tool loop),
-    /// not a normal text ending.
+    /// True = the model answered with non-empty text and no tool calls. False =
+    /// the step budget ran out (the model is stuck in a tool loop). The loop
+    /// never runs `agent/turn-end` on a failed request or on a sample that
+    /// carried nothing but reasoning, so `true` really means "it answered".
     pub ended_with_text: bool,
     /// The user already queued the next message. Handlers **must** respect
     /// this: when the user is steering, do not grab the wheel.
