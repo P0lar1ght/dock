@@ -49,9 +49,13 @@ pub fn search_memory_with_config(
 ) -> Result<Vec<SearchHit>, String> {
     let db = root.search_db();
     let missing = !db.exists();
-    let dims = query_embedding.map(|e| e.len()).unwrap_or(1024);
-    let mut index =
-        MemoryIndex::open_or_create_with_dimensions(&db, dims).map_err(|e| e.to_string())?;
+    // 没有查询嵌入就是纯全文检索：不指定维度，沿用库里已有的（否则会被当成换了维度，
+    // 把存好的向量全清掉）。
+    let mut index = match query_embedding {
+        Some(embedding) => MemoryIndex::open_or_create_with_dimensions(&db, embedding.len()),
+        None => MemoryIndex::open_or_create(&db),
+    }
+    .map_err(|e| e.to_string())?;
     if missing || index.is_empty() {
         let _ = index.reindex_tree(root);
     }
@@ -558,6 +562,39 @@ mod tests {
         assert!(
             hits.iter().any(|h| h.text.contains("Keybindings")),
             "expected the real note, not just scaffold; hits={hits:?}"
+        );
+    }
+
+    /// 查询嵌入拿不到（没配、或嵌入接口这一次失败）时走纯全文检索：这一次查询不能把库里
+    /// 按别的维度存好的向量清掉。
+    #[tokio::test]
+    async fn fts_only_search_keeps_stored_embeddings() {
+        use crate::embedding::{embed_missing_chunks, MockEmbeddingProvider};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = MemoryRoot::open(tmp.path(), Path::new("/tmp/fts-keeps-vec"));
+        root.ensure_layout().unwrap();
+        std::fs::write(
+            root.workspace.topics.join("vec.md"),
+            "## Vectors\n\nsemantic search needs embeddings\n",
+        )
+        .unwrap();
+        {
+            let mut idx =
+                MemoryIndex::open_or_create_with_dimensions(&root.search_db(), 8).unwrap();
+            let _ = idx.reindex_tree(&root);
+            if !idx.vec_available() {
+                return;
+            }
+            let provider = MockEmbeddingProvider { dimensions: 8 };
+            assert!(embed_missing_chunks(&idx, &provider).await >= 1);
+        }
+        let hits = search_memory(&root, "semantic embeddings", 5).unwrap();
+        assert!(!hits.is_empty());
+        let idx = MemoryIndex::open_or_create_with_dimensions(&root.search_db(), 8).unwrap();
+        assert!(
+            idx.chunks_without_embeddings().unwrap().is_empty(),
+            "没带查询嵌入的一次检索把向量表重建了"
         );
     }
 }
