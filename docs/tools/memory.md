@@ -79,7 +79,7 @@ Memory **启用**时两颗工具 `register` 进 sampler 工具表（模型可直
 - 用户：直接编辑笔记文件。
 
 `memory_get` 的 `path` 可以直接给 `[[链接]]`、笔记名，
-或索引里那种相对路径（`topics/prefs.md`）。
+或索引里那种相对路径（`topics/prefs.md`）；相对路径一律按笔记引用找，不看进程的当前目录。
 在全局和当前工作区里找；回包的 `**File:**` 是解析出来的真实路径。
 
 实现：`dock-memory/src/links.rs`（解析与改写）、`vault.rs`（对到具体文件）。
