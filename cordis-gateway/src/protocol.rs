@@ -114,6 +114,10 @@ pub const CAPABILITIES: &[(&str, bool)] = &[
     // `mcp/app/view/expose|result` + 推送 `mcp/app/view/call`（只推受信连接）：界面自己登记的
     // 工具（规范 `appCapabilities.tools`）交给模型，模型调用时由桌面端交给界面跑。
     ("mcpAppViewTools", true),
+    // `memory/graph|search` + `memory/note/get|save|create|rename|move|forget` +
+    // `memory/link|unlink` + 推送 `memory/changed`：记忆笔记的关系图（`[[链接]]` 与相似建议）
+    // 和在界面里管理笔记。只认受信连接。
+    ("memoryGraph", true),
 ];
 
 pub fn capabilities_object() -> Value {
@@ -156,6 +160,19 @@ pub const SCHEDULE_UPDATE: &str = "schedule/update";
 pub const SCHEDULE_DELETE: &str = "schedule/delete";
 /// 连接级推送（不用订阅线程）：定时任务变了，重拉 `schedule/list`。
 pub const SCHEDULE_CHANGED: &str = "schedule/changed";
+/// 记忆图谱与笔记管理（只给受信连接，见 `handlers/memory.rs`）。
+pub const MEMORY_GRAPH: &str = "memory/graph";
+pub const MEMORY_SEARCH: &str = "memory/search";
+pub const MEMORY_NOTE_GET: &str = "memory/note/get";
+pub const MEMORY_NOTE_SAVE: &str = "memory/note/save";
+pub const MEMORY_NOTE_CREATE: &str = "memory/note/create";
+pub const MEMORY_NOTE_RENAME: &str = "memory/note/rename";
+pub const MEMORY_NOTE_MOVE: &str = "memory/note/move";
+pub const MEMORY_NOTE_FORGET: &str = "memory/note/forget";
+pub const MEMORY_LINK: &str = "memory/link";
+pub const MEMORY_UNLINK: &str = "memory/unlink";
+/// 连接级推送（只推受信连接）：有记忆笔记变了，重拉 `memory/graph`。
+pub const MEMORY_CHANGED: &str = "memory/changed";
 pub const SURFACE_LIST: &str = "surface/list";
 pub const SURFACE_GET: &str = "surface/get";
 pub const SURFACE_ACTION: &str = "surface/action";

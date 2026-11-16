@@ -84,5 +84,6 @@ id 只在 `MemoryVault::entry` 里换成磁盘路径，换之前逐段校验、�
 ## 相关文档
 
 - 工具面（工具表、开关、参数、链接语法、图谱）：`docs/tools/memory.md`
+- dock.1 的 `memory/*`：`cordis-gateway/README.md`「记忆图谱」
 - 布局与配置键：根 `AGENTS.md`、`config.toml.example`
 - 消费侧（spine 挂载）：`cordis-spine/src/tools/memory/mod.rs`

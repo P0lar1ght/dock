@@ -139,5 +139,6 @@ pub fn features() -> Vec<Plugin> {
         crate::handlers::status::gateway_status(),
         crate::handlers::tool_view::gateway_tool_views(),
         crate::handlers::plugin_settings::gateway_plugin_settings(),
+        crate::handlers::memory::gateway_memory(),
     ]
 }

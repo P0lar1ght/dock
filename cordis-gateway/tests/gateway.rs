@@ -8080,3 +8080,535 @@ async fn turn_changes_project_list_diff_and_revert() {
         "{missing}"
     );
 }
+
+/// 这个测试二进制共用的记忆目录（`$DOCK_HOME/memory`）。每个用例用自己项目目录算出来的
+/// 工作区 scope，互不相干；全局 scope 是共用的，断言只看自己写的那几篇。
+fn memory_home() -> std::path::PathBuf {
+    isolated_home();
+    std::path::PathBuf::from(std::env::var("DOCK_HOME").unwrap()).join("memory")
+}
+
+fn write_memory(rel: &str, body: &str) {
+    let path = memory_home().join(rel);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, body).unwrap();
+}
+
+/// `dir` 这个项目的工作区 scope id（和网关按 `cwd` 算出来的是同一个）。
+fn memory_scope(dir: &std::path::Path) -> String {
+    format!("workspace-{}", dock_memory::workspace_slug(dir))
+}
+
+/// 记忆页：笔记投成图。`[[链接]]` 是有方向的边，指向不存在的笔记的单列出来，内容相近
+/// 又没链上的是建议边；默认范围是「全局 + 当前项目」，别的项目的笔记要点名或 `all` 才有。
+#[tokio::test]
+async fn memory_graph_projects_notes_links_and_suggestions() {
+    let root = harness_root().await;
+    let (addr, ticket, _serve) = serve_trusted(&root).await;
+    let (mut gui, _) = Rpc::connect_as(addr, &ticket, GUI_ORIGIN).await;
+    let init = gui.call("initialize", json!({})).await;
+    assert_eq!(
+        init["result"]["capabilities"]["memoryGraph"], true,
+        "{init}"
+    );
+
+    let dir = project_dir("mem-graph");
+    let scope = memory_scope(&dir);
+    let other = memory_scope(&project_dir("mem-graph-other"));
+    let audit = "审计日志降噪，AuditApplicationService.record 是唯一入口，补全结构化字段。";
+    write_memory(
+        &format!("{scope}/topics/auth.md"),
+        "# 登录方案\n\n用 JWT，刷新见 [[refresh-token]]，还有 [[没写的笔记]]。\n",
+    );
+    write_memory(
+        &format!("{scope}/observations/_inbox/refresh-token.md"),
+        "# 刷新令牌\n\n回头看 [[auth]]。\n",
+    );
+    write_memory(
+        &format!("{scope}/topics/audit-a.md"),
+        &format!("# 审计日志改造\n\n{audit}\n"),
+    );
+    write_memory(
+        &format!("{scope}/observations/_inbox/flush-20261115-131605.md"),
+        &format!("## Decisions & rationale\n- {audit}\n"),
+    );
+    write_memory(
+        &format!("{other}/topics/elsewhere.md"),
+        "# 别的项目\n\n引用 [[auth]]。\n",
+    );
+    write_memory("global/topics/mem-graph-prefs.md", "# 图谱用例的偏好\n");
+
+    // 只看这个项目：结果完全由上面几篇决定。
+    let only = gui
+        .call(
+            "memory/graph",
+            json!({ "cwd": dir.display().to_string(), "scopes": [scope] }),
+        )
+        .await;
+    let result = &only["result"];
+    assert_eq!(result["currentScope"], json!(scope), "{only}");
+    assert_eq!(result["enabled"], false, "记忆默认是关的：{only}");
+    assert_eq!(
+        result["home"],
+        json!(memory_home().display().to_string()),
+        "{only}"
+    );
+    let id = |rel: &str| format!("{scope}/{rel}");
+    let notes = result["notes"].as_array().unwrap();
+    let note = |rel: &str| {
+        notes
+            .iter()
+            .find(|n| n["id"] == json!(id(rel)))
+            .unwrap_or_else(|| panic!("图上没有 {rel}：{only}"))
+    };
+    assert_eq!(notes.len(), 4, "{only}");
+    let auth = note("topics/auth.md");
+    assert_eq!(auth["title"], "登录方案", "{only}");
+    assert_eq!(auth["kind"], "topic", "{only}");
+    assert_eq!(auth["name"], "auth", "{only}");
+    assert_eq!(auth["writable"], true, "{only}");
+    assert!(auth.get("text").is_none(), "图上的点不带正文：{only}");
+    let flush = note("observations/_inbox/flush-20261115-131605.md");
+    assert_eq!(flush["origin"], "flush", "{only}");
+    assert_eq!(flush["kind"], "observation", "{only}");
+    assert!(
+        flush["title"].as_str().unwrap().starts_with("审计日志降噪"),
+        "flush 摘要没有一级标题，取第一行正文：{only}"
+    );
+
+    let edges = result["edges"].as_array().unwrap();
+    let has = |kind: &str, source: &str, target: &str| {
+        edges.iter().any(|e| {
+            e["kind"] == kind
+                && e["source"] == json!(id(source))
+                && e["target"] == json!(id(target))
+        })
+    };
+    assert!(
+        has(
+            "link",
+            "topics/auth.md",
+            "observations/_inbox/refresh-token.md"
+        ),
+        "{only}"
+    );
+    assert!(
+        has(
+            "link",
+            "observations/_inbox/refresh-token.md",
+            "topics/auth.md"
+        ),
+        "{only}"
+    );
+    assert!(
+        has(
+            "similar",
+            "observations/_inbox/flush-20261115-131605.md",
+            "topics/audit-a.md"
+        ),
+        "两篇审计笔记内容相近，应该有一条建议：{only}"
+    );
+    assert_eq!(
+        edges.iter().filter(|e| e["kind"] == "link").count(),
+        2,
+        "{only}"
+    );
+    assert_eq!(
+        result["unresolved"],
+        json!([{ "source": id("topics/auth.md"), "target": "没写的笔记" }]),
+        "{only}"
+    );
+    // 不算相似度：只剩链接。
+    let plain = gui
+        .call(
+            "memory/graph",
+            json!({ "scopes": [scope], "similar": false }),
+        )
+        .await;
+    assert!(
+        plain["result"]["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|e| e["kind"] == "link"),
+        "{plain}"
+    );
+    assert_eq!(plain["result"]["currentScope"], Value::Null, "{plain}");
+
+    // 默认范围：全局 + 当前项目。别的项目列在概况里，但笔记不在图上。
+    let current = gui
+        .call("memory/graph", json!({ "cwd": dir.display().to_string() }))
+        .await;
+    let scopes = current["result"]["scopes"].as_array().unwrap();
+    let summary = |id: &str| {
+        scopes
+            .iter()
+            .find(|s| s["id"] == id)
+            .unwrap_or_else(|| panic!("概况里没有 {id}：{current}"))
+    };
+    assert_eq!(summary(&scope)["current"], true, "{current}");
+    assert_eq!(summary(&scope)["selected"], true, "{current}");
+    assert_eq!(summary(&scope)["kind"], "workspace", "{current}");
+    assert_eq!(
+        (
+            summary(&scope)["topics"].clone(),
+            summary(&scope)["observations"].clone()
+        ),
+        (json!(2), json!(2)),
+        "{current}"
+    );
+    assert_eq!(summary("global")["selected"], true, "{current}");
+    assert_eq!(summary(&other)["selected"], false, "{current}");
+    assert_eq!(summary(&other)["current"], false, "{current}");
+    let ids: Vec<&str> = current["result"]["notes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n["id"].as_str().unwrap())
+        .collect();
+    assert!(ids.contains(&"global/topics/mem-graph-prefs.md"), "{ids:?}");
+    assert!(ids.contains(&id("topics/auth.md").as_str()), "{ids:?}");
+    assert!(ids.iter().all(|i| !i.starts_with(&other)), "{ids:?}");
+
+    // 全部项目：别的项目那篇引用 auth 的也连上了。
+    let all = gui.call("memory/graph", json!({ "scopes": "all" })).await;
+    assert!(
+        all["result"]["edges"].as_array().unwrap().iter().any(|e| {
+            e["kind"] == "link"
+                && e["source"] == json!(format!("{other}/topics/elsewhere.md"))
+                && e["target"] == json!(id("topics/auth.md"))
+        }),
+        "{all}"
+    );
+
+    // 按内容找：每个词都要有，范围同图。
+    let found = gui
+        .call(
+            "memory/search",
+            json!({ "query": "jwt 刷新", "scopes": [scope] }),
+        )
+        .await;
+    assert_eq!(
+        found["result"]["hits"],
+        json!([{ "id": id("topics/auth.md"), "line": 3, "snippet": "用 JWT，刷新见 [[refresh-token]]，还有 [[没写的笔记]]。" }]),
+        "{found}"
+    );
+
+    for (params, what) in [
+        (json!({ "scopes": "everything" }), "scopes 的值"),
+        (json!({ "scopes": [1] }), "scopes 数组的元素"),
+        (json!({ "cwd": "relative/dir" }), "相对路径的 cwd"),
+    ] {
+        let bad = gui.call("memory/graph", params).await;
+        assert_eq!(
+            bad["error"]["details"]["code"], "invalid_params",
+            "{what}：{bad}"
+        );
+    }
+}
+
+/// 记忆页里管理笔记：新建、读（带出链 / 反链）、保存（期间被改过回 `conflict`）、改名
+/// （指向它的链接跟着改写）、观察升为主题、建链 / 断链、遗忘。只读的和越界的 id 拒绝。
+#[tokio::test]
+async fn memory_notes_are_managed_through_the_gateway() {
+    let root = harness_root().await;
+    let (addr, ticket, _serve) = serve_trusted(&root).await;
+    let (mut gui, _) = Rpc::connect_as(addr, &ticket, GUI_ORIGIN).await;
+    let _ = gui.call("initialize", json!({})).await;
+    let dir = project_dir("mem-notes");
+    let scope = memory_scope(&dir);
+    let id = |rel: &str| format!("{scope}/{rel}");
+    let on_disk = |rel: &str| std::fs::read_to_string(memory_home().join(&scope).join(rel));
+
+    // 这个项目还没有任何记忆：新建第一篇会把目录建好。
+    let created = gui
+        .call(
+            "memory/note/create",
+            json!({ "scope": scope, "kind": "observation", "title": "登录 方案", "text": "用 JWT。" }),
+        )
+        .await;
+    let auth = created["result"]["note"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(auth, id("observations/_inbox/登录-方案.md"), "{created}");
+    assert_eq!(
+        created["result"]["note"]["text"], "# 登录 方案\n\n用 JWT。\n",
+        "{created}"
+    );
+    let plan = gui
+        .call(
+            "memory/note/create",
+            json!({ "scope": scope, "title": "计划", "text": "依赖 [[登录-方案]] 和 [[还没写]]。" }),
+        )
+        .await;
+    let plan = plan["result"]["note"]["id"].as_str().unwrap().to_string();
+    assert_eq!(plan, id("topics/计划.md"));
+    assert!(
+        on_disk("MEMORY.md").unwrap().contains("计划"),
+        "索引要跟着重新生成"
+    );
+
+    // 读：全文 + 指纹 + 出链 / 反链。
+    let got = gui.call("memory/note/get", json!({ "id": auth })).await;
+    let hash = got["result"]["note"]["hash"].as_str().unwrap().to_string();
+    assert_eq!(got["result"]["note"]["title"], "登录 方案", "{got}");
+    assert_eq!(
+        got["result"]["links"]["backlinks"],
+        json!([{ "id": plan, "title": "计划", "context": "依赖 [[登录-方案]] 和 [[还没写]]。", "line": 3 }]),
+        "{got}"
+    );
+    let got_plan = gui.call("memory/note/get", json!({ "id": plan })).await;
+    assert_eq!(
+        got_plan["result"]["links"]["outgoing"][0]["id"],
+        json!(auth),
+        "{got_plan}"
+    );
+    assert_eq!(
+        got_plan["result"]["links"]["unresolved"],
+        json!(["还没写"]),
+        "{got_plan}"
+    );
+    assert_eq!(
+        got_plan["result"]["links"]["targets"],
+        json!([{ "target": "登录-方案", "id": auth }, { "target": "还没写", "id": null }]),
+        "{got_plan}"
+    );
+
+    // 保存：带着打开时的指纹；别人先改了就回 conflict，盘上的不动。
+    let saved = gui
+        .call(
+            "memory/note/save",
+            json!({ "id": auth, "text": "# 登录 方案\n\n用 JWT，access 15 分钟。", "baseHash": hash }),
+        )
+        .await;
+    assert_eq!(
+        saved["result"]["note"]["text"], "# 登录 方案\n\n用 JWT，access 15 分钟。\n",
+        "{saved}"
+    );
+    let stale = gui
+        .call(
+            "memory/note/save",
+            json!({ "id": auth, "text": "覆盖", "baseHash": hash }),
+        )
+        .await;
+    assert_eq!(stale["error"]["details"]["code"], "conflict", "{stale}");
+    assert!(on_disk("observations/_inbox/登录-方案.md")
+        .unwrap()
+        .contains("access 15 分钟"));
+
+    // 改文件名：计划里的链接跟着改写。
+    let renamed = gui
+        .call(
+            "memory/note/rename",
+            json!({ "id": auth, "title": "登录与刷新", "name": "auth" }),
+        )
+        .await;
+    let auth = id("observations/_inbox/auth.md");
+    assert_eq!(renamed["result"]["note"]["id"], json!(auth), "{renamed}");
+    assert_eq!(
+        renamed["result"]["oldId"],
+        json!(id("observations/_inbox/登录-方案.md")),
+        "{renamed}"
+    );
+    assert_eq!(renamed["result"]["relinked"], json!([plan]), "{renamed}");
+    assert_eq!(
+        renamed["result"]["note"]["title"], "登录与刷新",
+        "{renamed}"
+    );
+    assert_eq!(
+        on_disk("topics/计划.md").unwrap(),
+        "# 计划\n\n依赖 [[auth]] 和 [[还没写]]。\n"
+    );
+
+    // 观察升为主题：文件名没变，链接不用动。
+    let promoted = gui
+        .call("memory/note/move", json!({ "id": auth, "kind": "topic" }))
+        .await;
+    let auth = id("topics/auth.md");
+    assert_eq!(promoted["result"]["note"]["id"], json!(auth), "{promoted}");
+    assert_eq!(promoted["result"]["note"]["kind"], "topic", "{promoted}");
+    assert_eq!(promoted["result"]["relinked"], json!([]), "{promoted}");
+
+    // 建链（写进「相关」一节）/ 重复建不变 / 断链 / 去掉悬空的那条。
+    let linked = gui
+        .call("memory/link", json!({ "from": auth, "to": plan }))
+        .await;
+    assert_eq!(linked["result"]["changed"], true, "{linked}");
+    assert!(
+        linked["result"]["note"]["text"]
+            .as_str()
+            .unwrap()
+            .ends_with("## 相关\n\n- [[计划]]\n"),
+        "{linked}"
+    );
+    let again = gui
+        .call("memory/link", json!({ "from": auth, "to": plan }))
+        .await;
+    assert_eq!(again["result"]["changed"], false, "{again}");
+    let unlinked = gui
+        .call("memory/unlink", json!({ "from": auth, "to": plan }))
+        .await;
+    assert_eq!(unlinked["result"]["changed"], true, "{unlinked}");
+    assert!(
+        !unlinked["result"]["note"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("相关"),
+        "{unlinked}"
+    );
+    let dangling = gui
+        .call("memory/unlink", json!({ "from": plan, "target": "还没写" }))
+        .await;
+    assert_eq!(
+        dangling["result"]["note"]["text"], "# 计划\n\n依赖 [[auth]] 和 还没写。\n",
+        "{dangling}"
+    );
+
+    // 遗忘：指纹对不上不删；对上了挪进归档，再读就没有了。
+    let wrong = gui
+        .call("memory/note/forget", json!({ "id": plan, "hash": "0000" }))
+        .await;
+    assert_eq!(wrong["error"]["details"]["code"], "conflict", "{wrong}");
+    let hash = dangling["result"]["note"]["hash"].as_str().unwrap();
+    let forgotten = gui
+        .call("memory/note/forget", json!({ "id": plan, "hash": hash }))
+        .await;
+    let archived = forgotten["result"]["archivedTo"].as_str().unwrap();
+    assert!(
+        archived.starts_with(
+            &memory_home()
+                .join(&scope)
+                .join("archive")
+                .display()
+                .to_string()
+        ),
+        "{forgotten}"
+    );
+    assert!(std::path::Path::new(archived).is_file(), "{forgotten}");
+    let gone = gui.call("memory/note/get", json!({ "id": plan })).await;
+    assert_eq!(gone["error"]["details"]["code"], "not_found", "{gone}");
+
+    // 只读的笔记（嵌套目录）和走出记忆目录的 id。
+    write_memory(&format!("{scope}/topics/nested/deep.md"), "# 嵌套\n");
+    let read_only = gui
+        .call(
+            "memory/note/save",
+            json!({ "id": id("topics/nested/deep.md"), "text": "x" }),
+        )
+        .await;
+    assert_eq!(
+        read_only["error"]["details"]["code"], "read_only",
+        "{read_only}"
+    );
+    for (method, params) in [
+        (
+            "memory/note/get",
+            json!({ "id": format!("{scope}/topics/../../../config.toml") }),
+        ),
+        ("memory/note/get", json!({ "id": id("MEMORY.md") })),
+        (
+            "memory/note/save",
+            json!({ "id": id("archive/计划.md"), "text": "x" }),
+        ),
+        (
+            "memory/note/create",
+            json!({ "scope": "../escape", "title": "x" }),
+        ),
+        (
+            "memory/note/create",
+            json!({ "scope": scope, "title": "  " }),
+        ),
+        ("memory/note/rename", json!({ "id": auth })),
+        ("memory/note/move", json!({ "id": auth })),
+        ("memory/note/move", json!({ "id": auth, "kind": "archive" })),
+        ("memory/note/save", json!({ "id": auth })),
+        ("memory/unlink", json!({ "from": auth })),
+        (
+            "memory/unlink",
+            json!({ "from": auth, "to": plan, "target": "x" }),
+        ),
+        ("memory/link", json!({ "from": auth, "to": auth })),
+    ] {
+        let bad = gui.call(method, params.clone()).await;
+        assert_eq!(
+            bad["error"]["details"]["code"], "invalid_params",
+            "{method} {params}：{bad}"
+        );
+    }
+    assert!(!memory_home().join("escape").exists());
+}
+
+/// 记忆是跨项目的私人内容：配对来的网页读不了图、读不了笔记，更改不了。
+#[tokio::test]
+async fn paired_pages_cannot_read_or_change_memory() {
+    write_memory("global/topics/mem-private.md", "# 私人笔记\n");
+    let h = Harness::boot().await;
+    let ticket = h.pair_ticket().await;
+    let mut page = Rpc::connect(h.addr, &ticket).await;
+    let _ = page.call("initialize", json!({})).await;
+    for (method, params) in [
+        ("memory/graph", json!({ "scopes": "all" })),
+        ("memory/search", json!({ "query": "私人" })),
+        (
+            "memory/note/get",
+            json!({ "id": "global/topics/mem-private.md" }),
+        ),
+        (
+            "memory/note/save",
+            json!({ "id": "global/topics/mem-private.md", "text": "改掉" }),
+        ),
+        (
+            "memory/note/create",
+            json!({ "scope": "global", "title": "网页写的" }),
+        ),
+        (
+            "memory/note/forget",
+            json!({ "id": "global/topics/mem-private.md", "hash": "x" }),
+        ),
+    ] {
+        let denied = page.call(method, params).await;
+        assert_eq!(
+            denied["error"]["details"]["code"], "forbidden",
+            "{method}：{denied}"
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(memory_home().join("global/topics/mem-private.md")).unwrap(),
+        "# 私人笔记\n"
+    );
+}
+
+/// agent（或外部编辑器）直接改了记忆文件：看过图的受信连接收到 `memory/changed`，
+/// 界面据此重拉。没人看图之前不监听。
+#[tokio::test]
+async fn memory_changes_on_disk_are_pushed_to_the_gui() {
+    let root = harness_root().await;
+    let (addr, ticket, _serve) = serve_trusted(&root).await;
+    let (mut gui, _) = Rpc::connect_as(addr, &ticket, GUI_ORIGIN).await;
+    let _ = gui.call("initialize", json!({})).await;
+    let scope = memory_scope(&project_dir("mem-push"));
+    write_memory(&format!("{scope}/topics/before.md"), "# 之前就有\n");
+
+    let graph = gui.call("memory/graph", json!({ "scopes": [scope] })).await;
+    assert_eq!(
+        graph["result"]["notes"].as_array().unwrap().len(),
+        1,
+        "{graph}"
+    );
+    // 像 agent 的 write_file 那样直接落盘。
+    write_memory(
+        &format!("{scope}/observations/_inbox/fresh.md"),
+        "# 刚写的观察\n",
+    );
+    let pushed = gui
+        .wait_notification("memory/changed", Duration::from_secs(15))
+        .await;
+    assert!(pushed["params"].is_object(), "{pushed}");
+    let after = gui.call("memory/graph", json!({ "scopes": [scope] })).await;
+    assert_eq!(
+        after["result"]["notes"].as_array().unwrap().len(),
+        2,
+        "{after}"
+    );
+}

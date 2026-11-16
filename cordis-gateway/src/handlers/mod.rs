@@ -8,6 +8,7 @@ pub mod fs;
 pub mod image_inputs;
 pub mod interaction;
 pub mod mcp_app;
+pub mod memory;
 pub mod permission;
 pub mod plugin_settings;
 pub mod preset;
