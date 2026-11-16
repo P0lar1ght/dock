@@ -10,7 +10,9 @@ pub enum Error {
     #[error("agent/pre-step rejected the prompt")]
     PreStepRejected,
 
-    /// 循环已经没有步数上限，现在不会再产生；留着是因为它在公开的 `Error` 里。
+    /// 循环已经没有步数上限，现在不会再产生。留着只是让已经写了 `MaxSteps` 分支的
+    /// 代码还能编过；新增的 [`Error::Stationary`] 仍会让没有通配分支的穷尽 `match`
+    /// 编不过（`Error` 没有 `#[non_exhaustive]`）。
     #[error("loop exceeded {max} sampling steps without a text reply")]
     MaxSteps { max: usize },
 
