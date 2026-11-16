@@ -63,6 +63,8 @@ const TRUSTED_PREFIXES: &[&str] = &[
     "cua/",
     // 订阅通道：登录 / 登出 = 能改本机凭据。
     "auth/",
+    // 记忆笔记：跨项目的私人内容，agent 每一步都会读它的索引。
+    "memory/",
 ];
 const TRUSTED_NAMES: &[&str] = &[
     "browser/status",
@@ -252,7 +254,14 @@ mod tests {
     fn settings_namespaces_must_be_trusted() {
         let table = GatewayMethods::default();
         let noop = method(|_, _| async { Ok(Value::Null) });
-        for name in ["secret/peek", "mcp/save", "config/set", "skill/list"] {
+        for name in [
+            "secret/peek",
+            "mcp/save",
+            "config/set",
+            "skill/list",
+            "memory/graph",
+            "memory/note/save",
+        ] {
             assert!(
                 table
                     .register(name, MethodPolicy::detached(), noop.clone())

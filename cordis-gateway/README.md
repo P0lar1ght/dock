@@ -83,6 +83,7 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 - 核心方法名（`rpc::CORE_METHODS`）登记不进来。
 - 设置页命名空间（`config/` `secret/` `mcp/` `model/` `plugin/` `pairing/` `device/`
   `cua/`、`browser/status`、`skill/list`）只能登记成 `trusted_only`。
+- `memory/`（记忆笔记）同样只能登记成 `trusted_only`。
 - 每个方法带 `MethodPolicy`：
   - `detached`：放到连接锁外跑；
   - `trusted_only`：只认受信连接——`dock serve` 交给父进程的 ticket，或设备令牌；
@@ -95,6 +96,7 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
   - `gateway.vcs`（`vcs/pr/*`）、`gateway.schedule`（`schedule/*`）
   - `gateway.surfaces`（`surface/*`）、`gateway.status`（`status/list`）
   - `gateway.toolViews`（`tool/views`、`tool/view`）、`gateway.pluginSettings`（`plugin/settings/*`）
+  - `gateway.memory`（`memory/*`，全部 `trusted_only`）
 - 功能插件推连接级通知用 `GatewayMethods::notify(method, params)`：
   `schedule/changed`、`surface/changed` 都是这么推的。
 - 方法按域分在 `handlers/`：
@@ -848,6 +850,61 @@ bash 里改的不算。轮次用投影里的 `turnId`（和 `item/user_message` 
 - `schedule/delete { id }` → `{ deleted }`；没有这个 id 回 `not_found`，`schedules.json` 读写失败（如文件写坏了）回 `store_failed`，不混成 `not_found`。
 - 推送 `schedule/changed {}`：**连接级**，初始化过就收到，不用订阅线程。任何一处改了（含模型的
   `scheduler_*`、别的 Dock 进程、到点触发）最多 1 秒后到；收到后重拉 `schedule/list`。
+
+### 记忆图谱（能力 `memoryGraph`，`handlers/memory.rs`）
+
+记忆笔记（`$DOCK_HOME/memory/` 下的 Markdown）投成一张图，并在界面里管理。
+引擎在 `dock-memory`；链接语法见 `docs/tools/memory.md`。
+
+**全部只认受信连接**：记忆是跨项目的私人内容。
+`memory/` 前缀和设置页命名空间一样，只能登记成 `trusted_only`。
+记忆功能关着也能看、能改；回包的 `enabled` / `forcedOff` 给界面画提示。
+
+笔记 id 是 `<scope>/<相对路径>`：`global/topics/prefs.md`、
+`workspace-dock-b4be1135/observations/_inbox/flush-….md`。
+`scope` 是记忆目录下那一层的目录名。改名 / 挪位置后 id 会变。
+
+- `memory/graph { cwd? | threadId?, scopes?, similar? }` → 整张图。只读，不建目录。
+  - `scopes`：`"current"`（默认：全局 + `cwd` / `threadId` 那个项目）、`"all"`、或 scope id 数组。
+  - `cwd` 是绝对路径，只用来算工作区 slug，不要求有会话。
+  - 回包：`enabled` / `forcedOff` / `home` / `currentScope` / `similarSkipped`，以及：
+  - `scopes[]`：`id` / `kind`（`global` | `workspace`）/ `label` / `current` / `selected` /
+    `topics` / `observations`。磁盘上所有 scope 都列，没选进图的也在。
+  - `notes[]`：`id` / `scope` / `kind`（`topic` | `observation`）/ `origin`
+    （`flush` | `remember` | `authored`）/ `name` / `title` / `summary` / `path` / `bytes` /
+    `modifiedMs` / `writable`，超长的带 `truncated`。不带正文。
+  - `edges[]`：`source` / `target` / `kind` / `score`。
+    `link` 是正文里的 `[[…]]`，有方向；`similar` 是相似建议，没有方向。
+  - `unresolved[]`：`{ source, target }`，指向不存在的笔记的链接。
+  - `similar: false` 不算相似度。
+- `memory/search { query, cwd? | threadId?, scopes?, limit? }` → `{ hits: [{ id, line, snippet }] }`。
+  按空白切词，每个词都要在标题或正文里出现。直接扫正文，不走检索库。
+- `memory/note/get { id, scopes? }` → `{ note, links }`。
+  - `note`：图上那些字段 + `text` + `hash`。
+  - `links.outgoing[]` / `links.backlinks[]`：`{ id, title, context, line }`，
+    `context` 是链接所在的那一行。反链默认在所有项目里找。
+  - `links.unresolved[]`：悬空链接的目标名。
+  - `links.targets[]`：`{ target, id }`，正文里每种写法指向的笔记（悬空为 `null`）。
+- `memory/note/save { id, text, baseHash? }` → `{ note }`。
+  `baseHash` 对不上回 `conflict`（期间被改过）；不给就直接覆盖。
+- `memory/note/create { scope, kind?, title, text? }` → `{ note }`。
+  文件名取自标题（中文标题就是中文文件名），重名加 `-2`。scope 目录没有会先建好。
+- `memory/note/rename { id, title?, name? }` → `{ note, oldId, relinked[] }`。
+  `title` 换正文的一级标题，`name` 换文件名；指向它的链接跟着改写。
+- `memory/note/move { id, scope?, kind? }` → `{ note, oldId, relinked[] }`。
+  挪到别的 scope，或观察升为主题。谁指向谁保持不变。
+- `memory/note/forget { id, hash }` → `{ archivedTo }`。
+  归档 + 墓碑 + 清检索条目，同 `/memory` 里的遗忘。`hash` 对不上回 `conflict`。
+- `memory/link { from, to }` → `{ note, changed }`：在 `from` 文末的「相关」一节加一条。
+- `memory/unlink { from, to | target }` → `{ note, changed }`。
+  `to` 是笔记 id；`target` 是悬空链接里写的名字。
+- 推送 `memory/changed {}`：**连接级**，只推受信连接。
+  有笔记变了就推（界面、agent、外部编辑器），250 毫秒内的合并成一次。
+  第一次 `memory/graph` 之后才开始监听；重写 `MEMORY.md` 不算。
+  那时记忆目录还没建就每 2 秒看一次，建出来再开始监听并推一次。
+
+错误码：`invalid_params`、`not_found`、`read_only`（嵌套目录、旧版平铺的观察）、
+`conflict`、`too_large`（超过 256 KiB）、`write_failed`。
 
 ### 插件面板（能力 `surfaces`，`handlers/surface.rs`）
 
