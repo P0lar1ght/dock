@@ -31,6 +31,19 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 /// cap so a runaway tool loop can still be Esc-cancelled and leaves a visible
 /// note instead of hanging. The old cap of 8 cut ordinary coding turns short.
 const MAX_STEPS: usize = 256;
+/// 连着几次采样都是 [`Sampled::Empty`] 就停下。
+///
+/// 只回了推理的一步什么都没交出来；重采是一次新的请求，算一步。连着这么多次
+/// 都这样，就当这条线上的模型答不出东西，按失败收尾，跟 [`MAX_STEPS`] 一样看得
+/// 见而不是静音。中间只要有一步交出了东西就重新数。
+const MAX_EMPTY_SAMPLES: usize = 3;
+/// 空采样之后、重采之前落的提醒。
+///
+/// 不能原样重采：chat wire 在推理或 `thinking_blocks` 非空时、messages wire 在
+/// `thinking_blocks` 非空时，会把这一步回放成一条空正文的 assistant 消息，请求就以
+/// 它结尾（responses wire 直接丢掉这一步）。落一条 user 角色的提醒，消息照常一来
+/// 一回，也告诉模型上一步什么都没交出来（常见成因是把工具调用写进了推理）。
+const EMPTY_SAMPLE_REMINDER: &str = "<system-reminder>\n上一步只有推理，没有正文也没有工具调用，什么都没有交出来。接着做你打算做的下一步：要调用工具就用工具调用发出来（不要写在推理里）；已经做完了就直接回复。\n</system-reminder>";
 /// Hard stop on `agent/turn-end` continuations. Handlers self-limit, but
 /// continuation is plugin-territory now (a dynamic Cordis plugin on disk can
 /// register one), so the loop keeps its own backstop. Esc — the per-step
@@ -144,6 +157,9 @@ async fn grok_sample_loop(
     let mut rounds = 0usize;
     let mut steps = 0usize;
     let mut last_text = String::new();
+    // 连着几次 [`Sampled::Empty`]。交出东西的一步（工具调用或正文）清零；跨
+    // turn-end 续跑不清零，要清也得先有一步正文。
+    let mut empty_streak = 0usize;
     loop {
         tokio::task::yield_now().await;
         let mut ended_with_text = false;
@@ -205,14 +221,41 @@ async fn grok_sample_loop(
                 )
                 .await;
             abort_if_cancelled(ctx, sessions)?;
-            if output.tool_calls.is_empty() {
-                last_text = output.text;
-                ended_with_text = true;
-                break;
-            }
+            // 只有 `Reply` 是模型要把控制权交回去，`agent/turn-end` 只在它上面
+            // 投票。另外两种不交出东西的结局直接收尾：在它们上面跑 turn-end 的话，
+            // todo 记账会把「什么都没说」当成「答完了」，记完账这一轮就结束。
+            let calls = match Sampled::of(output) {
+                Sampled::Tools(calls) => calls,
+                Sampled::Reply(text) => {
+                    empty_streak = 0;
+                    last_text = text;
+                    ended_with_text = true;
+                    break;
+                }
+                Sampled::Empty => {
+                    empty_streak += 1;
+                    if empty_streak >= MAX_EMPTY_SAMPLES {
+                        // 原因放 `error`：三条 wire 都不回放它，`end_turn` 和子代理
+                        // 照「本轮最后一次采样出错」记成失败。
+                        sessions.append(LogEvent::LlmStream(cordis_base::types::LlmOutput {
+                            error: Some(format!(
+                                "模型连续 {MAX_EMPTY_SAMPLES} 次只给了推理，没有正文也没有工具调用，已停下。发一条新消息可继续。"
+                            )),
+                            ..cordis_base::types::LlmOutput::default()
+                        }));
+                        return Ok(TurnOutcome::Text(String::new()));
+                    }
+                    sessions.append(LogEvent::SystemReminder(EMPTY_SAMPLE_REMINDER.into()));
+                    continue;
+                }
+                // 错误已经落在这次采样的事件里，`end_turn` / 子代理据此记失败。
+                // 这里再跑 turn-end 的话，记账那次采样成功就把这条错误盖掉了。
+                Sampled::Failed(text) => return Ok(TurnOutcome::Text(text)),
+            };
+            empty_streak = 0;
             // 连在一起的只读调用（读文件、搜索、看目录…）一起跑，别的一颗一颗跑，结果
             // 按模型给的顺序记（参考 Codex：能并行的拿读锁，别的拿写锁）。
-            for batch in parallel_batches(output.tool_calls) {
+            for batch in parallel_batches(calls) {
                 abort_if_cancelled(ctx, sessions)?;
                 let runs = batch.into_iter().map(|call| async move {
                     let arguments = call.arguments.clone();
@@ -299,6 +342,33 @@ async fn grok_sample_loop(
             ..cordis_base::types::LlmOutput::default()
         }));
         return Err(Error::MaxSteps { max: MAX_STEPS });
+    }
+}
+
+/// 一次采样交出了什么。循环只在 [`Sampled::Reply`] 上跑 `agent/turn-end`。
+enum Sampled {
+    /// 有工具调用就跑，不看 `error`。
+    Tools(Vec<cordis_base::types::ToolCall>),
+    /// 有正文、没有工具调用：模型要把控制权交回去。
+    Reply(String),
+    /// 正文（去掉空白）和工具调用都空，也没报错：只有推理，或者什么都没有。
+    /// 模型把工具调用写进了推理通道时就是这样。
+    Empty,
+    /// 请求失败（`LlmOutput::error`），带着出错前流出来的正文。
+    Failed(String),
+}
+
+impl Sampled {
+    fn of(output: cordis_base::types::LlmOutput) -> Self {
+        if !output.tool_calls.is_empty() {
+            Self::Tools(output.tool_calls)
+        } else if output.error.is_some() {
+            Self::Failed(output.text)
+        } else if output.text.trim().is_empty() {
+            Self::Empty
+        } else {
+            Self::Reply(output.text)
+        }
     }
 }
 

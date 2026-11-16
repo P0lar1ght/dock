@@ -205,12 +205,18 @@ system-prompt/assemble       每轮一次
 agent/step-start             每个采样步之前，一次
 llm/stream                   枢纽：出工具调用 → tools/pre-execute（改写 / 改道 / 拒绝）
                              → 计划门 / 权限门 → 工具体 → tools/execute → 回采样
-                             出文本（或采样步数耗尽）→ agent/turn-end
+                             出正文（或采样步数耗尽）→ agent/turn-end
+                             只有推理 → 落 <system-reminder> 重采；采样出错 → turn 结束
 agent/turn-end               有人要续跑 → 落 <system-reminder> 回到采样
                              没人要续跑 → turn 结束
 ```
 
 安全上限 256 步。换 driver 只换 `agent-loop` 插件，不动 actor。
+
+**只有回复才走 `agent/turn-end`。** 每次采样先分成四种（`agent/runtime.rs` 的 `Sampled`）：工具调用、回复（正文非空）、空（只有推理，正文和工具调用都空，也没报错）、出错（`LlmOutput.error`）。只有回复会走 `agent/turn-end`，所以 `TurnEnd.ended_with_text` 为真就是模型真答了；todo 记账、goal 续跑都靠这一条。以前后两种也被当成回复：模型把工具调用写进推理通道时，空采样被当成「答完了」，todo 清单还开着就插一步记账，模型记完账这一轮就结束，聊天框里什么都没有；请求出错时记账那次采样一成功，`end_turn` 只看最后一次采样，这一轮的失败就被盖成「完成」。
+
+- **空**：落一条 `<system-reminder>` 再采（算一步）。不原样重采是因为 chat wire（推理或 `thinking_blocks` 非空）和 messages wire（`thinking_blocks` 非空）会把这一步回放成空正文的 assistant 消息，原样重采的话请求以它结尾；responses wire 直接丢掉这一步。连着 `MAX_EMPTY_SAMPLES = 3` 次都空就按失败收尾：原因放 `error`（不进模型历史），`end_turn` 与子代理照「本轮最后一次采样出错」记失败（子代理交给父级的结果同样是失败，带这条原因）。中间有一步交出了东西就重新数。
+- **出错**：错误已经落在这次采样的事件里，直接收尾，不跑 `agent/turn-end`。goal 不受影响：actor 照常排 GoalSummary 续跑。
 
 **一次回复里的工具调用：只读的一起跑，别的一颗一颗跑。** 循环把 `tool_calls` 切成几批（`agent/runtime.rs` 的 `parallel_batches`）：连在一起的只读调用（读文件、搜索、看目录、查网页、读记忆、LSP、读技能、`search_tool`，以及只读的 bash 命令——判断同只读场景，`cordis_base::read_only_shell`）一批并发执行，别的每颗自成一批；批与批按顺序跑，结果按模型给的顺序落成 `ToolExecute`，所以「先改再读」的先后不变。分类在 `agent/capability.rs` 的 `parallel_safe`，认不出来的（MCP、动态包、浏览器）一律不并行。参考 Codex 的 `tools/parallel.rs`（能并行的拿读锁，别的拿写锁）。系统提示词同时要求彼此不依赖的调用放进同一次回复，少一来一回。
 
