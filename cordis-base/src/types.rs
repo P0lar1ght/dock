@@ -681,7 +681,10 @@ pub struct LlmOutput {
     /// [`Self::reasoning`] 只给人看；回放给 Messages（及把 signature 塞进
     /// `reasoning_content` 的兼容 chat/completions）用这里。Responses 路径忽略。
     pub thinking_blocks: Vec<ThinkingBlock>,
-    /// 本轮采样的失败详情（传输错误 / HTTP 状态码 + `request-id`）。
+    /// 本轮采样的失败详情（传输错误 / HTTP 状态码 + `request-id`），或者 agent
+    /// 循环自己停下这一轮的说明——那时 [`Self::stopped_by_loop`] 为真。所以「有
+    /// `error`」只说明这一轮失败了，**不等于请求失败**；给人看的标题要看
+    /// `stopped_by_loop`。
     ///
     /// **刻意不放进 [`Self::text`]**：`text` 会被三条 wire builder 当成助手消息
     /// 回放给模型，于是「llm request failed: …」会变成模型自己说过的一句话，
