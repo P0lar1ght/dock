@@ -1,7 +1,7 @@
 // 图谱设置面板（画布右上角的齿轮）：着色、显示、力导向三节，改了立即生效、记在本机。
 // 开着也能照常在图上点、拖：边调边看效果。
 
-import { useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
 import { ChevronRight, Plus, RotateCcw, X } from "lucide-react";
 import { Range, Toggle } from "../../components/settings/ui";
 import { freeSlot, GROUP_SLOTS, MAX_GROUPS, RANGES, resetGraphSettings, setGraphSettings, type ColorGroup, type GraphSettings } from "./settings";
@@ -19,6 +19,17 @@ export function GraphSettingsPanel({
   onClose: () => void;
 }) {
   const [open, setOpen] = useState({ groups: true, display: true, forces: false });
+  // Esc 先关面板：焦点在画布上时也是。标成已处理（preventDefault），抽屉看到就让出这一下——
+  // 两边都在 window 上听，谁先收到不一定（抽屉每次渲染都会重新挂监听）。
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || e.defaultPrevented) return;
+      e.preventDefault();
+      onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
   const toggle = (key: keyof typeof open) => setOpen((o) => ({ ...o, [key]: !o[key] }));
   const groups = settings.groups;
   const setGroups = (next: ColorGroup[]) => setGraphSettings({ groups: next });
@@ -33,10 +44,10 @@ export function GraphSettingsPanel({
   return (
     <div
       role="dialog"
+      data-graph-settings
       aria-label="图谱设置"
       className="glass-popover pop-in absolute z-20 flex max-h-[calc(100%-136px)] w-[284px] flex-col overflow-hidden rounded-xl border border-line-strong bg-white/95 shadow-[0px_8px_28px_rgba(0,0,0,0.12)] backdrop-blur-xl"
       style={{ ...style, transformOrigin: "top right" }}
-      onKeyDown={(e) => e.key === "Escape" && (e.stopPropagation(), onClose())}
     >
       <div className="flex h-10 shrink-0 items-center gap-1 border-b border-line-soft pl-3.5 pr-1.5">
         <span className="flex-1 text-[13px] font-semibold text-ink">图谱设置</span>

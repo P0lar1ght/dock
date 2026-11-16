@@ -114,6 +114,7 @@ export function NoteDrawer({
   useEffect(() => {
     let live = true;
     // 正在改这一篇的时候不拿盘上的新版本盖掉草稿；保存时对不上指纹会提示。
+    // 退出编辑时（`editing` 变了）再读一次：编辑期间盘上可能已经被改过。
     if (editingRef.current) return;
     noteGet(id)
       .then((d) => {
@@ -131,7 +132,7 @@ export function NoteDrawer({
       live = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id, revision]);
+  }, [id, revision, editing]);
 
   const note = detail?.note.id === id ? detail.note : null;
   const links = detail?.note.id === id ? detail.links : null;
@@ -206,10 +207,13 @@ export function NoteDrawer({
   // Esc：先退出编辑（没改过的话），再关抽屉。弹窗开着时它自己处理。
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Escape" || dialog) return;
+      // 别处已经处理了这一下 Esc（图谱设置面板先关自己）。
+      if (e.key !== "Escape" || dialog || e.defaultPrevented) return;
       // 抽屉里有菜单开着（更多、链接到…）：这一下 Esc 是关菜单的，别连抽屉一起关。
       // 局部图谱那种展开 / 收起的折叠按钮（data-disclosure）不算菜单。
       if (aside.current?.querySelector('[aria-expanded="true"]:not([data-disclosure])')) return;
+      // 图谱设置面板开着：这一下 Esc 归它（面板自己在 window 上听，可能排在后面）。
+      if (document.querySelector("[data-graph-settings]")) return;
       if (editing) {
         if (!dirty) setEditing(false);
         return;

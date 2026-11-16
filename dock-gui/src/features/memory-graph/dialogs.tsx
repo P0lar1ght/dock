@@ -1,6 +1,6 @@
 // 记忆页的弹窗：新建笔记、重命名、遗忘确认，以及点连线时冒出来的小卡片。
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ArrowLeftRight, Link2, Link2Off, LoaderCircle, Plus } from "lucide-react";
 import { ErrorLine, Modal, primaryButton, secondaryButton, Segmented, smallButton } from "../../components/settings/ui";
 import { imeComposing } from "../../dock/ime";
@@ -278,6 +278,7 @@ export function EdgeCard({
   source,
   target,
   at,
+  insetRight,
   onLink,
   onUnlink,
   onOpen,
@@ -287,6 +288,8 @@ export function EdgeCard({
   source: ViewNode;
   target: ViewNode;
   at: { x: number; y: number };
+  /** 右边被抽屉盖住的宽度。 */
+  insetRight: number;
   onLink: (from: string, to: string) => void;
   onUnlink: (from: string, to: string) => void;
   onOpen: (id: string) => void;
@@ -294,6 +297,18 @@ export function EdgeCard({
 }) {
   const [swapped, setSwapped] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState({ left: Math.max(8, at.x - 140), top: at.y + 12 });
+  // 量出卡片多大再摆：右边不伸到抽屉底下，下面放不下就翻到点击处上面。
+  useLayoutEffect(() => {
+    const card = ref.current;
+    const box = card?.parentElement;
+    if (!card || !box) return;
+    const [w, h] = [card.offsetWidth, card.offsetHeight];
+    const left = Math.max(8, Math.min(at.x - w / 2, box.clientWidth - insetRight - w - 8));
+    const below = at.y + 12;
+    const top = below + h > box.clientHeight - 8 ? Math.max(8, at.y - 12 - h) : below;
+    setPos({ left, top });
+  }, [at.x, at.y, insetRight, edge.kind]);
   useEffect(() => {
     const onDown = (e: MouseEvent) => !ref.current?.contains(e.target as Node) && onClose();
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
@@ -313,7 +328,7 @@ export function EdgeCard({
     <div
       ref={ref}
       className="glass-popover pop-in absolute z-10 flex w-[280px] flex-col gap-2 rounded-xl border border-line-strong bg-white p-3 shadow-[0px_8px_28px_rgba(0,0,0,0.12)]"
-      style={{ left: Math.max(8, at.x - 140), top: at.y + 12 }}
+      style={pos}
     >
       {edge.kind === "similar" ? (
         <>

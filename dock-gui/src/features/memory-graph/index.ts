@@ -2,7 +2,10 @@
 // 只在这里往宿主登记，宿主不 import 本目录。
 
 import { BrainCircuit } from "lucide-react";
-import { registerNavPage } from "../registry";
-import { MemoryPage } from "./MemoryPage";
+import { deferred } from "../deferred";
+import { registerNavPage, type NavPageProps } from "../registry";
 
-registerNavPage({ id: "memory", label: "记忆", icon: BrainCircuit, Page: MemoryPage });
+// 整页连同图谱引擎（d3-force）按需加载：启动路径上不带，第一次点开「记忆」才取。
+const page = deferred<NavPageProps>(() => import("./MemoryPage").then((m) => m.MemoryPage));
+
+registerNavPage({ id: "memory", label: "记忆", icon: BrainCircuit, Page: page.Viewer });

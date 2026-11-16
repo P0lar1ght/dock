@@ -159,6 +159,8 @@
 
 - 只走 dock.1 `memory/*`（features/memory-graph/api.ts）：不读本机磁盘，远程 Dock 的记忆不在本机。
 - 画布在 engine.ts（d3-force + Canvas 2D），不进 React 渲染循环；React 只交数据和选中状态。
+- 整页按需加载（index.ts 用 features/deferred）：别在别处静态 import MemoryPage。
+- 设置面板和抽屉都在 window 上听 Esc：先处理的 preventDefault，另一个看到就让出。
 - 点的颜色只分三类（当前项目 / 全局 / 其他项目）：图上任意两点都可能挨着，颜色多了分不清。
 - 按条件着色同理最多 3 组，用同一套三色；着色时没命中的变灰，不和范围色同时出现。
 - 主题 / 观察用实心 / 空心区分，别再加颜色；别的项目靠聚簇位置和直接标注的项目名区分。

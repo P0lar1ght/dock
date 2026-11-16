@@ -49,6 +49,11 @@ function titleMatches(graph: MemoryGraph, query: string): Set<string> {
 export function MemoryPage({ insetLeft, cwd, projects }: NavPageProps) {
   const remote = !!useApp().remote;
   const [project, setProject] = useState<string | null>(cwd ?? projects[0]?.path ?? null);
+  // 「当前项目」跟着侧栏当前会话的目录走（首屏 cwd 可能稍后才到）；页内自己挑过就不再跟。
+  const pickedProject = useRef(false);
+  useEffect(() => {
+    if (!pickedProject.current) setProject(cwd ?? projects[0]?.path ?? null);
+  }, [cwd, projects]);
   const [mode, setMode] = useState<ScopeMode>("current");
   const [graph, setGraph] = useState<MemoryGraph | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -254,6 +259,7 @@ export function MemoryPage({ insetLeft, cwd, projects }: NavPageProps) {
           value={project ?? ""}
           onPick={(path) =>
             guarded(() => {
+              pickedProject.current = true;
               setProject(path);
               setSelected(null);
             })
@@ -444,6 +450,7 @@ export function MemoryPage({ insetLeft, cwd, projects }: NavPageProps) {
                 {edgeCard && (
                   <EdgeCard
                     {...edgeCard}
+                    insetRight={selected ? DRAWER_WIDTH : 0}
                     onLink={(from, to) => void link(from, to)}
                     onUnlink={(from, to) => void unlink(from, to)}
                     onOpen={(id) => select(id)}
