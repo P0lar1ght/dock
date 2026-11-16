@@ -48,6 +48,27 @@ memory/
 | `watcher.rs` | `MemoryFileWatcher`：外部 `.md` 编辑后同步索引 |
 | `storage.rs` | `persist_observation` / `save_remember_note` / `write_flush_observation` |
 
+## 图谱与管理
+
+跨 scope 的那一层：图谱页要看所有项目，不只是当前 cwd 的工作区。
+
+| 模块 | 职责 |
+|---|---|
+| `links.rs` | `[[wikilink]]` 解析与改写（跳过代码块、行内代码） |
+| `vault.rs` | `MemoryVault`：scope 清单、笔记 id、`LinkResolver`（链接对到哪篇） |
+| `similarity.rs` | 相似建议（TF-IDF 余弦，中文按二字切） |
+| `graph.rs` | `build_graph` / `note_links` / `search_notes` |
+| `notes.rs` | 读、存、新建、改名、挪位置、遗忘、建链 / 断链 |
+| `watcher.rs` | `MemoryChangeWatcher`：笔记一变就通知（忽略 `MEMORY.md`） |
+
+笔记 id 是 `<scope 目录>/<相对路径>`，如 `global/topics/prefs.md`。
+id 只在 `MemoryVault::entry` 里换成磁盘路径，换之前逐段校验、不跟符号链接。
+
+写操作只认直接放在 `topics/`、`observations/_inbox/` 下的 `.md`。
+改完同步检索库（库没建过就不建）并重新生成这个 scope 的 `MEMORY.md`。
+
+`build_graph` 只读：不建目录、不碰检索库。
+
 ## 索引维度
 
 `MemoryIndex::open_or_create` 沿用库里已有的嵌入维度。
@@ -62,6 +83,6 @@ memory/
 
 ## 相关文档
 
-- 工具面（工具表、开关、参数）：`docs/tools/memory.md`
+- 工具面（工具表、开关、参数、链接语法、图谱）：`docs/tools/memory.md`
 - 布局与配置键：根 `AGENTS.md`、`config.toml.example`
 - 消费侧（spine 挂载）：`cordis-spine/src/tools/memory/mod.rs`

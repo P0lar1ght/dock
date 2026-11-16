@@ -42,7 +42,11 @@ Prioritize reusable mechanisms, rules, and root causes over a narration of the t
 When project structure matters, name the concrete directories and stable repo-relative paths; \
 include an absolute workspace root only when it is operationally necessary and appears in the conversation. \
 Copy exact identifiers and numerical values only when they appear verbatim in the supplied conversation. \
-Never infer a missing value; omit the detail instead.
+Never infer a missing value; omit the detail instead. \
+Memory notes link to each other with `[[file-name]]` (the file name without `.md`). \
+When something you write continues or depends on a memory note whose file name appears \
+verbatim in the conversation (for example in the injected memory index), link it that way; \
+never invent a file name.
 
 Omit any section where there is nothing substantive to report. \
 Do NOT include user preferences like OS, shell, or editor — these belong in global memory. \
@@ -65,6 +69,8 @@ Write a concise markdown summary with ## headers covering only NEW items in:
 - **Problems & solutions** — new bugs found and fixes
 
 Prioritize reusable mechanisms, rules, and root causes over a narration of the task. \
+Link to an existing memory note as `[[file-name]]` only when its file name appears \
+verbatim in the conversation. \
 Respond with NO_REPLY if nothing genuinely new and useful has happened since \
 the previous flush.
 

@@ -152,6 +152,11 @@ static STOP_WORDS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
     .collect()
 });
 
+/// Whether `word` (already lowercased) is filtered out as a stop word.
+pub fn is_stop_word(word: &str) -> bool {
+    STOP_WORDS.contains(word)
+}
+
 /// Extract meaningful keywords from a conversational query by removing stop words.
 /// When every word is filtered out, the result is empty and the caller (hybrid search) falls back to the vector path.
 pub fn extract_keywords(query: &str) -> Vec<String> {

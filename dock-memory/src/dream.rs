@@ -54,6 +54,9 @@ You will receive observation files (and optionally existing topics). Your job:
 3. **Convert** relative dates to absolute dates when possible
 4. **Discard** ephemeral details (greetings, tool noise, message counts, current state)
 5. **Preserve** decisions, rationale, architecture, preferences, and problem/solution pairs
+6. **Link** related topics — notes reference each other with `[[name]]` wikilinks. \
+Keep every `[[...]]` link that appears in the input exactly as written, and where one \
+of your topics depends on another, link to it as `[[the other topic's exact header text]]`
 
 Respond with a single markdown document. Use ## headers to separate topics. \
 Each topic should be self-contained and useful to a future session.
