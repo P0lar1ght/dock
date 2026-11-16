@@ -785,6 +785,12 @@ async fn turn_start_returns_the_projected_turn_id() {
     }
 }
 
+/// 一条比摘要长的用户消息：压缩后的模型历史只有首末用户消息 + 摘要，历史本身
+/// 必须大到足以被摘要取代，否则 `Compact` 的收紧检查会拒绝这次压缩。
+fn long_prompt(prefix: &str) -> String {
+    format!("{prefix} {}", "context filler. ".repeat(400))
+}
+
 struct EchoLastUser;
 
 impl Sampler for EchoLastUser {
@@ -828,7 +834,12 @@ async fn compaction_progress_reaches_subscribers() {
     let _ = rpc
         .call("thread/subscribe", json!({ "threadId": "live" }))
         .await;
-    let _ = rpc.call("turn/start", json!({ "message": "hello" })).await;
+    // 历史要大于摘要：`EchoLastUser` 回显的就是摘要提示词（约 400 token），
+    // 历史太小时压缩会被「摘要不比原文小」的收紧检查拒绝，见
+    // `cordis_spine::Compact`。
+    let _ = rpc
+        .call("turn/start", json!({ "message": long_prompt("hello") }))
+        .await;
     rpc.wait_notification("turn/completed", Duration::from_secs(5))
         .await;
 
@@ -1701,7 +1712,9 @@ async fn thread_rewind_maps_turns_past_an_idle_compaction() {
     let _ = rpc
         .call("thread/subscribe", json!({ "threadId": "live" }))
         .await;
-    let _ = rpc.call("turn/start", json!({ "message": "first" })).await;
+    let _ = rpc
+        .call("turn/start", json!({ "message": long_prompt("first") }))
+        .await;
     rpc.wait_notification("turn/completed", Duration::from_secs(5))
         .await;
     let _ = rpc

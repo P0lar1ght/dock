@@ -1,27 +1,111 @@
 //! Compacted `LogEvent` history.
 //!
-//! Grok `prepare_conversation_for_summarization` + `extract_messages_since_last_user`
-//! + `build_compacted_history`, mapped onto Dock `LogEvent` (no `ConversationItem`).
+//! Grok `prepare_conversation_for_summarization` + `build_compacted_history`,
+//! mapped onto Dock `LogEvent` (no `ConversationItem`).
+//!
+//! **压缩后一条 assistant 轮次都不留。** 早先照抄 Grok 的
+//! `extract_messages_since_last_user`，把「最后一条用户消息之后」的轮次整段保留
+//! （含推理），因为 DeepSeek thinking 模式要求请求带 `tools` 时把之前每一轮的
+//! `reasoning_content` 一并回传，缺了 400。但那条约束只对**请求里还在的**
+//! assistant 消息成立：整段丢掉之后不存在「缺推理的旧轮次」，也就不会触发
+//! （官方文档：带 `tools` 时 reasoning_content 要回传并计入上下文，不带时忽略）。
+//!
+//! 保留那段是压缩压不动的根因：自动压缩在每个采样步之前触发，此时「最后一条
+//! 用户消息之后」正好是这一轮刚跑完的整条工具链，推理占比最大 —— 折叠掉旧历史
+//! 却把它原样留下，占用几乎不降。这些内容现在由摘要承担。
+
+use cordis_base::tool_output::head_at_line;
+use cordis_base::types::{LlmOutput, LogEvent, ThinkingBlock};
 
 use super::summary::{format_compact_summary_content, wrap_user_query};
-use cordis_base::types::{LlmOutput, LogEvent, ThinkingBlock};
+
+/// 摘要里每条工具结果留多少字节。
+///
+/// 口径对齐 Grok `for_compaction` 的注释（那里按 ~2000 token 折算，正文多英文，
+/// 约合 8KB）：留得太少，摘要模型写不出「这个文件读了什么」，压缩后的模型只能
+/// 自己重读一遍 —— 恰好就是那段注释要防的事；留得太多则压缩白做。取 8KB：
+/// 摘要本身受 500 字符下限约束、又没有截断重试，单条再大就不值得了。
+const SUMMARY_TOOL_OUTPUT_HEAD_BYTES: usize = 8_000;
+
+/// 摘要里最多保留最近几条工具结果（起点）。
+///
+/// 长工具循环里几十次调用全留会把摘要请求撑出窗口：自动压缩在 85% 触发，摘要
+/// 的输出上限只剩那 15%。`compact/mod.rs` 从这个数开始，按窗口预算减半到放得下，
+/// 上游仍报上下文超限就再减半重试（Grok 用 `fit_conversation_to_budget` 按 token
+/// 收尾，这里按条数收）。丢的总是最旧的：「最后跑的那几次」才是延续任务的依据。
+pub const SUMMARY_TOOL_OUTPUT_MAX_ENTRIES: usize = 40;
+
+/// 摘要里每条工具调用的实参留多少字节。
+///
+/// 摘要 prompt 明确要求「列出已经跑过哪些工具**及其实参**」，而压缩后的模型历史
+/// 里一条工具轮次都不留 —— 不给实参，摘要模型只能编，编出来的那份就是继承者唯一
+/// 的依据，继承者再照着它重跑一遍错的命令。实参通常很短（一条命令、一个路径），
+/// 个别 `write_file` 会带上整份文件内容，按这个上限截断。
+const SUMMARY_TOOL_ARGS_HEAD_BYTES: usize = 2_000;
 
 /// TUI hides [`LogEvent::SystemReminder`]; this assistant bubble is the
 /// visible compact notice (also appended to the display log). Dock-only
 /// (Grok paints via ACP notifications).
 pub const VISIBLE_NOTICE: &str = cordis_base::types::COMPACT_NOTICE;
 
-/// Grok `strip_tool_messages_for_conversation_item` + drop images/reasoning:
-/// drop tool results, flatten assistant `tool_calls` into `[Called tools: …]`.
-pub fn prepare_conversation_for_summarization(history: &[LogEvent]) -> Vec<LogEvent> {
+/// 摘要请求的历史：剥掉只有 Dock 自己关心的事件，把工具结果截断后留下。
+///
+/// 与 Grok `strip_tool_messages_for_conversation_item` 的差别有三处：
+///
+/// 1. **工具结果不丢，只截断**。压缩后模型历史里一条工具链都不留（见模块注释），
+///    摘要就是它唯一的依据；全丢掉模型会照着摘要把刚跑过的 read / grep 重调
+///    一遍。留开头 [`SUMMARY_TOOL_OUTPUT_HEAD_BYTES`] 字节，实参另留
+///    [`SUMMARY_TOOL_ARGS_HEAD_BYTES`] 字节，且只留最近 `keep_tool_outputs` 条
+///    （调用方从 [`SUMMARY_TOOL_OUTPUT_MAX_ENTRIES`] 起按窗口收）。
+/// 2. **推理仍然清空**。摘要不该照着推理复述，省下来的也是摘要这次调用的钱。
+/// 3. **工具结果用 `SystemReminder`，不用 `User`**。三条 wire 都按「请求里第 i 个
+///    `User`」取图片槽（`user_images.get(user_i)`），而图片槽是按**真实用户消息**
+///    排的；工具结果插成 `User` 会把后面所有真实用户消息的图全顶歪，最后一张图
+///    还会落到摘要 prompt 那条 `User` 上。摘要本来也不需要图（`compact_session`
+///    传空的 `model_user_images()`），用 `SystemReminder` 就绕开了整套下标对齐。
+pub fn prepare_conversation_for_summarization(
+    history: &[LogEvent],
+    keep_tool_outputs: usize,
+) -> Vec<LogEvent> {
+    let results = history
+        .iter()
+        .filter(|e| matches!(e, LogEvent::ToolExecute { .. }))
+        .count();
+    let mut dropped_results = results.saturating_sub(keep_tool_outputs);
     history
         .iter()
         .filter_map(|event| match event {
-            LogEvent::ToolExecute { .. }
-            | LogEvent::PreStep
+            LogEvent::PreStep
             | LogEvent::Prompt(_)
             | LogEvent::Notice { .. }
             | LogEvent::TurnEnd(_) => None,
+            // 摘要请求不带 tools（`compact/mod.rs`），所以工具结果就是最后一条
+            // user 消息之后唯一能说明「跑到哪了」的东西。
+            LogEvent::ToolExecute {
+                name,
+                arguments,
+                content,
+                is_error,
+                ..
+            } => {
+                // 只丢最旧的那几条：新近的才是「接下来要接着干什么」的依据。
+                if dropped_results > 0 {
+                    dropped_results -= 1;
+                    return Some(LogEvent::SystemReminder(format!(
+                        "[{name}]（更早的工具输出已省略）"
+                    )));
+                }
+                let (head, cut) = tool_output_head(content);
+                let args = args_head(arguments);
+                let mut text = format!(
+                    "[{name}{}]\n{args}\n{head}",
+                    if *is_error { " · 失败" } else { "" }
+                );
+                if cut {
+                    text.push_str("\n（工具输出已截断）");
+                }
+                Some(LogEvent::SystemReminder(text))
+            }
             LogEvent::LlmStream(out) => {
                 let mut text = out.text.clone();
                 if !out.tool_calls.is_empty() {
@@ -46,50 +130,26 @@ pub fn prepare_conversation_for_summarization(history: &[LogEvent]) -> Vec<LogEv
         .collect()
 }
 
-/// Grok `extract_messages_since_last_user`: assistant + tool rows after the
-/// last `User`, with tool bodies replaced by `"Tool call omitted..."`.
-///
-/// **assistant 轮次原样保留，推理内容不剥**：有的上游（DeepSeek 的 thinking
-/// 模式）规定请求里带 `tools` 时，**之前每一轮**的推理内容都必须一并回传，缺了
-/// 直接 400（`The reasoning_text in the thinking mode must be passed back`）。
-///
-/// 最早这里把推理一律清空，压缩之后的第一条消息就炸；改成"只给带 tool_calls
-/// 的轮次保留"仍然不够——纯文本收尾的那一轮同样在尾巴里，同样被要求回传。
-/// 省下来的那点上下文换不来这个代价，索性整条留着。
-pub fn extract_messages_since_last_user(history: &[LogEvent]) -> Vec<LogEvent> {
-    let start = history
-        .iter()
-        .rposition(|e| matches!(e, LogEvent::User(_)))
-        .map(|i| i + 1)
-        .unwrap_or(history.len());
-    history[start..]
-        .iter()
-        .filter_map(|event| match event {
-            LogEvent::LlmStream(out) => Some(LogEvent::LlmStream(out.clone())),
-            LogEvent::ToolExecute {
-                id,
-                name,
-                arguments,
-                is_error,
-                ..
-            } => Some(LogEvent::ToolExecute {
-                id: id.clone(),
-                name: name.clone(),
-                arguments: arguments.clone(),
-                content: "Tool call omitted...".into(),
+fn tool_output_head(content: &str) -> (&str, bool) {
+    let head = head_at_line(content, SUMMARY_TOOL_OUTPUT_HEAD_BYTES);
+    (head, head.len() < content.len())
+}
 
-                images: Vec::new(),
-                is_error: *is_error,
-            }),
-            LogEvent::SystemReminder(text) => Some(LogEvent::SystemReminder(text.clone())),
-            LogEvent::User(_)
-            | LogEvent::PreStep
-            | LogEvent::Prompt(_)
-            // 只给用户看的，不进被摘要的那份历史。
-            | LogEvent::Notice { .. }
-            | LogEvent::TurnEnd(_) => None,
-        })
-        .collect()
+/// 一条工具调用的实参，截到 [`SUMMARY_TOOL_ARGS_HEAD_BYTES`]。
+///
+/// `arguments` 是原样的 JSON 字符串（`{"command":"cargo test -p cordis-spine"}`），
+/// 不重新序列化 —— 摘要要的是「当时到底跑的是什么」，不是我们理解后的样子。
+fn args_head(arguments: &str) -> String {
+    let arguments = arguments.trim();
+    if arguments.is_empty() || arguments == "{}" {
+        return "args: (无)".to_string();
+    }
+    let head = head_at_line(arguments, SUMMARY_TOOL_ARGS_HEAD_BYTES);
+    if head.len() < arguments.len() {
+        format!("args (已截断): {head}")
+    } else {
+        format!("args: {head}")
+    }
 }
 
 fn first_real_user(history: &[LogEvent]) -> Option<String> {
@@ -106,10 +166,62 @@ fn last_real_user(history: &[LogEvent]) -> Option<String> {
     })
 }
 
-/// Model-history prefix after compact: first real user + last user wrapped
-/// in `<user_query>` (Grok) + recent stubbed tools + continuation reminder.
+/// 摘要末尾的「原文在哪」指针（抄 Grok `format_transcript_location`）。
+///
+/// 压缩后的模型历史只有摘要，摘要写漏的东西在模型眼里就不存在了。两份落盘文件
+/// 里有**压缩前的完整对话**，把路径告诉模型，「缺了就去查」就成了它自己的选择
+/// —— 比往上下文里塞历史便宜得多。
+///
+/// 两个路径分工不同，都要给：
+/// - `segment`（`compaction/segment_NNN.md`）：一份可读的整理稿，摘要 + 逐轮正文。
+/// - `raw_log`（`chat_history.jsonl`）：逐行 JSON 的原始事件，**工具调用的确切实参**
+///   和推理只在这里。段文件把实参换成了 `[Called tools: …]` 占位。
+///
+/// 关键在于**按需**：两份都可能上百 KB 到 1 MB，整份读进来会把刚腾出来的上下文
+/// 一次性填回去。所以指令里明说要 `grep` / `tail` / `offset`+`limit`，不要通读。
+///
+/// 用英文：摘要 prompt 与摘要正文都是英文，模型照着同一套话术读不会跑偏。
+pub fn format_transcript_location(segment: Option<&str>, raw_log: Option<&str>) -> String {
+    let mut out = String::from("\n\n<transcript_location>\n");
+    if let Some(path) = segment {
+        out.push_str(&format!(
+            "The full, unsummarized transcript of this conversation is saved at:\n{path}\n"
+        ));
+    }
+    if let Some(path) = raw_log {
+        out.push_str(&format!(
+            "\nThe same conversation as line-delimited JSON (raw tool arguments, \
+             reasoning, timestamps) is at:\n{path}\n"
+        ));
+    }
+    out.push_str(
+        "Read them only when the summary above is missing something you need. Do not \
+         read either file in full: both are large, and reading one would refill the \
+         context this compaction just freed. Target the lookup instead — `grep -n` for \
+         an identifier or an error string, or `tail` / `offset` + `limit` for the most \
+         recent turns.\n\
+         </transcript_location>",
+    );
+    out
+}
+
+/// Model-history after compact: first real user + last user wrapped in
+/// `<user_query>` (Grok) + continuation reminder. **没有 assistant 轮次**。
+///
+/// 早先这里还接 `extract_messages_since_last_user` 的尾巴（形状抄 Grok），
+/// 那是压缩压不动的根因 —— 见模块注释。
+///
+/// `transcript` 是这次压缩落盘的原文路径（`compaction/segment_NNN.md`），`raw_log`
+/// 是会话目录里的 `chat_history.jsonl`。给了哪个就在摘要末尾附哪一段指针，让模型
+/// 在摘要不够用时自己去查 —— 见 [`format_transcript_location`]。
+///
 /// The display log is not replaced; [`VISIBLE_NOTICE`] is appended there too.
-pub fn build_compacted_events(history: &[LogEvent], summary: &str) -> Vec<LogEvent> {
+pub fn build_compacted_events(
+    history: &[LogEvent],
+    summary: &str,
+    transcript: Option<&std::path::Path>,
+    raw_log: Option<&std::path::Path>,
+) -> Vec<LogEvent> {
     let first = first_real_user(history);
     let last = last_real_user(history);
     let mut out = Vec::new();
@@ -121,15 +233,21 @@ pub fn build_compacted_events(history: &[LogEvent], summary: &str) -> Vec<LogEve
             out.push(LogEvent::User(wrap_user_query(last).into()));
         }
     }
-    out.extend(extract_messages_since_last_user(history));
-    out.push(LogEvent::SystemReminder(format_compact_summary_content(
-        summary,
-    )));
+    let mut content = format_compact_summary_content(summary);
+    let segment = transcript.map(|p| p.display().to_string());
+    let raw = raw_log.map(|p| p.display().to_string());
+    if segment.is_some() || raw.is_some() {
+        content.push_str(&format_transcript_location(
+            segment.as_deref(),
+            raw.as_deref(),
+        ));
+    }
+    out.push(LogEvent::SystemReminder(content));
     // [`VISIBLE_NOTICE`] 只进显示日志（`Sessions::replace_compacted` 自己追加），
-    // 不进模型历史：它是一条合成的 assistant 消息，没有推理内容。压缩若发生在
-    // 新一轮开头（尾巴为空），它会成为请求里唯一的 assistant 消息，于是
-    // 「thinking 模式必须回传 reasoning_text」的上游直接 400。模型也不需要被
-    // 告知"刚压缩过"——摘要本身就在上一条 reminder 里。
+    // 不进模型历史：它是一条合成的 assistant 消息，没有推理内容。压缩后的前缀里
+    // 一条真 assistant 都没有，它若进来就会成为**唯一**一条，而请求带 `tools` 时
+    // 上游要求每条 assistant 都带 `reasoning_content`，直接 400。模型也不需要被
+    // 告知「刚压缩过」——摘要本身就在上一条 reminder 里。
     out
 }
 
@@ -164,9 +282,10 @@ pub fn estimate_context_tokens(system: &str, history: &[LogEvent]) -> u64 {
 
 /// 一轮输出里**会回放给上游**的推理占多少 token。
 ///
-/// 推理是原样回传的（见 [`extract_messages_since_last_user`]）：Responses 回放
-/// `reasoning_items` 原件，Messages 回放 `thinking_blocks`，chat/completions 回放
-/// `reasoning` 文本（有签名时还会把 signature 包回）。有原件就按原件算，没有才退到
+/// 推理随 assistant 轮次原样回传（`llm/http/` 的三条 wire 各自回放原件）：
+/// Responses 回放 `reasoning_items` 原件，Messages 回放 `thinking_blocks`，
+/// chat/completions 回放 `reasoning` 文本（有签名时还会把 signature 包回）。
+/// 有原件就按原件算，没有才退到
 /// 文本——`reasoning` 本身就是从原件里拼出来的，两者相加会算两遍。
 ///
 /// 每个 Responses 原件里明文与 `encrypted_content` 是同一段推理的两种形态，取大的那个，
@@ -277,7 +396,8 @@ mod tests {
             title: "上报".into(),
             body: "不该进摘要".into(),
         });
-        let prepared = prepare_conversation_for_summarization(&history);
+        let prepared =
+            prepare_conversation_for_summarization(&history, SUMMARY_TOOL_OUTPUT_MAX_ENTRIES);
         assert!(!prepared
             .iter()
             .any(|e| matches!(e, LogEvent::ToolExecute { .. })));
@@ -291,13 +411,67 @@ mod tests {
             e,
             LogEvent::LlmStream(o) if o.tool_calls.is_empty() && o.text.contains("[Called tools: read_file]")
         )));
+        // 工具结果不丢，截断后以文本形式进摘要：压缩后模型历史里没有工具链，
+        // 摘要就是模型唯一的依据。用 `SystemReminder` 承载，别占真实用户消息的
+        // 图槽下标（`user_images.get(user_i)`）。
+        assert!(
+            prepared.iter().any(|e| matches!(
+                e,
+                LogEvent::SystemReminder(t)
+                    if t.contains("[read_file]") && t.contains("fn login() { buggy }")
+            )),
+            "{prepared:?}"
+        );
+        // 摘要请求里除真实用户消息外不该再出现 `User`：三条 wire 都按下标取图，
+        // 多出来的 `User` 会把后面真实用户消息的图全顶歪。
+        let users: Vec<_> = prepared
+            .iter()
+            .filter_map(|e| match e {
+                LogEvent::User(t) => Some(t.text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            users,
+            vec!["fix auth.rs login", "also add a test"],
+            "{prepared:?}"
+        );
     }
 
-    /// 回归：压缩前缀里带 tool_calls 的那几轮必须留着 reasoning。
-    /// DeepSeek thinking 模式规定请求带 `tools` 时，之前每轮的 `reasoning_content`
-    /// 都要回传，缺了 400——压缩成功之后的第一条消息就会炸。
+    /// 摘要里的工具结果按 [`SUMMARY_TOOL_OUTPUT_HEAD_BYTES`] 截断：全留等于没压。
     #[test]
-    fn compacted_tail_keeps_reasoning_on_every_assistant_turn() {
+    fn summarizer_caps_tool_output() {
+        let history = vec![LogEvent::ToolExecute {
+            id: "c1".into(),
+            name: "bash".into(),
+            arguments: "{}".into(),
+            content: "y".repeat(SUMMARY_TOOL_OUTPUT_HEAD_BYTES * 3),
+            images: Vec::new(),
+            is_error: true,
+        }];
+        let prepared =
+            prepare_conversation_for_summarization(&history, SUMMARY_TOOL_OUTPUT_MAX_ENTRIES);
+        let LogEvent::SystemReminder(text) = &prepared[0] else {
+            panic!("工具结果应该变成一条可读的文本：{prepared:?}");
+        };
+        assert!(text.contains("[bash · 失败]"), "{text}");
+        assert!(text.contains("已截断"), "{text}");
+        assert!(
+            text.len() < SUMMARY_TOOL_OUTPUT_HEAD_BYTES * 2,
+            "留了 {} 字节",
+            text.len()
+        );
+    }
+
+    /// 回归：压缩后的模型历史里**一条 assistant 轮次都不留**。
+    ///
+    /// 以前照抄 Grok 保留「最后一条用户消息之后」的整段（含推理），因为 DeepSeek
+    /// thinking 模式要求请求带 `tools` 时把之前每轮的 `reasoning_content` 一并
+    /// 回传。但自动压缩就发生在这一步的工具循环里，那段正是刚跑完的整条工具链，
+    /// 推理占大头 —— 留着等于没压。整段丢掉之后请求里不存在缺推理的 assistant
+    /// 消息，那条约束自然不触发。
+    #[test]
+    fn compacted_prefix_keeps_no_assistant_turns() {
         let mut history = sample_history();
         history.push(LogEvent::LlmStream(LlmOutput {
             text: "writing test".into(),
@@ -318,70 +492,41 @@ mod tests {
             images: Vec::new(),
             is_error: false,
         });
-        // 纯文本收尾的一轮同样在尾巴里，同样被要求回传推理。
-        history.push(LogEvent::LlmStream(LlmOutput {
-            text: "写完了".into(),
-            reasoning: "收尾这轮的推理照样要回传".into(),
-            reasoning_items: vec![serde_json::json!({"type":"reasoning","id":"rs_3"})],
-            ..LlmOutput::default()
-        }));
 
-        let tail = extract_messages_since_last_user(&history);
-        let with_tools = tail
-            .iter()
-            .find_map(|e| match e {
-                LogEvent::LlmStream(o) if !o.tool_calls.is_empty() => Some(o),
-                _ => None,
-            })
-            .expect("带工具的那一轮还在");
-        assert_eq!(with_tools.reasoning, "先看现有测试怎么组织");
-        assert_eq!(
-            with_tools.reasoning_items.len(),
-            1,
-            "Responses 的原件也要留"
+        let events = build_compacted_events(&history, "summary body", None, None);
+        assert!(
+            !events.iter().any(|e| matches!(e, LogEvent::LlmStream(_))),
+            "压缩后不该留任何 assistant 轮次（含推理）：{events:?}"
         );
-
-        let text_only = tail
+        // 内容没有丢：摘要还在，模型知道前面发生了什么。
+        assert!(events
             .iter()
-            .find_map(|e| match e {
-                LogEvent::LlmStream(o) if o.tool_calls.is_empty() => Some(o),
-                _ => None,
-            })
-            .expect("纯文本那一轮还在");
-        assert_eq!(text_only.reasoning, "收尾这轮的推理照样要回传");
-        assert_eq!(text_only.reasoning_items.len(), 1, "{text_only:?}");
+            .any(|e| matches!(e, LogEvent::SystemReminder(t) if t.contains("summary body"))));
     }
 
     /// 压缩通知是给 TUI 看的（`Sessions::replace_compacted` 自己往显示日志追加），
-    /// **不能**进模型历史：它是一条没有推理内容的合成 assistant 消息，压缩若发生
-    /// 在新一轮开头，它会是请求里唯一的 assistant 消息，thinking 模式的上游直接
-    /// 400。
+    /// **不能**进模型历史。
     #[test]
     fn compacted_prefix_has_no_synthetic_assistant_turn() {
-        let events = build_compacted_events(&sample_history(), "summary body");
+        let events = build_compacted_events(&sample_history(), "summary body", None, None);
         assert!(
             !events
                 .iter()
                 .any(|e| matches!(e, LogEvent::LlmStream(o) if o.text == VISIBLE_NOTICE)),
             "{events:?}"
         );
+        assert!(
+            !events.iter().any(|e| matches!(e, LogEvent::LlmStream(_))),
+            "压缩前缀里不该有 assistant：{events:?}"
+        );
         // 摘要本身还在，模型不会丢掉上下文。
         assert!(events
             .iter()
             .any(|e| matches!(e, LogEvent::SystemReminder(t) if t.contains("summary body"))));
-        // 前缀里每一条 assistant 消息都带着自己的推理。
-        for event in &events {
-            if let LogEvent::LlmStream(out) = event {
-                assert!(
-                    !out.reasoning.is_empty() || !out.tool_calls.is_empty(),
-                    "凭空多出一条没有推理的 assistant：{out:?}"
-                );
-            }
-        }
     }
 
     #[test]
-    fn compacted_keeps_first_and_wrapped_last_and_stubs_recent() {
+    fn compacted_keeps_first_and_wrapped_last() {
         let mut history = sample_history();
         history.push(LogEvent::LlmStream(LlmOutput {
             text: "writing test".into(),
@@ -397,44 +542,94 @@ mod tests {
             name: "write_file".into(),
             arguments: "{}".into(),
             content: "test body".into(),
-
             images: Vec::new(),
             is_error: false,
         });
         let events = build_compacted_events(
             &history,
             "<summary>\n1. Primary Request: login fix\n</summary>",
+            None,
+            None,
         );
         assert!(matches!(events.first(), Some(LogEvent::User(t)) if t == "fix auth.rs login"));
         assert!(events.iter().any(|e| matches!(
             e,
             LogEvent::User(t) if t.contains("<user_query>") && t.contains("also add a test")
         )));
-        assert!(events.iter().any(|e| matches!(
-            e,
-            LogEvent::ToolExecute { content, .. } if content == "Tool call omitted..."
-        )));
-        assert!(!events.iter().any(|e| matches!(
-            e,
-            LogEvent::ToolExecute { content, .. } if content.contains("buggy")
-        )));
+        // 工具链与 assistant 轮次一个都不留，内容全在摘要里。
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e, LogEvent::ToolExecute { .. } | LogEvent::LlmStream(_))));
         assert!(events.iter().any(|e| matches!(
             e,
             LogEvent::SystemReminder(t) if t.contains("This session is being continued")
         )));
-        // 压缩通知只进显示日志，不进模型前缀（见
-        // `compacted_prefix_has_no_synthetic_assistant_turn`）。
-        assert!(!events
-            .iter()
-            .any(|e| matches!(e, LogEvent::LlmStream(o) if o.text == VISIBLE_NOTICE)));
         assert!(!events.iter().any(|e| matches!(e, LogEvent::PreStep)));
+    }
+
+    /// 摘要末尾带「原文在哪」的指针：模型在摘要写漏时自己去查，而不是让压缩
+    /// 把整段历史塞回上下文（Grok `format_transcript_location` 同款）。
+    #[test]
+    fn compacted_prefix_points_at_the_transcript() {
+        let path = std::path::Path::new("/tmp/segments/segment_000.md");
+        let raw = std::path::Path::new("/tmp/sessions/abc/chat_history.jsonl");
+        let events =
+            build_compacted_events(&sample_history(), "summary body", Some(path), Some(raw));
+        let reminder = events
+            .iter()
+            .find_map(|e| match e {
+                LogEvent::SystemReminder(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .expect("摘要 reminder");
+        // 摘要正文与指针在同一段里，压缩后的前缀仍然只有三条。
+        assert!(reminder.contains("summary body"), "{reminder}");
+        assert!(reminder.contains("<transcript_location>"), "{reminder}");
+        assert!(
+            reminder.contains("/tmp/segments/segment_000.md"),
+            "要给出能直接 read_file 的绝对路径：{reminder}"
+        );
+        // 原始 jsonl 也给出：工具调用的确切实参与推理只在它里面。
+        assert!(
+            reminder.contains("/tmp/sessions/abc/chat_history.jsonl"),
+            "要给原始日志的路径：{reminder}"
+        );
+        assert_eq!(events.len(), 3, "{events:?}");
+    }
+
+    /// 指针必须说清「按需查、别通读」：两份文件都可能上百 KB 到 1 MB，
+    /// 整份读回来等于把刚腾出来的上下文一次性填回去。
+    #[test]
+    fn transcript_pointer_forbids_a_full_read() {
+        let text = format_transcript_location(
+            Some("/tmp/a/segment_000.md"),
+            Some("/tmp/a/chat_history.jsonl"),
+        );
+        assert!(text.contains("Do not read either file in full"), "{text}");
+        assert!(text.contains("grep"), "要给出定向查的做法：{text}");
+        assert!(text.contains("tail"), "{text}");
+        assert!(text.contains("limit"), "{text}");
+    }
+
+    /// 没落盘（测试、未 attach_disk 的页）就不写指针，别指向一个不存在的文件。
+    #[test]
+    fn compacted_prefix_has_no_pointer_without_a_transcript() {
+        let events = build_compacted_events(&sample_history(), "summary body", None, None);
+        let reminder = events
+            .iter()
+            .find_map(|e| match e {
+                LogEvent::SystemReminder(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .expect("摘要 reminder");
+        assert!(!reminder.contains("<transcript_location>"), "{reminder}");
     }
 
     #[test]
     fn compacted_does_not_duplicate_sole_user() {
         let history = vec![LogEvent::User("only".into()), LogEvent::PreStep];
         let summary = "x".repeat(20);
-        let events = build_compacted_events(&history, &summary);
+        let events = build_compacted_events(&history, &summary, None, None);
         let users: Vec<_> = events
             .iter()
             .filter_map(|e| match e {

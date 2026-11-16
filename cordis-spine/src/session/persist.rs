@@ -254,6 +254,11 @@ pub struct SubagentMeta {
     pub output: String,
 }
 
+/// `chat_history.jsonl` 的位置（不想自己拼文件名的调用方用）。
+pub fn history_path(session_dir: &Path) -> PathBuf {
+    session_dir.join(HISTORY)
+}
+
 /// `<会话目录>/subagents/<agent-id>/`。
 pub fn subagent_dir(session_dir: &Path, agent_id: &str) -> PathBuf {
     session_dir.join(SUBAGENTS).join(agent_id)
