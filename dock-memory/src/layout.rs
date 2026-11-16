@@ -36,7 +36,7 @@ pub struct ScopePaths {
 }
 
 impl ScopePaths {
-    fn from_root(root: PathBuf) -> Self {
+    pub(crate) fn from_root(root: PathBuf) -> Self {
         let observations = root.join("observations");
         Self {
             topics: root.join("topics"),
@@ -47,7 +47,7 @@ impl ScopePaths {
         }
     }
 
-    fn ensure(&self) -> std::io::Result<()> {
+    pub(crate) fn ensure(&self) -> std::io::Result<()> {
         std::fs::create_dir_all(&self.topics)?;
         std::fs::create_dir_all(&self.observations)?;
         std::fs::create_dir_all(&self.inbox)?;

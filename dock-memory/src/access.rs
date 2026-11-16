@@ -121,7 +121,8 @@ impl MemoryAccessPolicy {
     }
 }
 
-fn classify_relative(rel: &Path, scope: MemoryScope) -> PathClass {
+/// 相对 scope 目录的路径属于哪一类（`rel` 不含 `..`，调用方先查过）。
+pub(crate) fn classify_relative(rel: &Path, scope: MemoryScope) -> PathClass {
     let parts: Vec<_> = rel.components().collect();
     match parts.as_slice() {
         [Component::Normal(a)] if *a == "MEMORY.md" => PathClass::Manifest(scope),
@@ -176,7 +177,29 @@ pub fn forget(
         return Err(AccessError::Protected(path.to_path_buf()));
     }
     let scope = class.scope().expect("scoped");
-    let scope_paths = root.scope(scope);
+    forget_in_scope(root.scope(scope), scope, path, expected_content_hash, index)
+}
+
+/// [`forget`] for a note in an arbitrary scope directory.
+///
+/// [`forget`] only knows the global scope and the workspace of one cwd; the memory
+/// graph manages every workspace on disk, so it names the scope itself. The same
+/// rule applies: only `topics/*.md` and `observations/_inbox/*.md` can be forgotten.
+pub fn forget_in_scope(
+    scope_paths: &ScopePaths,
+    scope: MemoryScope,
+    path: &Path,
+    expected_content_hash: &str,
+    index: &mut MemoryIndex,
+) -> AccessResult<ForgetResult> {
+    let writable = path
+        .strip_prefix(&scope_paths.root)
+        .ok()
+        .filter(|rel| !rel.components().any(|c| matches!(c, Component::ParentDir)))
+        .is_some_and(|rel| classify_relative(rel, scope).is_writable());
+    if !writable {
+        return Err(AccessError::Protected(path.to_path_buf()));
+    }
 
     let meta = std::fs::metadata(path)?;
     if !meta.is_file() {

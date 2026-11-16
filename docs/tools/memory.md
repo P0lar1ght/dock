@@ -50,8 +50,39 @@ $DOCK_HOME/memory/
 
 - `memory_search` — FTS5；若 `[memory.embedding]` 已配置则查询侧 embed + hybrid；搜索前若 file watcher dirty 则 `sync_dirty_paths`。写入后 soft-fail `embed_missing_chunks`
 - `memory_get` — 仅读取 memory 根下 `.md`（拒绝 sqlite/二进制）；体量上限 256KiB
+  - `path` 除了 `memory_search` 给的绝对路径，也认笔记引用，见下「笔记之间的链接」。
 
 Memory **启用**时两颗工具 `register` 进 sampler 工具表（模型可直接调用，无需 `search_tool`/`use_tool`）。`DOCK_MEMORY=0` / 配置关闭 / 会话 `t` 关掉：从表移除（或调用返回 disabled）。会话 `t` 再打开则恢复常驻。
+
+## 笔记之间的链接
+
+笔记用 `[[文件名]]` 互相链接，语法和 Obsidian 一样。
+记忆目录可以直接当 Obsidian 的 vault 打开。
+
+- `[[prefs]]`：文件名不带 `.md`，不分大小写。
+- `[[prefs|显示的字]]`：换显示文字。
+- `[[prefs#小标题]]`：带小标题（解析时只看文件名）。
+- `[[topics/prefs]]`、`[[global/topics/prefs]]`：带路径，点名某一篇。
+- 围栏代码块和行内代码里的 `[[…]]` 不算链接。
+
+同名时取谁：
+
+- 先取链接所在 scope 里的，再取全局的，最后才是别的项目的。
+- 同一档里主题（`topics/`）优先于观察。
+- 文件名对不上时按标题再找一次（`[[审计日志改造]]`）。
+
+谁会写链接：
+
+- agent：记忆提醒里写了这条约定，写笔记时和索引里已有的笔记有关就链过去。
+- `/flush`：只链对话里原样出现过文件名的笔记，不编文件名。
+- `/dream`：保留输入里已有的链接；主题之间用标题互相链接。
+- 用户：直接编辑笔记文件。
+
+`memory_get` 的 `path` 可以直接给 `[[链接]]`、笔记名，
+或索引里那种相对路径（`topics/prefs.md`）。
+在全局和当前工作区里找；回包的 `**File:**` 是解析出来的真实路径。
+
+实现：`dock-memory/src/links.rs`（解析与改写）、`vault.rs`（对到具体文件）。
 
 ## Safety gates
 

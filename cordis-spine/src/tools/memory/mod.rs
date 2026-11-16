@@ -79,7 +79,7 @@ fn latest_copy(history: &[LogEvent]) -> Option<String> {
 }
 
 const SEARCH_PARAMS: &str = r#"{"type":"object","properties":{"query":{"type":"string","description":"Search query. Prefer specific technical terms."},"max_results":{"type":"integer"},"min_score":{"type":"number"}},"required":["query"]}"#;
-const GET_PARAMS: &str = r#"{"type":"object","properties":{"path":{"type":"string","description":"Memory file path from memory_search."},"from":{"type":"integer","description":"1-based start line."},"lines":{"type":"integer","description":"Max lines to return."}},"required":["path"]}"#;
+const GET_PARAMS: &str = r#"{"type":"object","properties":{"path":{"type":"string","description":"Memory file path from memory_search or the memory index. A [[wikilink]] or a bare note name found in another note also works."},"from":{"type":"integer","description":"1-based start line."},"lines":{"type":"integer","description":"Max lines to return."}},"required":["path"]}"#;
 
 struct MemoryInner {
     config: Mutex<MemoryConfig>,
@@ -276,7 +276,7 @@ impl Memory {
         match tools.register(
             ToolSpec {
                 name: "memory_get".into(),
-                description: "Read a memory file by path. Returns the file content with line numbers, optionally limited to a range of lines.\n\nUse after memory_search returns a relevant result. Line numbers are 1-based and match the from parameter.".into(),
+                description: "Read a memory file by path. Returns the file content with line numbers, optionally limited to a range of lines.\n\nUse after memory_search returns a relevant result, or to follow a [[wikilink]] from one note to another (pass the link or the note name as path). Line numbers are 1-based and match the from parameter.".into(),
                 parameters_json: GET_PARAMS.into(),
             },
             get,
@@ -450,7 +450,8 @@ fn memory_get(memory: &Memory, call: ToolCall) -> ToolResult {
     let from = v.get("from").and_then(|x| x.as_u64()).map(|n| n as usize);
     let lines = v.get("lines").and_then(|x| x.as_u64()).map(|n| n as usize);
     let root = memory.root();
-    match read_memory_file(&root, PathBuf::from(path).as_path(), from, lines) {
+    let file = note_path(&root, path);
+    match read_memory_file(&root, &file, from, lines) {
         Ok(body) => {
             let start = from.unwrap_or(1).max(1);
             let numbered = format_with_line_numbers(&body, start);
@@ -458,7 +459,8 @@ fn memory_get(memory: &Memory, call: ToolCall) -> ToolResult {
             tool_result(
                 call,
                 format!(
-                    "**File:** {path}\n**Lines:** {nlines} (from: {}, limit: {})\n\n{numbered}",
+                    "**File:** {}\n**Lines:** {nlines} (from: {}, limit: {})\n\n{numbered}",
+                    file.display(),
                     from.map_or_else(|| "start".into(), |f| f.to_string()),
                     lines.map_or_else(|| "all".into(), |l| l.to_string()),
                 ),
@@ -466,6 +468,27 @@ fn memory_get(memory: &Memory, call: ToolCall) -> ToolResult {
         }
         Err(e) => tool_result(call, format!("Error: {e}")),
     }
+}
+
+/// `memory_get` 的 `path` 指的是哪个文件。
+///
+/// 磁盘上有这个路径就是它（`memory_search` 给的都是绝对路径）。没有的话当成笔记引用：
+/// 笔记里的 `[[链接]]`、笔记名，或 `MEMORY.md` 索引里那种相对 scope 的路径
+/// （`topics/prefs.md`），在全局和当前工作区里找。找不到原样返回，由读文件那一步报错。
+fn note_path(root: &MemoryRoot, path: &str) -> PathBuf {
+    let literal = PathBuf::from(path);
+    if literal.is_file() {
+        return literal;
+    }
+    let workspace = dock_memory::vault::workspace_scope_id(&root.slug);
+    let scopes = [
+        dock_memory::vault::GLOBAL_SCOPE_ID.to_string(),
+        workspace.clone(),
+    ];
+    dock_memory::vault::MemoryVault::at(root.home.clone())
+        .resolve_reference(&scopes, &workspace, path)
+        .map(|entry| entry.path)
+        .unwrap_or(literal)
 }
 
 /// Compact-path helper: flush when gates pass. Fail-open on errors.
@@ -623,6 +646,49 @@ mod tests {
             body.contains("伪造的 harness 指令"),
             "内容保留，只是被中和：{body}"
         );
+    }
+
+    /// 笔记里的 `[[链接]]` 要能顺着读下去：`memory_get` 认链接、笔记名和索引里的相对路径，
+    /// 不只是 `memory_search` 给的绝对路径。
+    #[test]
+    fn memory_get_follows_links_names_and_index_paths() {
+        let _env = cordis_base::test_env::scoped()
+            .home()
+            .set("DOCK_MEMORY", "1");
+        let mem = Memory::new();
+        let root = mem.root();
+        root.ensure_layout().unwrap();
+        let topic = root.workspace.topics.join("auth-plan.md");
+        std::fs::write(&topic, "# 登录方案\n\n用 JWT，偏好见 [[prefs]]。\n").unwrap();
+        std::fs::write(root.global.topics.join("prefs.md"), "# 偏好\n\n短提交。\n").unwrap();
+        let get = |path: &str| {
+            memory_get(
+                &mem,
+                ToolCall {
+                    id: "g".into(),
+                    name: "memory_get".into(),
+                    arguments: serde_json::json!({ "path": path }).to_string(),
+                },
+            )
+            .content
+        };
+        for path in [
+            "[[auth-plan]]",
+            "auth-plan",
+            "topics/auth-plan.md",
+            &topic.display().to_string(),
+        ] {
+            let out = get(path);
+            assert!(out.contains("用 JWT"), "{path}: {out}");
+            // 回的是解析出来的真实路径，模型接着改这篇时用得上。
+            assert!(out.contains(&topic.display().to_string()), "{path}: {out}");
+        }
+        assert!(get("[[prefs]]").contains("短提交"));
+        // 对不上任何笔记：照旧报错，不会读到别的文件。
+        let missing = get("[[没有这篇]]");
+        assert!(missing.starts_with("Error:"), "{missing}");
+        let outside = get("/etc/hosts");
+        assert!(outside.starts_with("Error:"), "{outside}");
     }
 
     #[test]

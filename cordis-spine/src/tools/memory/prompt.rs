@@ -46,6 +46,9 @@ pub fn memory_section_body(root: &MemoryRoot) -> String {
         "只允许写 `topics/` 或 `observations/_inbox/` 下的 `.md`。生成的索引、归档、数据库和其他内部文件是保护的。\n\n",
     );
     body.push_str(
+        "笔记之间用 `[[文件名]]` 互相链接：文件名不带 `.md`，例如 `[[chatgpt-siwc-channel]]`；要换显示的字写 `[[文件名|文字]]`。写或改一篇笔记时，和下面索引里已有的笔记有关就在正文里链过去；只链索引里确实有的，不要编文件名。新笔记的文件名起成能当链接用的短名。读到 `[[...]]` 想看那一篇，把它原样交给 `memory_get`。\n\n",
+    );
+    body.push_str(
         "把记忆当历史，不当成当前事实。路径、命令、仓库状态、外部事实和其他会变的说法，先用工具核对再依赖。\n\n",
     );
 
@@ -100,6 +103,8 @@ mod tests {
         assert!(body.contains("MEMORY.md"));
         assert!(body.contains("observations/_inbox"));
         assert!(body.contains("全局记忆索引"));
+        // 链接约定：怎么写、去哪儿读。
+        assert!(body.contains("[[文件名]]") && body.contains("memory_get"));
         assert!(body.contains("工作区记忆索引"));
     }
 }

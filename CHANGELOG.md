@@ -50,6 +50,11 @@
 
 ### 新增
 
+- **记忆笔记之间的链接**：笔记之间可以用 `[[文件名]]` 互相链接，语法和 Obsidian 一样（`[[文件名|显示的字]]`），记忆目录可以直接当 vault 打开。
+  - agent 写记忆时会顺手链到相关的笔记（记忆提醒、`/flush`、`/dream` 的提示词都加了这条约定）。
+  - `memory_get` 的 `path` 现在也认 `[[链接]]`、笔记名和索引里的相对路径，模型可以顺着链接读下去。
+  - 细节见 `docs/tools/memory.md`「笔记之间的链接」。
+
 - **订阅通道（ChatGPT 套餐）**：按 OpenAI「Sign in with ChatGPT」开源通道的官方流程登录 ChatGPT，模型用套餐额度推理，不需要 API key（实测 Go 套餐可用；Free 账号授权页会显示「所需权限不可用」）。
   - 登录：终端 `/auth`（不带参数 = 直接开始登录，打开官方授权页，在后台等，完成后弹提示）；子命令 `login [new|identity|<账号>]` / `logout` / `cancel` / `status` / `list` / `use` / `models` / `import`。桌面端在设置 › 模型 ›「订阅通道」，按官方 UI 规范有「Continue with ChatGPT」「添加账号」「Manage usage」；输入框旁标「Using ChatGPT plan」。
   - **登录后就有模型**：活动账号能用的模型自动出现在 `/model` 和桌面端模型菜单里（`chatgpt/<slug>`，带上下文窗口、推理档位、能否收图），切账号重拉，登出或没开套餐额度就拿掉；config 里写同 id 的 `[model."chatgpt/<slug>"]` 可以逐字段覆盖。手写的模型条目写 `auth = "chatgpt"` 也走这条通道；**不写 `auth` 的模型行为不变**，与配 `api_key` 的模型可以并存。

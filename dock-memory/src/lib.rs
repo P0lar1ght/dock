@@ -26,24 +26,29 @@ pub mod config;
 pub mod dream;
 pub mod embedding;
 pub mod flush;
+pub mod graph;
 pub mod index;
 pub mod keywords;
 pub mod layout;
+pub mod links;
 pub mod manifest;
 pub mod mmr;
+pub mod notes;
 pub mod query_expansion;
 pub mod rewrite;
 pub mod schema;
 pub mod search;
+pub mod similarity;
 pub mod slug;
 pub mod storage;
 pub mod text_utils;
 pub mod tokenize;
+pub mod vault;
 pub mod watcher;
 
 pub use access::{
-    forget, unique_archive_path, AccessError, ForgetResult, MemoryAccessPolicy, PathClass,
-    MAX_FORGET_FILE_BYTES,
+    forget, forget_in_scope, unique_archive_path, AccessError, ForgetResult, MemoryAccessPolicy,
+    PathClass, MAX_FORGET_FILE_BYTES,
 };
 pub use config::{MemoryEmbeddingConfig, MemorySearchConfig, MmrConfig, SearchResult};
 pub use dream::{
@@ -66,4 +71,4 @@ pub use search::{
 };
 pub use slug::workspace_slug;
 pub use storage::{persist_observation, save_remember_note, write_flush_observation};
-pub use watcher::MemoryFileWatcher;
+pub use watcher::{MemoryChangeWatcher, MemoryFileWatcher};
