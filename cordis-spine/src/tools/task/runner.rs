@@ -497,16 +497,17 @@ async fn drive_child(
         let was_cancelled = cancelled.load(Ordering::Relaxed)
             || interrupt
             || matches!(&outcome, Err(e) if e.contains("cancel"));
-        let (success, output) = match &outcome {
-            Ok(text) => (true, text.clone()),
-            Err(e) => (false, format!("failed: {e}")),
-        };
         // 模型请求出错不是 `Err`（错误在最后一次采样里，循环照常收尾），照主会话
-        // `end_turn` 的规矩也算失败。
+        // `end_turn` 的规矩也算失败——交给父级的结果和回合结束通知也一样，不然父级
+        // 拿到的是「完成」、正文为空。
         let sample_error = child
             .get::<Sessions>(SESSIONS)
             .and_then(|s| s.last_sample_error());
-        store.set_failed(&id, !was_cancelled && (!success || sample_error.is_some()));
+        let (success, output) = match (&outcome, &sample_error) {
+            (Err(e), _) | (Ok(_), Some(e)) => (false, format!("failed: {e}")),
+            (Ok(text), None) => (true, text.clone()),
+        };
+        store.set_failed(&id, !was_cancelled && !success);
         // One parent notice per finished turn. The child's text rides it when
         // it did not message its parent; a caller that already has the result
         // (foreground spawn) drops the notice again.

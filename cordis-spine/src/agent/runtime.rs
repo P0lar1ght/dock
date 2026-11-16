@@ -39,9 +39,10 @@ const MAX_STEPS: usize = 256;
 const MAX_EMPTY_SAMPLES: usize = 3;
 /// 空采样之后、重采之前落的提醒。
 ///
-/// 不能原样重采：chat / messages 两条 wire 会把只有推理的一步回放成 assistant
-/// 消息，请求就以一条空正文的 assistant 结尾。落一条 user 角色的提醒，消息照常
-/// 一来一回，也告诉模型上一步什么都没交出来（常见成因是把工具调用写进了推理）。
+/// 不能原样重采：chat wire 在推理或 `thinking_blocks` 非空时、messages wire 在
+/// `thinking_blocks` 非空时，会把这一步回放成一条空正文的 assistant 消息，请求就以
+/// 它结尾（responses wire 直接丢掉这一步）。落一条 user 角色的提醒，消息照常一来
+/// 一回，也告诉模型上一步什么都没交出来（常见成因是把工具调用写进了推理）。
 const EMPTY_SAMPLE_REMINDER: &str = "<system-reminder>\n上一步只有推理，没有正文也没有工具调用，什么都没有交出来。接着做你打算做的下一步：要调用工具就用工具调用发出来（不要写在推理里）；已经做完了就直接回复。\n</system-reminder>";
 /// Hard stop on `agent/turn-end` continuations. Handlers self-limit, but
 /// continuation is plugin-territory now (a dynamic Cordis plugin on disk can

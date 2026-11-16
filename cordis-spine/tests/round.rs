@@ -1155,8 +1155,9 @@ fn last_turn_end(root: &Context) -> Option<cordis_spine::TurnEndStatus> {
 /// 以前它被当成「答完了」，清单还开着就触发回合末记账，模型记完账这一轮就
 /// 结束，聊天框里什么都没有（模型把工具调用写进推理通道时就是这样）。
 ///
-/// 重采之前要先落一条提醒：chat / messages 两条 wire 会把只有推理的一步回放成
-/// assistant 消息，原样重采的话请求以一条空正文的 assistant 结尾。
+/// 重采之前要先落一条提醒：chat wire（推理或 `thinking_blocks` 非空）和 messages
+/// wire（`thinking_blocks` 非空）会把这一步回放成空正文的 assistant 消息，原样重采
+/// 的话请求以它结尾。
 #[tokio::test]
 async fn a_reasoning_only_sample_is_resampled_behind_a_reminder() {
     let b = boot_recorded(|i| match i {

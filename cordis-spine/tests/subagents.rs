@@ -1411,6 +1411,42 @@ async fn child_whose_sample_failed_is_marked_failed() {
     assert!(snap.failed, "模型请求出错的一轮要标失败：{snap:?}");
 }
 
+/// 子代理的采样出错（循环照常收尾、不是 `Err`）：交给父级的结果也要是失败、带上
+/// 原因。以前面板标了失败，`task` 的结果却是「完成」、正文为空，父级模型以为它
+/// 跑完了只是没说话；后台跑的，父级收到的回合结束通知里也看不出出了错。
+#[tokio::test]
+async fn a_childs_failed_sample_reaches_the_parent_as_a_failure() {
+    let h = boot(Arc::new(Failing)).await;
+    let tools = h.root.require::<Tools>(TOOLS).unwrap();
+    let sub = h.root.require::<Subagents>(SUBAGENTS).unwrap();
+    let out = tools
+        .execute(ToolCall {
+            id: "fg".into(),
+            name: "task".into(),
+            arguments: serde_json::json!({
+                "prompt": "x",
+                "description": "foreground",
+                "subagent_type": "explore",
+                "run_in_background": false,
+            })
+            .to_string(),
+        })
+        .await;
+    assert!(
+        out.content.contains("429 Too Many Requests") && !out.content.contains("<subagent_meta>"),
+        "前台子代理采样出错，父级要拿到失败和原因：{}",
+        out.content
+    );
+
+    let id = spawn_bg(&tools, "x", "explore").await;
+    wait_idle(&sub, &id).await;
+    let notices = sub.drain_parent_notices("main");
+    assert!(
+        notices.iter().any(|t| t.contains("429 Too Many Requests")),
+        "后台子代理的回合结束通知要带上出错原因：{notices:?}"
+    );
+}
+
 /// 回归：分页（`main#2`）派的子代理，回合结束通知进**那一页**的信箱，由那一页的循环取走；
 /// 第 1 页（`main`）既看不到也不会替它开一轮。以前只有 `main` 取信箱，分页派的孩子回话
 /// 全落到第 1 页，第 1 页还拿着别人的回报自己跑了一轮，派活的那一页永远等不到。
