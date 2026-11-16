@@ -901,6 +901,7 @@ bash 里改的不算。轮次用投影里的 `turnId`（和 `item/user_message` 
 - 推送 `memory/changed {}`：**连接级**，只推受信连接。
   有笔记变了就推（界面、agent、外部编辑器），250 毫秒内的合并成一次。
   第一次 `memory/graph` 之后才开始监听；重写 `MEMORY.md` 不算。
+  那时记忆目录还没建就每 2 秒看一次，建出来再开始监听并推一次。
 
 错误码：`invalid_params`、`not_found`、`read_only`（嵌套目录、旧版平铺的观察）、
 `conflict`、`too_large`（超过 256 KiB）、`write_failed`。

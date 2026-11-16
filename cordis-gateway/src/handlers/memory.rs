@@ -33,13 +33,14 @@
 //! - `memory/link { from, to }` / `memory/unlink { from, to | target }` → `{ note, changed }`：
 //!   在 `from` 里加 / 去掉指向 `to` 的链接；`target` 是悬空链接里写的名字。
 //! - 推送 `memory/changed {}`（连接级，只推受信连接）：有笔记变了（不管是界面、agent 还是
-//!   外部编辑器改的），合并在 [`CHANGE_DEBOUNCE`] 内。第一次 `memory/graph` 之后才开始监听。
+//!   外部编辑器改的），合并在 [`CHANGE_DEBOUNCE`] 内。第一次 `memory/graph` 之后才开始监听；
+//!   那时记忆目录还没建（还没用过记忆）就每 [`DIR_POLL`] 看一次，建出来再开始监听并推一次。
 //!
 //! 错误码：`invalid_params`、`not_found`、`read_only`（嵌套目录 / 旧版平铺的观察）、
 //! `conflict`（期间被改过）、`too_large`、`write_failed`。
 
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use serde_json::{json, Value};
@@ -65,6 +66,8 @@ use crate::threads;
 /// 文件变动合并成一次推送的间隔：一次保存会连着触发好几个文件事件
 /// （临时文件换上去、`MEMORY.md` 重新生成、改名时被改写的反链）。
 const CHANGE_DEBOUNCE: Duration = Duration::from_millis(250);
+/// 记忆目录还没建时，多久看一次它出来了没有。
+const DIR_POLL: Duration = Duration::from_secs(2);
 
 const SEARCH_DEFAULT: usize = 50;
 const SEARCH_MAX: usize = 200;
@@ -167,47 +170,92 @@ struct ChangeFeed {
     running: Mutex<Option<Running>>,
 }
 
-struct Running {
-    _watcher: MemoryChangeWatcher,
-    pump: tokio::task::JoinHandle<()>,
+/// 推一次 `memory/changed`。
+type Notify = Arc<dyn Fn() + Send + Sync>;
+
+enum Running {
+    Watching {
+        _watcher: MemoryChangeWatcher,
+        pump: tokio::task::JoinHandle<()>,
+    },
+    /// 记忆目录还没建（还没用过记忆）：等它出现。
+    Waiting(tokio::task::JoinHandle<()>),
 }
 
 impl ChangeFeed {
-    /// 记忆目录还不存在时起不来（没东西可监听）：下一次看图再试。
-    fn ensure_running(&self, ctx: &Context, vault: &MemoryVault) {
+    /// 开始监听 `home`（记忆目录）。它还不存在时在后台等它出现：空的记忆页一直开着、
+    /// agent 随后写出第一批笔记，界面也要能就地更新，不能等下一次看图。
+    fn ensure_running(self: &Arc<Self>, home: &Path, notify: Notify) {
         let mut running = self.running.lock().unwrap();
         if running.is_some() {
             return;
         }
-        let signal = Arc::new(tokio::sync::Notify::new());
-        let wake = signal.clone();
-        let Some(watcher) = MemoryChangeWatcher::start(vault.home(), move || wake.notify_one())
-        else {
+        if home.is_dir() {
+            // 起不来（比如监听数到了上限）：下一次看图再试。
+            *running = watch(home, notify);
             return;
-        };
-        // 方法表在推送时现取，不把它关进任务里。
-        let live = ctx.clone();
-        let pump = tokio::spawn(async move {
+        }
+        let feed: Weak<Self> = Arc::downgrade(self);
+        let home = home.to_path_buf();
+        *running = Some(Running::Waiting(tokio::spawn(async move {
             loop {
-                signal.notified().await;
-                // 等这一阵写完再推：期间再来的事件并进下一次。
-                tokio::time::sleep(CHANGE_DEBOUNCE).await;
-                if let Some(table) = live.get::<GatewayMethods>(GATEWAY_METHODS) {
-                    table.notify_trusted(protocol::MEMORY_CHANGED, json!({}));
+                tokio::time::sleep(DIR_POLL).await;
+                if !home.is_dir() {
+                    continue;
                 }
+                let Some(feed) = feed.upgrade() else {
+                    return;
+                };
+                let mut running = feed.running.lock().unwrap();
+                // 期间被停了（插件卸载）：不再起。
+                if !matches!(*running, Some(Running::Waiting(_))) {
+                    return;
+                }
+                *running = watch(&home, notify.clone());
+                drop(running);
+                // 目录是刚建的，里面可能已经有笔记了。
+                notify();
+                return;
             }
-        });
-        *running = Some(Running {
-            _watcher: watcher,
-            pump,
-        });
+        })));
     }
 
     fn stop(&self) {
-        if let Some(running) = self.running.lock().unwrap().take() {
-            running.pump.abort();
+        match self.running.lock().unwrap().take() {
+            Some(Running::Watching { pump, .. }) => pump.abort(),
+            Some(Running::Waiting(task)) => task.abort(),
+            None => {}
         }
     }
+}
+
+/// 监听 `home`，有笔记变了就（合并一阵后）`notify`。起不来是 `None`。
+fn watch(home: &Path, notify: Notify) -> Option<Running> {
+    let signal = Arc::new(tokio::sync::Notify::new());
+    let wake = signal.clone();
+    let watcher = MemoryChangeWatcher::start(home, move || wake.notify_one())?;
+    let pump = tokio::spawn(async move {
+        loop {
+            signal.notified().await;
+            // 等这一阵写完再推：期间再来的事件并进下一次。
+            tokio::time::sleep(CHANGE_DEBOUNCE).await;
+            notify();
+        }
+    });
+    Some(Running::Watching {
+        _watcher: watcher,
+        pump,
+    })
+}
+
+/// 推给受信连接。方法表在推送时现取，不把它关进任务里。
+fn push_changed(ctx: &Context) -> Notify {
+    let live = ctx.clone();
+    Arc::new(move || {
+        if let Some(table) = live.get::<GatewayMethods>(GATEWAY_METHODS) {
+            table.notify_trusted(protocol::MEMORY_CHANGED, json!({}));
+        }
+    })
 }
 
 async fn blocking(
@@ -288,7 +336,7 @@ fn query_of(project: Option<PathBuf>, selection: ScopeSelection, similar: bool) 
 async fn graph(
     gateway: &GatewayHandle,
     params: Value,
-    feed: &ChangeFeed,
+    feed: &Arc<ChangeFeed>,
 ) -> Result<Value, RpcError> {
     let project = project_dir(gateway, &params)?;
     let selection = selection(&params)?;
@@ -308,7 +356,7 @@ async fn graph(
         }
     };
     let vault = MemoryVault::open_default();
-    feed.ensure_running(gateway.ctx(), &vault);
+    feed.ensure_running(vault.home(), push_changed(gateway.ctx()));
     blocking(move || {
         let query = query_of(project, selection, similar);
         let graph = build_graph(&vault, &query);
@@ -583,5 +631,62 @@ fn note_error(error: NoteError) -> RpcError {
         | NoteError::Access(_)
         | NoteError::Io(_)
         | NoteError::Index(_) => RpcError::app("write_failed", message),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    async fn wait_for(fired: &AtomicUsize, at_least: usize) -> bool {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        while fired.load(Ordering::SeqCst) < at_least {
+            if tokio::time::Instant::now() > deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        true
+    }
+
+    /// 空的记忆页开着（记忆目录还没建），agent 随后写出第一批笔记：要推 `memory/changed`，
+    /// 之后再改笔记也照常推。原来目录不在就不监听，要等下一次 `memory/graph`。
+    #[tokio::test]
+    async fn change_feed_waits_for_the_memory_dir_to_appear() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("memory");
+        let fired = Arc::new(AtomicUsize::new(0));
+        let counter = fired.clone();
+        let feed = Arc::new(ChangeFeed::default());
+        feed.ensure_running(
+            &home,
+            Arc::new(move || {
+                counter.fetch_add(1, Ordering::SeqCst);
+            }),
+        );
+
+        let topics = home.join("global/topics");
+        std::fs::create_dir_all(&topics).unwrap();
+        std::fs::write(topics.join("first.md"), "# 第一篇\n").unwrap();
+        assert!(
+            wait_for(&fired, 1).await,
+            "记忆目录后来才建出来：第一批笔记没推送"
+        );
+
+        if !matches!(
+            *feed.running.lock().unwrap(),
+            Some(Running::Watching { .. })
+        ) {
+            eprintln!("skipping: could not create file watcher (resource limit?)");
+            return;
+        }
+        let before = fired.load(Ordering::SeqCst);
+        std::fs::write(topics.join("second.md"), "# 第二篇\n").unwrap();
+        assert!(
+            wait_for(&fired, before + 1).await,
+            "开始监听之后改笔记没推送"
+        );
+        feed.stop();
     }
 }

@@ -8579,6 +8579,58 @@ async fn paired_pages_cannot_read_or_change_memory() {
     );
 }
 
+/// `threadId` 代替 `cwd`：「当前项目」取那一页的工作目录（GUI 在会话里打开记忆页时这么传）。
+#[tokio::test]
+async fn memory_graph_takes_the_current_project_from_a_thread() {
+    let root = harness_root().await;
+    root.plugin(agent_presets(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    root.plugin(
+        cordis_spine::tabs(),
+        cordis_spine::TabsConfig::headless(test_page_mount()),
+    )
+    .unwrap()
+    .wait()
+    .await
+    .unwrap();
+    let (addr, ticket, _serve) = serve_trusted(&root).await;
+    let (mut gui, _) = Rpc::connect_as(addr, &ticket, GUI_ORIGIN).await;
+    let _ = gui.call("initialize", json!({})).await;
+    let dir = project_dir("mem-thread");
+    let scope = memory_scope(&dir);
+    write_memory(
+        &format!("{scope}/topics/thread-note.md"),
+        "# 这一页的项目\n",
+    );
+    let started = gui
+        .call("thread/start", json!({ "cwd": dir.display().to_string() }))
+        .await;
+    let id = started["result"]["thread"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{started}"))
+        .to_string();
+
+    let graph = gui.call("memory/graph", json!({ "threadId": id })).await;
+    assert_eq!(graph["result"]["currentScope"], scope, "{graph}");
+    let ids: Vec<&str> = graph["result"]["notes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|n| n["id"].as_str())
+        .collect();
+    assert!(
+        ids.contains(&format!("{scope}/topics/thread-note.md").as_str()),
+        "{graph}"
+    );
+    let missing = gui
+        .call("memory/graph", json!({ "threadId": "no-such-thread" }))
+        .await;
+    assert!(missing["error"].is_object(), "{missing}");
+}
+
 /// agent（或外部编辑器）直接改了记忆文件：看过图的受信连接收到 `memory/changed`，
 /// 界面据此重拉。没人看图之前不监听。
 #[tokio::test]
