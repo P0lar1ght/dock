@@ -939,7 +939,12 @@ fn build_frame_with(
                     if let Some(at) = stamp {
                         stamps.push((lines.len(), at));
                     }
-                    lines.extend(llm_error_lines(err, &theme, message_wrap(width, show_ts)));
+                    lines.extend(llm_error_lines(
+                        err,
+                        llm.stopped_by_loop,
+                        &theme,
+                        message_wrap(width, show_ts),
+                    ));
                     lines.push(Line::from(""));
                 }
                 for call in &llm.tool_calls {
@@ -1129,10 +1134,22 @@ fn compaction_note(done: Option<&CompactProgress>, theme: &Theme) -> Line<'stati
     Line::from(Span::styled(text, style))
 }
 
-fn llm_error_lines(err: &str, theme: &Theme, wrap: usize) -> Vec<Line<'static>> {
+/// `stopped_by_loop`：这不是请求失败，是循环自己停下了这一轮（连续只给推理、
+/// 原样重复同一个调用），标题换成「已停下」。
+fn llm_error_lines(
+    err: &str,
+    stopped_by_loop: bool,
+    theme: &Theme,
+    wrap: usize,
+) -> Vec<Line<'static>> {
     let style = Style::default().fg(theme.accent_error);
+    let title = if stopped_by_loop {
+        "已停下"
+    } else {
+        "请求失败"
+    };
     let mut out = vec![Line::from(Span::styled(
-        format!("{} 请求失败", glyphs::diamond_filled()),
+        format!("{} {title}", glyphs::diamond_filled()),
         style.add_modifier(Modifier::BOLD),
     ))];
     for raw in err.lines() {
@@ -2387,6 +2404,22 @@ mod tests {
         let text = plain(&lines);
         assert!(text.contains("请求失败"), "{text}");
         assert!(text.contains("connection reset by peer"), "{text}");
+    }
+
+    /// 循环自己停下这一轮（连续只给推理、原样重复同一个调用）也走 `LlmOutput.error`，
+    /// 但不是请求失败：以前一律画成「请求失败」，看着像网络或上游出了问题。
+    #[test]
+    fn a_loop_stop_is_not_labelled_a_request_failure() {
+        let detail = "连续 8 步用完全相同的参数调用 `todo_write`，看起来卡住了，已停下。";
+        let lines = lines_from_events(&[LogEvent::LlmStream(cordis_spine::LlmOutput {
+            error: Some(detail.into()),
+            stopped_by_loop: true,
+            ..Default::default()
+        })]);
+        let text = plain(&lines);
+        assert!(!text.contains("请求失败"), "{text}");
+        assert!(text.contains("已停下"), "{text}");
+        assert!(text.contains("看起来卡住了"), "{text}");
     }
 
     fn shell_exec(id: &str, command: &str, content: &str) -> LogEvent {

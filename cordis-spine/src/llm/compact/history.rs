@@ -123,6 +123,7 @@ pub fn prepare_conversation_for_summarization(
                     // 压缩摘要是发给模型的，失败详情本来就不进模型历史，
                     // 更不该被摘进去。
                     error: None,
+                    stopped_by_loop: false,
                 }))
             }
             other => Some(other.clone()),

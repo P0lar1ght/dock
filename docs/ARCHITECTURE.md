@@ -218,12 +218,12 @@ agent/turn-end               有人要续跑 → 落 <system-reminder> 回到采
 - 一步的签名 = 每颗调用「名字 + 键排序后的参数 JSON」排序后拼起来：参数键的顺序、同一步里几颗调用的顺序都不算变化。
 - 一步里全是 `read_file` / `todo_write`：第 4 次相同提醒、第 8 次停；别的第 8 次提醒、第 12 次停；只有一颗 `bash true` 的空转第 4 次直接停。
 - 第 N 次相同的那一步，结果全部落完才判断，提醒 / 停下不会夹在 `tool_calls` 和结果中间。模型回了正文就重新数；空采样不计数也不清零；插话不清零（同 grok-build）。
-- 停下：说明放 `LlmOutput.error`（看得见、不进模型历史），返回 `Error::Stationary`，`end_turn` 记失败，不跑 `agent/turn-end`。返回 `Err` 所以 actor 不排 GoalSummary 续跑——续跑只会把卡住的循环重新拉起来。子代理交给父级的是失败、带这条说明。
+- 停下：说明放 `LlmOutput.error`（看得见、不进模型历史；`stopped_by_loop = true`，TUI 标「已停下」而不是「请求失败」），返回 `Error::Stationary`，`end_turn` 记失败，不跑 `agent/turn-end`。返回 `Err` 所以 actor 不排 GoalSummary 续跑——续跑只会把卡住的循环重新拉起来。子代理交给父级的是失败、带这条说明。
 - 抓不到 A、B 两步来回切换的空转（两家同样不管）：主会话可以 Esc，子代理可以在任务面板里停。
 
 **只有回复才走 `agent/turn-end`。** 每次采样先分成四种（`agent/runtime.rs` 的 `Sampled`）：工具调用、回复（正文非空）、空（只有推理，正文和工具调用都空，也没报错）、出错（`LlmOutput.error`）。只有回复会走 `agent/turn-end`，所以 `TurnEnd.ended_with_text` 恒为真（没有步数上限之后，「步数耗尽」那条 `false` 路径也没了），字段只是留给已有插件；todo 记账、goal 续跑都靠这一条。以前后两种也被当成回复：模型把工具调用写进推理通道时，空采样被当成「答完了」，todo 清单还开着就插一步记账，模型记完账这一轮就结束，聊天框里什么都没有；请求出错时记账那次采样一成功，`end_turn` 只看最后一次采样，这一轮的失败就被盖成「完成」。
 
-- **空**：落一条 `<system-reminder>` 再采（算一步）。不原样重采是因为 chat wire（推理或 `thinking_blocks` 非空）和 messages wire（`thinking_blocks` 非空）会把这一步回放成空正文的 assistant 消息，原样重采的话请求以它结尾；responses wire 直接丢掉这一步。连着 `MAX_EMPTY_SAMPLES = 3` 次都空就按失败收尾：原因放 `error`（不进模型历史），`end_turn` 与子代理照「本轮最后一次采样出错」记失败（子代理交给父级的结果同样是失败，带这条原因）。中间有一步交出了东西就重新数。
+- **空**：落一条 `<system-reminder>` 再采（算一步）。不原样重采是因为 chat wire（推理或 `thinking_blocks` 非空）和 messages wire（`thinking_blocks` 非空）会把这一步回放成空正文的 assistant 消息，原样重采的话请求以它结尾；responses wire 直接丢掉这一步。连着 `MAX_EMPTY_SAMPLES = 3` 次都空就按失败收尾：原因放 `error`（不进模型历史；同样标 `stopped_by_loop`），`end_turn` 与子代理照「本轮最后一次采样出错」记失败（子代理交给父级的结果同样是失败，带这条原因）。中间有一步交出了东西就重新数。
 - **出错**：错误已经落在这次采样的事件里，直接收尾，不跑 `agent/turn-end`。goal 不受影响：actor 照常排 GoalSummary 续跑。
 
 **一次回复里的工具调用：只读的一起跑，别的一颗一颗跑。** 循环把 `tool_calls` 切成几批（`agent/runtime.rs` 的 `parallel_batches`）：连在一起的只读调用（读文件、搜索、看目录、查网页、读记忆、LSP、读技能、`search_tool`，以及只读的 bash 命令——判断同只读场景，`cordis_base::read_only_shell`）一批并发执行，别的每颗自成一批；批与批按顺序跑，结果按模型给的顺序落成 `ToolExecute`，所以「先改再读」的先后不变。分类在 `agent/capability.rs` 的 `parallel_safe`，认不出来的（MCP、动态包、浏览器）一律不并行。参考 Codex 的 `tools/parallel.rs`（能并行的拿读锁，别的拿写锁）。系统提示词同时要求彼此不依赖的调用放进同一次回复，少一来一回。

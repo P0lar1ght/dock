@@ -1140,6 +1140,21 @@ fn thinks(reasoning: &str) -> LlmOutput {
     }
 }
 
+/// 最后一条带 `error` 的采样事件：`(error, stopped_by_loop)`。
+fn last_sample_error(root: &Context) -> Option<(String, bool)> {
+    root.require::<Sessions>(SESSIONS)
+        .unwrap()
+        .events()
+        .into_iter()
+        .rev()
+        .find_map(|e| match e {
+            cordis_spine::LogEvent::LlmStream(out) => {
+                out.error.map(|error| (error, out.stopped_by_loop))
+            }
+            _ => None,
+        })
+}
+
 fn last_turn_end(root: &Context) -> Option<cordis_spine::TurnEndStatus> {
     root.require::<Sessions>(SESSIONS)
         .unwrap()
@@ -1208,6 +1223,10 @@ async fn reasoning_only_samples_end_the_turn_as_failed_without_bookkeeping() {
         }
         other => panic!("连续空采样要记成失败：{other:?}"),
     }
+    assert!(
+        matches!(last_sample_error(&b.root), Some((_, true))),
+        "循环自己停下要标 stopped_by_loop，TUI 才不会画成「请求失败」"
+    );
     let texts: Vec<String> = b
         .root
         .require::<Sessions>(SESSIONS)
@@ -1247,6 +1266,10 @@ async fn a_failed_sample_skips_turn_end_and_stays_failed() {
         Some(cordis_spine::TurnEndStatus::Failed(
             "HTTP 429 Too Many Requests".into()
         ))
+    );
+    assert!(
+        matches!(last_sample_error(&b.root), Some((_, false))),
+        "请求失败不是循环停下的"
     );
 }
 
@@ -1318,6 +1341,10 @@ async fn repeating_the_same_call_is_nudged_then_stopped() {
         }
         other => panic!("停下要记成失败：{other:?}"),
     }
+    assert!(
+        matches!(last_sample_error(&b.root), Some((_, true))),
+        "循环自己停下要标 stopped_by_loop，TUI 才不会画成「请求失败」"
+    );
     assert_eq!(b.bookkeeping(), 0, "停下的一轮不跑回合末记账");
     let texts = model_texts(&b.root.require::<Sessions>(SESSIONS).unwrap().events());
     assert!(

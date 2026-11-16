@@ -689,6 +689,10 @@ pub struct LlmOutput {
     /// 门槛，所以错误只写这里就天然不进模型历史，同时仍留在会话事件里供 TUI
     /// 渲染与 `/resume` 回放。
     pub error: Option<String>,
+    /// `true` = [`Self::error`] 不是请求失败，是 agent 循环自己停下这一轮的说明
+    /// （连续只给推理、原样重复同一个工具调用）。只管怎么给人看（TUI 的标题是
+    /// 「已停下」而不是「请求失败」）；记失败、不回放给模型都和请求失败一样。
+    pub stopped_by_loop: bool,
 }
 
 impl LlmOutput {

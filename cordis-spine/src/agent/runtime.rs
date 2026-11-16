@@ -238,6 +238,7 @@ async fn grok_sample_loop(
                             error: Some(format!(
                                 "模型连续 {MAX_EMPTY_SAMPLES} 次只给了推理，没有正文也没有工具调用，已停下。发一条新消息可继续。"
                             )),
+                            stopped_by_loop: true,
                             ..cordis_base::types::LlmOutput::default()
                         }));
                         return Ok(TurnOutcome::Text(String::new()));
@@ -292,11 +293,12 @@ async fn grok_sample_loop(
                 }
                 super::stationarity::Verdict::Stop { tool, run } => {
                     let stop = Error::Stationary { tool, run };
-                    // 跟空采样一样把说明放 `error`：看得见（TUI 按出错画），不进模型
-                    // 历史。返回 `Err` 让 actor 不排 goal 续跑——续跑只会把卡住的循环
+                    // 跟空采样一样把说明放 `error`：看得见（`stopped_by_loop` 让 TUI 标
+                    // 「已停下」而不是「请求失败」），不进模型历史。返回 `Err` 让 actor 不排 goal 续跑——续跑只会把卡住的循环
                     // 重新拉起来（grok-build 同样不排）。
                     sessions.append(LogEvent::LlmStream(cordis_base::types::LlmOutput {
                         error: Some(stop.to_string()),
+                        stopped_by_loop: true,
                         ..cordis_base::types::LlmOutput::default()
                     }));
                     return Err(stop);
