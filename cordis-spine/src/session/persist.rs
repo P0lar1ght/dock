@@ -113,6 +113,11 @@ enum WireEvent {
         /// 本轮采样的失败详情。旧文件没有这个字段，`default` 让它们照常读出来。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
+        /// `error` 是循环自己停下这一轮的说明，不是请求失败（见
+        /// `LlmOutput::stopped_by_loop`）。只在为真时落盘；旧文件没有它，读出来是
+        /// `false`，照旧当请求失败画。旧版本读到它会忽略。
+        #[serde(default, skip_serializing_if = "is_false")]
+        stopped_by_loop: bool,
     },
     Tool {
         id: String,
@@ -859,6 +864,7 @@ fn to_wire(event: &LogEvent) -> Option<WireEvent> {
             reasoning_items: out.reasoning_items.clone(),
             thinking_blocks: out.thinking_blocks.clone(),
             error: out.error.clone(),
+            stopped_by_loop: out.stopped_by_loop,
             tool_calls: out
                 .tool_calls
                 .iter()
@@ -925,6 +931,7 @@ fn from_wire(event: WireEvent) -> LogEvent {
             reasoning_items,
             thinking_blocks,
             error,
+            stopped_by_loop,
         } => LogEvent::LlmStream(LlmOutput {
             text,
             reasoning,
@@ -932,6 +939,7 @@ fn from_wire(event: WireEvent) -> LogEvent {
             reasoning_items,
             thinking_blocks,
             error,
+            stopped_by_loop,
             tool_calls: tool_calls
                 .into_iter()
                 .map(|c| ToolCall {
@@ -1001,6 +1009,10 @@ pub fn empty_llm_placeholder(events: &[LogEvent]) -> bool {
         Some(LogEvent::LlmStream(out))
             if out.text.is_empty() && out.reasoning.is_empty() && out.tool_calls.is_empty()
     )
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 #[cfg(test)]
@@ -1233,6 +1245,34 @@ mod tests {
             panic!("expected llm row");
         };
         assert_eq!(out.error, None);
+    }
+
+    /// 循环自己停下这一轮的说明（`stopped_by_loop`）要跟着会话落盘，`/resume` 之后
+    /// 仍标「已停下」而不是「请求失败」。只在为真时写这个键；旧行没有它就是 `false`。
+    #[test]
+    fn loop_stop_flag_round_trips_and_is_omitted_when_false() {
+        let stop = LogEvent::LlmStream(LlmOutput {
+            error: Some("连续 8 步原样重复，已停下。".into()),
+            stopped_by_loop: true,
+            ..LlmOutput::default()
+        });
+        let line = serde_json::to_string(&to_wire(&stop).unwrap()).unwrap();
+        assert!(line.contains(r#""stopped_by_loop":true"#), "{line}");
+        assert_eq!(from_wire(serde_json::from_str(&line).unwrap()), stop);
+
+        let failed = LogEvent::LlmStream(LlmOutput {
+            error: Some("HTTP 429".into()),
+            ..LlmOutput::default()
+        });
+        let line = serde_json::to_string(&to_wire(&failed).unwrap()).unwrap();
+        assert!(!line.contains("stopped_by_loop"), "{line}");
+
+        let old: WireEvent =
+            serde_json::from_str(r#"{"kind":"llm","text":"","error":"HTTP 429"}"#).unwrap();
+        let LogEvent::LlmStream(out) = from_wire(old) else {
+            panic!("expected llm row");
+        };
+        assert!(!out.stopped_by_loop);
     }
 
     /// 工具的 `is_error` 原样落盘、读回；旧行没有这个字段时按兜底规则推断，
