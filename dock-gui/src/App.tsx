@@ -6,7 +6,7 @@ import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, use
 import { invoke } from "@tauri-apps/api/core";
 import { IN_TAURI, IconButton } from "./components/chrome";
 import { openPath } from "@tauri-apps/plugin-opener";
-import { FeatureHostContext, panelFor, type FeatureHost } from "./features/registry";
+import { FeatureHostContext, navPageFor, panelFor, type FeatureHost } from "./features/registry";
 import {
   gatewayArg,
   lastSessionKey,
@@ -707,6 +707,9 @@ export default function App() {
     },
   };
 
+  // 功能登记的整页（记忆图谱）：宿主只按 key 找，不认识具体是哪一页。
+  const FeaturePage = navPageFor(navPage);
+
   return (
     <FeatureHostContext.Provider value={featureHost}>
     <div className={`glass-window relative flex h-full w-full overflow-hidden bg-window ${settings ? "settings-open" : ""}`}>
@@ -840,6 +843,14 @@ export default function App() {
               onOpenSession={navigate}
               initialSessionId={activeSessionId}
               insetLeft={sidebarCollapsed}
+            />
+          )}
+          {FeaturePage && (
+            <FeaturePage.Page
+              key={navPage}
+              insetLeft={sidebarCollapsed}
+              cwd={activeSession?.cwd ?? (lastCwd || null)}
+              projects={prProjects}
             />
           )}
           {benchOpen ? (

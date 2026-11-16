@@ -51,6 +51,7 @@
 - 加一种扩展：registry 加一张表 + 宿主加一个插槽。
 - 工具卡插槽：useIcon（图标）、Body（展开后的正文）、Attachment（标题行下、不用展开）、isArtifact（不随过程折起）、keepMounted（跑着时也不挪，只给含 iframe 的）。
 - 轮次脚注插槽（registerTurnFooter）：一轮结束后、回复操作行上面；每轮改动卡用它（features/turn-changes）。
+- 侧栏整页插槽（registerNavPage）：导航里多一项，key 是 `feature:<id>`；记忆页用它（features/memory-graph）。
 - 登记都在启动时完成：工具卡的 `useIcon` 是 hook，宿主按固定顺序调。
 - 老组件碰到再迁，不搬家式重构。
 - 登记的面板 `poppable: true` 才能弹出：Rust 侧 open_panel_window 也要认那种 kind。
@@ -153,6 +154,28 @@
 - 网关有 desktopControl 时：desktop/view/windows 列窗口，pin 钉住（空闲不追前台），input 把点击、滚动、打字送回那一帧的窗口。打字走画面下的输入条，按上次点击的位置送出。画面铺满面板。agent 在跑时先接手。
 - 浏览器面板视口跟着面板走（browser/view/resize，拖分隔线时等松手）；空闲直接可操作，agent 跑时要「接手」。
 - 浏览器面板没标签页时地址栏能开页（browser/view/open 带 url，经浏览器 MCP，和 agent 共用）。
+
+## 记忆图谱
+
+- 只走 dock.1 `memory/*`（features/memory-graph/api.ts）：不读本机磁盘，远程 Dock 的记忆不在本机。
+- 画布在 engine.ts（d3-force + Canvas 2D），不进 React 渲染循环；React 只交数据和选中状态。
+- 整页按需加载（index.ts 用 features/deferred）：别在别处静态 import MemoryPage。
+- 设置面板和抽屉都在 window 上听 Esc：先处理的 preventDefault，另一个看到就让出。
+- 点的颜色只分三类（当前项目 / 全局 / 其他项目）：图上任意两点都可能挨着，颜色多了分不清。
+- 按条件着色同理最多 3 组，用同一套三色；着色时没命中的变灰，不和范围色同时出现。
+- 主题 / 观察用实心 / 空心区分，别再加颜色；别的项目靠聚簇位置和直接标注的项目名区分。
+- 图上的文字用墨色，不跟点的颜色走。
+- 换色先跑色板校验（三色两两在红绿色盲模拟下也要分得开）。
+- 链接指向哪篇由 Dock 定（memory/note/get 的 targets）：前端只把 `[[…]]` 换成可点的链接，不自己解析。
+- 抽屉里的弹窗放在抽屉外面：抽屉带模糊，里面的 fixed 元素会按抽屉定位。
+- 零星多一篇笔记不动视野；换项目 / 范围才重新适应窗口。
+- 画面没被平移 / 缩放过时，抽屉开合重新适应；动过就只挪半个抽屉宽。
+- 相似建议默认只画悬停 / 选中那篇的，也不参与布局：看不见的线不该把点拉成一团。
+- 整体围成一个圆（横竖拉力一样）：用户要的，别为了铺满宽画布压成椭圆。
+- 指针坐标要按画布的视口宽 / 布局宽折算：设置里的「字号」给整窗加了 CSS zoom。
+- 局部图谱和大图同一个引擎（`local`）：不记位置、不拖线，滚轮留给抽屉滚动。
+- 图谱设置在 settings.ts（localStorage）；加设置项要同时加进 sanitize 和 RANGES。
+- 列表视图是图的表格版，筛选和搜索两边要一致。
 
 ## 文档纪律
 

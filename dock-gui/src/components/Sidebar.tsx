@@ -34,6 +34,7 @@ import { presetIcon } from "./presetIcon";
 import { ProjectContextMenu, SessionContextMenu, type ProjectAction, type SessionAction } from "./SessionMenu";
 import { SessionSearch } from "./SessionSearch";
 import { imeComposing } from "../dock/ime";
+import { navPageEntries } from "../features/registry";
 import markUrl from "../assets/mark.png";
 
 export interface SidebarProps {
@@ -90,7 +91,7 @@ export interface SidebarProps {
   onOpenSettings: () => void;
   /** 侧栏「插件」：打开设置页的「插件与技能」。 */
   onOpenPlugins: () => void;
-  /** 侧栏「Pull Request」「定时任务」：打开对应的整页。 */
+  /** 侧栏「Pull Request」「定时任务」和功能登记的页（记忆）：打开对应的整页。 */
   onOpenPage: (page: NavPage) => void;
   /** 正开着的整页（导航里那一项画选中态）。 */
   activePage: NavPage | null;
@@ -112,8 +113,19 @@ const NAV: NavItem[] = [
   { icon: Bot, label: "Agent 预设", action: "new-preset" },
 ];
 
-/** 侧栏导航能打开的整页（盖住会话区，侧栏留着）。 */
-export type NavPage = "pull-requests" | "schedules";
+/** 侧栏导航能打开的整页（盖住会话区，侧栏留着）。`feature:<id>` 是功能登记的页（features/registry）。 */
+export type NavPage = "pull-requests" | "schedules" | `feature:${string}`;
+
+/** 功能登记的整页排在内置两页后面、「插件」前面。 */
+const PAGES_END = 3;
+
+function navItems(): NavItem[] {
+  const pages = navPageEntries().map((p): NavItem => ({ icon: p.icon, label: p.label, action: `feature:${p.id}` }));
+  return [...NAV.slice(0, PAGES_END), ...pages, ...NAV.slice(PAGES_END)];
+}
+
+const isPage = (action: NavItem["action"]): action is NavPage =>
+  action === "pull-requests" || action === "schedules" || !!action?.startsWith("feature:");
 
 /** 导航项点了做什么。 */
 function navAction(
@@ -123,7 +135,7 @@ function navAction(
   if (action === "new-chat") return props.onNewChat;
   if (action === "new-preset") return props.onNewPreset;
   if (action === "plugins") return props.onOpenPlugins;
-  if (action === "pull-requests" || action === "schedules") return () => props.onOpenPage(action);
+  if (isPage(action)) return () => props.onOpenPage(action);
   return undefined;
 }
 
@@ -276,13 +288,13 @@ export function Sidebar(props: SidebarProps) {
       ) : (
         <>
           <nav className="mt-1 flex shrink-0 flex-col gap-0.5">
-            {NAV.map(({ icon: Icon, label, action }) => (
+            {navItems().map(({ icon: Icon, label, action }) => (
               <button
                 key={label}
                 type="button"
                 title={action ? label : COMING_SOON}
                 onClick={navAction(props, action)}
-                onMouseEnter={() => (action === "pull-requests" || action === "schedules") && props.onPrefetchPage?.(action)}
+                onMouseEnter={() => isPage(action) && props.onPrefetchPage?.(action)}
                 aria-current={action === props.activePage ? "page" : undefined}
                 className={`motion-colors flex h-8 items-center gap-2.5 rounded-lg px-2.5 text-left text-[13px] font-medium ${
                   action === props.activePage ? "bg-[#0a84ff14] text-accent" : "text-ink hover:bg-hover"

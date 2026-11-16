@@ -50,12 +50,18 @@
 
 ### 新增
 
-- **记忆笔记之间的链接**：笔记之间可以用 `[[文件名]]` 互相链接，语法和 Obsidian 一样（`[[文件名|显示的字]]`），记忆目录可以直接当 vault 打开。
+- **记忆图谱**：记忆笔记之间可以互相链接，桌面端侧栏新增「记忆」页，把笔记画成一张关系图并在里面管理。
+  - 链接语法和 Obsidian 一样：`[[文件名]]`、`[[文件名|显示的字]]`。记忆目录可以直接当 vault 打开。
   - agent 写记忆时会顺手链到相关的笔记（记忆提醒、`/flush`、`/dream` 的提示词都加了这条约定）。
   - `memory_get` 的 `path` 现在也认 `[[链接]]`、笔记名和索引里的相对路径，模型可以顺着链接读下去。
-  - 细节见 `docs/tools/memory.md`「笔记之间的链接」。
-
-- **dock.1 记忆方法**（能力 `memoryGraph`，给记忆图谱用）：`memory/graph|search`、`memory/note/get|save|create|rename|move|forget`、`memory/link|unlink` 与推送 `memory/changed`。全部只认受信连接；见 `cordis-gateway/README.md`「记忆图谱」。
+  - 图上：点是笔记（颜色分当前项目 / 全局 / 其他项目，主题实心、观察空心，大小跟链接数走），实线是链接。
+  - 「内容相近、还没链上」的建议默认只在悬停 / 选中那篇时画成虚线；标签随缩放出现。
+  - 抽屉顶上有局部图谱（1–2 跳）；画布右上角的设置能调显示和力导向，还能按搜索条件给笔记上色（最多 3 组）。
+  - 管理：预览与编辑、新建、重命名（指向它的链接跟着改写）、观察升为主题、移到全局、遗忘、建链 / 断链。
+  - 默认看「当前项目 + 全局」，可切到全部项目；有图谱和列表两种视图，能按标题和正文搜。
+  - agent 写了新记忆，图上实时多出一个点。记忆功能关着也能看、能改。
+  - 协议：新增 `memory/graph|search`、`memory/note/get|save|create|rename|move|forget`、`memory/link|unlink` 与推送 `memory/changed`，能力 `memoryGraph`。全部只认受信连接。
+  - 细节见 `docs/tools/memory.md`「笔记之间的链接」「记忆图谱与管理」。
 
 - **订阅通道（ChatGPT 套餐）**：按 OpenAI「Sign in with ChatGPT」开源通道的官方流程登录 ChatGPT，模型用套餐额度推理，不需要 API key（实测 Go 套餐可用；Free 账号授权页会显示「所需权限不可用」）。
   - 登录：终端 `/auth`（不带参数 = 直接开始登录，打开官方授权页，在后台等，完成后弹提示）；子命令 `login [new|identity|<账号>]` / `logout` / `cancel` / `status` / `list` / `use` / `models` / `import`。桌面端在设置 › 模型 ›「订阅通道」，按官方 UI 规范有「Continue with ChatGPT」「添加账号」「Manage usage」；输入框旁标「Using ChatGPT plan」。
