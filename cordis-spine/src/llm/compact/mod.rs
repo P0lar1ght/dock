@@ -300,9 +300,10 @@ async fn compact_session_locked(
         // 结论一样，重试只会白烧两次摘要调用。所以 `continue` 前直接返回。
         // 段文件路径要写进摘要末尾，模型才能在摘要不够用时自己去查原文
         // （Grok `format_transcript_location`）。收紧检查用**不带指针**的替换体过
-        // （指针约 400 字节，对判定没有意义），真被采纳之后才落盘 —— 被拒绝的
-        // 压缩不能在 `compaction/` 下留一份孤儿段文件和一行 INDEX 假记录；落盘
-        // 失败则退回不带指针，别让模型去找一个不存在的文件。
+        // （路径要落盘之后才知道），真被采纳之后才落盘 —— 被拒绝的压缩不能在
+        // `compaction/` 下留一份孤儿段文件和一行 INDEX 假记录；落盘失败则退回不带
+        // 指针，别让模型去找一个不存在的文件。拼上指针（约 200 token）后若反超原文，
+        // 也退回不带指针的那份。
         let compacted = build_compacted_events(&history, &output.text, None, None);
         let before = estimate_context_tokens("", &history);
         let after = estimate_context_tokens("", &compacted);
@@ -320,12 +321,19 @@ async fn compact_session_locked(
             Some(segments::compaction_dir(dir).join(segments::segment_filename(index)))
         });
         let raw_log = dir.as_deref().map(persist::history_path);
-        let compacted = build_compacted_events(
+        let with_pointer = build_compacted_events(
             &history,
             &output.text,
             transcript.as_deref(),
             raw_log.as_deref(),
         );
+        // 原文只比替换体大一点点时，拼上指针反而更大：不带指针（段文件照样落了盘，
+        // 只是模型不知道它在哪），压缩照样成立。
+        let compacted = if estimate_context_tokens("", &with_pointer) < before {
+            with_pointer
+        } else {
+            compacted
+        };
         sessions.replace_compacted(compacted);
         sessions.bump_compaction_count();
         re_announce_discoveries(ctx, sessions);
@@ -1160,6 +1168,51 @@ mod tests {
         assert!(summary.contains(&log.display().to_string()), "{summary}");
     }
 
+    /// 回归：拼上原文指针后，压缩结果也不能比原文大。
+    ///
+    /// 收紧检查用不带指针的替换体判（路径要落盘之后才知道），指针几百字节。原文只比
+    /// 替换体大一点点时，拼上指针反而更大 —— 这时退回不带指针的那份（它过了检查）。
+    #[tokio::test]
+    async fn pointer_never_makes_the_compacted_history_larger() {
+        let home = tempfile::tempdir().unwrap();
+        let _env = cordis_base::test_env::scoped().set("DOCK_HOME", home.path());
+        // 原文 = 一条用户消息 + 一段填充，填到只比「不带指针的替换体」多几个 token。
+        let without = build_compacted_events(
+            &[LogEvent::User("go".into())],
+            &healthy_summary(),
+            None,
+            None,
+        );
+        let target = estimate_context_tokens("", &without) + 5;
+        let mut pad = String::new();
+        let history = loop {
+            let history = vec![
+                LogEvent::User("go".into()),
+                LogEvent::SystemReminder(pad.clone()),
+            ];
+            if estimate_context_tokens("", &history) >= target {
+                break history;
+            }
+            pad.push_str("pad ");
+        };
+        let before = estimate_context_tokens("", &history);
+
+        let root = Context::new();
+        let sessions = Sessions::new(root.clone());
+        sessions.set_window(1_000_000);
+        sessions.attach_disk();
+        for event in history {
+            sessions.append(event);
+        }
+        let _s = root.provide(SESSIONS, sessions.clone()).unwrap();
+        with_summary_llm(&root);
+
+        Compact.run_on(&root, None).await.unwrap();
+
+        let after = estimate_context_tokens("", &sessions.model_history());
+        assert!(after < before, "压缩后 {after} token，不小于原文 {before}");
+    }
+
     /// 回归：摘要 prompt 说「什么会留下」要和压缩后真实的历史一致。
     ///
     /// 压缩后只留首条和最近一条用户消息；prompt 原来写「用户消息都会留下」，摘要
@@ -1192,6 +1245,15 @@ mod tests {
         );
         assert!(prompt.contains("In section 6, keep every user message"));
         assert!(!prompt.contains("only the user's messages and this summary survive"));
+        assert!(
+            !prompt.contains("the user's original query plus this summary"),
+            "开头那句也要和首末两条对上"
+        );
+        // 压缩后摘要末尾就指着落盘的原文：prompt 不能说「原文再也读不到」。
+        assert!(
+            !prompt.contains("can be recovered by re-reading the transcript"),
+            "prompt 和 <transcript_location> 指针打架"
+        );
     }
 
     /// 回归：压缩必须真的把「推理占的上下文」降下来。
