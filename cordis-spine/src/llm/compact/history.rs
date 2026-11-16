@@ -18,6 +18,7 @@ use cordis_base::tool_output::head_at_line;
 use cordis_base::types::{LlmOutput, LogEvent, ThinkingBlock};
 
 use super::summary::{format_compact_summary_content, wrap_user_query};
+use crate::prompt::context_usage::IMAGE_TOKEN_ESTIMATE;
 
 /// 摘要里每条工具结果留多少字节。
 ///
@@ -269,8 +270,12 @@ pub fn estimate_context_tokens(system: &str, history: &[LogEvent]) -> u64 {
             // 工具结果发给上游的只有 `tool_call_id` + content（Messages / Responses /
             // chat 都把名字和参数 `..` 掉了）；参数已在上面 assistant 的 tool_calls 里
             // 算过。原先这里再算一遍，写大文件的会话估算能虚高近一半（#176）。
-            LogEvent::ToolExecute { content, .. } => {
+            // 带的图（截图类工具）每次请求都随历史内联重发，按张算。
+            LogEvent::ToolExecute {
+                content, images, ..
+            } => {
                 n += estimate_text_tokens(content);
+                n += (images.len() as u64).saturating_mul(IMAGE_TOKEN_ESTIMATE);
             }
             LogEvent::PreStep
             | LogEvent::Prompt(_)
@@ -279,6 +284,18 @@ pub fn estimate_context_tokens(system: &str, history: &[LogEvent]) -> u64 {
         }
     }
     n
+}
+
+/// 模型历史里工具结果一共带了几张图。它们已算在 [`estimate_context_tokens`] 里；
+/// 上下文面板把这一份从「消息」挪到「图片」那一行（与推理同一个处理）。
+pub fn tool_image_count(history: &[LogEvent]) -> u64 {
+    history
+        .iter()
+        .map(|e| match e {
+            LogEvent::ToolExecute { images, .. } => images.len() as u64,
+            _ => 0,
+        })
+        .sum()
 }
 
 /// 一轮输出里**会回放给上游**的推理占多少 token。
@@ -668,6 +685,31 @@ mod tests {
             + estimate_text_tokens(&args)
             + estimate_text_tokens("ok");
         assert_eq!(estimate_context_tokens("", &history), once);
+    }
+
+    /// 工具结果里的图每次请求都随历史重发（三条 wire 都内联），估算漏掉它，截图多的
+    /// 会话占用被低估，自动压缩迟迟不触发；压缩「摘要不比原文小」的判定也会少算原文。
+    #[test]
+    fn estimate_counts_tool_result_images() {
+        let image = || cordis_base::types::UserImage {
+            digest: None,
+            mime: "image/png".into(),
+            data: std::sync::Arc::from(vec![0u8; 64].into_boxed_slice()),
+            width: 1,
+            height: 1,
+        };
+        let history = vec![LogEvent::ToolExecute {
+            id: "c1".into(),
+            name: "read_file".into(),
+            arguments: "{}".into(),
+            content: "ok".into(),
+            images: vec![image(), image()],
+            is_error: false,
+        }];
+        assert_eq!(
+            estimate_context_tokens("", &history),
+            estimate_text_tokens("ok") + 2 * IMAGE_TOKEN_ESTIMATE
+        );
     }
 
     /// #154：推理是原样回放给上游的，估算漏掉它，推理模型的上下文就被压到阈值以下。
