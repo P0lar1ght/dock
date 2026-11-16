@@ -160,6 +160,14 @@ pub fn write_topics_from_dream(topics_dir: &Path, content: &str) -> std::io::Res
     let mut written = 0usize;
     for (title, body) in sections {
         let slug = crate::slug::slugify(&title, 48);
+        // 标题里没有 ASCII 字母数字（纯中文）时上面是空串：换成保留原文字的文件名，
+        // 不然这一节就被丢了，而它的来源观察随后会被归档。有 ASCII 的标题不动，
+        // 已有的主题文件名保持稳定。
+        let slug = if slug.is_empty() {
+            crate::slug::note_stem(&title, 48)
+        } else {
+            slug
+        };
         if slug.is_empty() {
             continue;
         }
@@ -250,5 +258,29 @@ mod tests {
         assert_eq!(n, 2);
         assert!(tmp.path().join("auth.md").exists());
         assert!(tmp.path().join("database.md").exists());
+    }
+
+    /// 标题全是中文时 ASCII slug 是空的：这一节不能被悄悄丢掉（之后观察会被归档，内容就没了）。
+    #[test]
+    fn write_topics_keeps_sections_with_non_ascii_titles() {
+        let tmp = tempfile::tempdir().unwrap();
+        let n = write_topics_from_dream(
+            tmp.path(),
+            "## 审计日志\n降噪与结构化\n\n## Auth\nuse JWT\n\n## ChatGPT 订阅通道\n事实\n",
+        )
+        .unwrap();
+        assert_eq!(n, 3);
+        let mut names: Vec<String> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        // 带 ASCII 的标题文件名和以前一样（已有的主题文件能被同名标题覆盖更新）。
+        assert_eq!(names, vec!["auth.md", "chatgpt.md", "审计日志.md"]);
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("审计日志.md")).unwrap(),
+            "# 审计日志\n\n降噪与结构化\n"
+        );
     }
 }

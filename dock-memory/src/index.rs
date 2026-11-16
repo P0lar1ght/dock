@@ -78,6 +78,24 @@ pub struct ReindexResult {
     pub removed: usize,
 }
 
+/// Embedding dimension for a new index when the caller does not specify one.
+pub const DEFAULT_EMBEDDING_DIMENSIONS: usize = 1024;
+
+/// The embedding dimension an existing index was built with, if any.
+fn stored_dimensions(db_path: &Path) -> Option<usize> {
+    if !db_path.is_file() {
+        return None;
+    }
+    let db =
+        Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+    db.query_row(schema::GET_META_SQL, params!["embedding_dimensions"], |r| {
+        r.get::<_, String>(0)
+    })
+    .ok()?
+    .parse()
+    .ok()
+}
+
 pub struct MemoryIndex {
     db: Connection,
     chunk_config: ChunkConfig,
@@ -86,10 +104,16 @@ pub struct MemoryIndex {
 }
 
 impl MemoryIndex {
-    /// Open or create; default embedding dimensions 1024. Vec table created only
-    /// when sqlite-vec loaded.
+    /// Open or create without caring about the embedding dimension (FTS-only
+    /// callers: flush, remember, watcher sync, forget).
+    ///
+    /// Keeps whatever dimension the database already records, falling back to
+    /// [`DEFAULT_EMBEDDING_DIMENSIONS`] for a new one. Passing a fixed default here
+    /// instead would count as a dimension change on any index built with a
+    /// different embedding model and drop every stored vector on each open.
     pub fn open_or_create(db_path: &Path) -> Result<Self, rusqlite::Error> {
-        Self::open_or_create_with_dimensions(db_path, 1024)
+        let dimensions = stored_dimensions(db_path).unwrap_or(DEFAULT_EMBEDDING_DIMENSIONS);
+        Self::open_or_create_with_dimensions(db_path, dimensions)
     }
 
     pub fn open_or_create_with_dimensions(
@@ -869,6 +893,72 @@ mod tests {
         assert!(
             after_delete.is_empty(),
             "delete_path must clear FTS tokens; hits={after_delete:?}"
+        );
+    }
+
+    /// flush / remember / 监听同步都不带维度开索引。库里已经按别的维度（如 1536）存了向量时，
+    /// 不能因为这一次没带维度就按默认的 1024 把向量表重建掉。
+    #[test]
+    fn reopening_without_dimensions_keeps_stored_embeddings() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("search.sqlite");
+        {
+            let mut idx = MemoryIndex::open_or_create_with_dimensions(&db, 8).unwrap();
+            if !idx.vec_available() {
+                eprintln!("skipping: sqlite-vec not available");
+                return;
+            }
+            idx.reindex_content(Path::new("/m/a.md"), "global", "# a\n\nhello vectors")
+                .unwrap();
+            let (id, _) = idx.chunks_without_embeddings().unwrap().pop().unwrap();
+            idx.upsert_embedding(&id, &[0.25; 8]).unwrap();
+            assert!(idx.chunks_without_embeddings().unwrap().is_empty());
+        }
+        let idx = MemoryIndex::open_or_create(&db).unwrap();
+        assert_eq!(idx.embedding_dimensions(), 8);
+        assert!(
+            idx.chunks_without_embeddings().unwrap().is_empty(),
+            "不带维度重开把已有的向量清掉了"
+        );
+        // 明确给了别的维度（换了嵌入模型）才重建。
+        drop(idx);
+        let idx = MemoryIndex::open_or_create_with_dimensions(&db, 4).unwrap();
+        assert_eq!(idx.chunks_without_embeddings().unwrap().len(), 1);
+    }
+
+    /// 别的连接正拿着锁时不带维度开索引：一时读不到库里记的维度，不能就按默认维度把向量表重建掉。
+    /// 要等锁放开、读到真实维度（和打开索引的那条连接同一个 busy_timeout）。
+    #[test]
+    fn reopening_while_locked_keeps_stored_embeddings() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("search.sqlite");
+        {
+            let mut idx = MemoryIndex::open_or_create_with_dimensions(&db, 8).unwrap();
+            if !idx.vec_available() {
+                eprintln!("skipping: sqlite-vec not available");
+                return;
+            }
+            idx.reindex_content(Path::new("/m/a.md"), "global", "# a\n\nhello vectors")
+                .unwrap();
+            let (id, _) = idx.chunks_without_embeddings().unwrap().pop().unwrap();
+            idx.upsert_embedding(&id, &[0.25; 8]).unwrap();
+        }
+        // 另一条连接独占整个库（WAL 下也挡住读），300ms 后放开。
+        let holder = Connection::open(&db).unwrap();
+        holder
+            .execute_batch("PRAGMA locking_mode=EXCLUSIVE; BEGIN EXCLUSIVE;")
+            .unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            holder.execute_batch("COMMIT;").unwrap();
+            drop(holder);
+        });
+        let idx = MemoryIndex::open_or_create(&db).unwrap();
+        release.join().unwrap();
+        assert_eq!(idx.embedding_dimensions(), 8);
+        assert!(
+            idx.chunks_without_embeddings().unwrap().is_empty(),
+            "锁着的时候读不到维度，按默认维度把向量表重建了"
         );
     }
 }

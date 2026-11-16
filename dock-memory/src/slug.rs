@@ -102,9 +102,52 @@ pub fn slugify(input: &str, max_len: usize) -> String {
     truncated.trim_matches('-').to_string()
 }
 
+/// 笔记文件名（不含 `.md`）：各种文字的字母数字都留着，其余连成一个 `-`，英文小写。
+///
+/// [`slugify`] 只留 ASCII，纯中文标题会变成空串；这里是给标题直接当文件名用的，
+/// `[[链接]]` 里写的也是它。全是符号的标题仍然回空串，由调用方另起名。
+pub fn note_stem(input: &str, max_chars: usize) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut pending_dash = false;
+    for c in input.trim().chars() {
+        if c.is_alphanumeric() {
+            if pending_dash && !out.is_empty() {
+                out.push('-');
+            }
+            pending_dash = false;
+            out.extend(c.to_lowercase());
+        } else {
+            pending_dash = true;
+        }
+    }
+    let truncated: String = out.chars().take(max_chars).collect();
+    truncated.trim_matches('-').to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn note_stem_keeps_non_ascii_letters() {
+        assert_eq!(
+            note_stem("审计日志改造（降噪 + 补全）", 48),
+            "审计日志改造-降噪-补全"
+        );
+        assert_eq!(
+            note_stem("  ChatGPT 订阅通道 / SIWC  ", 48),
+            "chatgpt-订阅通道-siwc"
+        );
+        // 纯 ASCII 的标题和 slugify 一致。
+        assert_eq!(
+            note_stem("Auth: JWT & refresh", 48),
+            slugify("Auth: JWT & refresh", 48)
+        );
+        // 按字符截断，不会切在多字节字符中间；截出来的尾巴不留 `-`。
+        assert_eq!(note_stem("记忆 图谱 可视化", 3), "记忆");
+        assert_eq!(note_stem("！？…", 48), "");
+        assert_eq!(note_stem("../../etc/passwd", 48), "etc-passwd");
+    }
 
     #[test]
     fn slug_deterministic_for_path() {

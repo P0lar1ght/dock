@@ -48,6 +48,11 @@ memory/
 | `watcher.rs` | `MemoryFileWatcher`：外部 `.md` 编辑后同步索引 |
 | `storage.rs` | `persist_observation` / `save_remember_note` / `write_flush_observation` |
 
+## 索引维度
+
+`MemoryIndex::open_or_create` 沿用库里已有的嵌入维度。
+只有明确给了别的维度（`open_or_create_with_dimensions`）才会重建向量表。
+
 ## 开关
 
 - 配置 `[memory] enabled`，**默认关**
