@@ -459,10 +459,24 @@ impl Acc {
         if delta.is_empty() {
             return Vec::new();
         }
-        if let Some(entry) = self.tool_calls.get_mut(&tool_index) {
-            entry.2.push_str(delta);
+        let Some(entry) = self.tool_calls.get_mut(&tool_index) else {
+            return Vec::new();
+        };
+        entry.2.push_str(delta);
+        // 推给界面实时看（收尾的 tool_calls 才算数）。没名字认不出是哪颗工具，不推。
+        if entry.1.is_empty() {
+            return Vec::new();
         }
-        Vec::new()
+        vec![StreamDelta::ToolInput {
+            index: tool_index,
+            id: if entry.0.is_empty() {
+                format!("call-{tool_index}")
+            } else {
+                entry.0.clone()
+            },
+            name: entry.1.clone(),
+            delta: delta.to_string(),
+        }]
     }
 
     fn completed_event(&mut self, response: &Value) -> Vec<StreamDelta> {
@@ -869,8 +883,18 @@ mod tests {
         acc.ingest_json(
             r#"{"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","call_id":"call_xyz","name":"do_thing"}}"#,
         );
-        acc.ingest_json(
+        let first = acc.ingest_json(
             r#"{"type":"response.function_call_arguments.delta","output_index":1,"delta":"{\"x\":"}"#,
+        );
+        // 参数片段原样推给界面，带着 output_item.added 里的 call_id / name。
+        assert_eq!(
+            first,
+            vec![StreamDelta::ToolInput {
+                index: 0,
+                id: "call_xyz".into(),
+                name: "do_thing".into(),
+                delta: r#"{"x":"#.into(),
+            }]
         );
         acc.ingest_json(
             r#"{"type":"response.function_call_arguments.delta","output_index":1,"delta":"1}"}"#,

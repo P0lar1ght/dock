@@ -7,10 +7,11 @@ use std::sync::{Arc, Mutex};
 
 use cordis::Context;
 use cordis_spine::{
-    Ask, ChildLogEvent, Mcp, PageCompaction, PageLogEvent, Permissions, PlanMode, Sessions,
-    SubagentChanged, Subagents, ASK, ASK_EVENT, MCP, MCP_ELICIT_EVENT, PERMISSIONS,
+    Ask, ChildLogEvent, Mcp, PageCompaction, PageLogEvent, PageToolInput, Permissions, PlanMode,
+    Sessions, SubagentChanged, Subagents, ASK, ASK_EVENT, MCP, MCP_ELICIT_EVENT, PERMISSIONS,
     PERMISSION_EVENT, PLAN_EVENT, PLAN_MODE, ROOT_IDENTITY, SESSIONS, SESSION_CHILD_EVENT,
-    SESSION_COMPACTION, SESSION_PAGE_EVENT, SUBAGENTS, SUBAGENT_CHANGED, WORKFLOW_CHANGED,
+    SESSION_COMPACTION, SESSION_PAGE_EVENT, SESSION_TOOL_INPUT, SUBAGENTS, SUBAGENT_CHANGED,
+    WORKFLOW_CHANGED,
 };
 use cordis_spine::{
     CompanionStatus, GatewayPort, GatewayRef, PairingBinding, PairingError, PairingPrompt,
@@ -534,6 +535,19 @@ fn listen_events(inner: &Arc<GatewayInner>) {
                 .map(|p| p.thread_id());
             with_transcript(&for_compaction, &tagged.page, thread_id, |t| {
                 t.compaction(&tagged.progress)
+            });
+        });
+    // 工具参数流式片段同理：只推不记，按页路由。
+    let for_tool_input = inner.clone();
+    let _ = inner
+        .ctx
+        .on(SESSION_TOOL_INPUT, move |input: &PageToolInput| {
+            let thread_id = pages(&for_tool_input)
+                .into_iter()
+                .find(|p| p.identity == *input.page)
+                .map(|p| p.thread_id());
+            with_transcript(&for_tool_input, &input.page, thread_id, |t| {
+                t.tool_input(input)
             });
         });
     // 队列事件载荷是 `()`，也不知道是哪一页的：挨页对账，序号没变的页不动。

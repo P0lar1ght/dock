@@ -653,6 +653,28 @@ MCP 服务器给工具挂的 `ui://` 界面（见 `docs/tools/mcp.md`「MCP Apps
 - `subagentCount`：内存里的 + 只在盘上的（关着的会话只数目录）。
 - `subagentsRunning`：正在跑的，只有开着的页才可能不为 0。
 
+### 工具参数流式（能力 `toolInputStream`）
+
+模型还在写工具调用的参数时，参数一段段推过来。
+桌面端用它让 MCP App 面板边写边跟（`ui/notifications/tool-input-partial`）。
+
+| 推送 | 作用 |
+|---|---|
+| `item/tool_input_delta { toolCallId, itemId, toolName, chunk, delta }` | 又流进来一段参数（原样的 JSON 片段） |
+
+- 同一个 `toolCallId` 的 `delta` 按 `chunk`（从 0 起）拼起来，是参数 JSON 的一个前缀。
+- 中途接入会漏段：`chunk` 不从 0 起、或者跳了，就别拼，等 `item/tool_started`。
+- 只推不记：`seq` 为 0、不进 `thread/history`。
+- 同一个调用最多 50ms 一段（中间到的拼进下一段）；最后攒下的不补推，看 `item/tool_started`。
+- 随后的 `item/tool_started`（同一个 `toolCallId`）才算数；开始之后不再推。
+- 推过的不一定会开始：`llm/stream` 可能改写调用，采样也可能中途失败。
+  客户端在 `turn/completed` 时丢掉没开始的。
+- `toolName` 是模型调的名字：经 `use_tool` 调的是 `use_tool`，里面那颗在参数的 `tool_name`。
+- 子代理的页不推。
+- 来源：spine 的 `session/tool-input`（`PageToolInput`），三种线路（chat completions /
+  Responses / Anthropic）的参数增量都转成它。
+- 拼接、补全残缺 JSON 见 `dock-core/src/toolInput.ts`。
+
 ### 子代理（能力 `subagents`）
 
 模型用 `task` 派的子代理，挂在启动它的那一页：只有那一页的订阅者收到推送，

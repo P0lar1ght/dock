@@ -521,7 +521,21 @@ impl Acc {
             Some("input_json_delta") => {
                 let piece = delta["partial_json"].as_str().unwrap_or("");
                 state.args.push_str(piece);
-                Vec::new()
+                // 推给界面实时看（收尾的 tool_calls 才算数）。没名字认不出是哪颗工具，不推。
+                if piece.is_empty() || state.tool_name.is_empty() {
+                    return Vec::new();
+                }
+                let tool_index = self.block_to_tool.get(&index).copied().unwrap_or(0);
+                vec![StreamDelta::ToolInput {
+                    index: tool_index,
+                    id: if state.tool_id.is_empty() {
+                        format!("call-{tool_index}")
+                    } else {
+                        state.tool_id.clone()
+                    },
+                    name: state.tool_name.clone(),
+                    delta: piece.to_string(),
+                }]
             }
             _ => Vec::new(),
         }
@@ -1105,8 +1119,18 @@ mod tests {
         acc.ingest_json(
             r#"{"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"tu1","name":"bash"}}"#,
         );
-        acc.ingest_json(
+        let first = acc.ingest_json(
             r#"{"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{\"a\":"}}"#,
+        );
+        // 参数片段原样推给界面，带着 tool_use 块的 id / name。
+        assert_eq!(
+            first,
+            vec![StreamDelta::ToolInput {
+                index: 0,
+                id: "tu1".into(),
+                name: "bash".into(),
+                delta: r#"{"a":"#.into(),
+            }]
         );
         acc.ingest_json(
             r#"{"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"1}"}}"#,

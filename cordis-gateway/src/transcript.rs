@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use tokio::sync::broadcast;
 
 use cordis_spine::{
-    side_note_text, Ask, CompactProgress, CompactStatus, ElicitPrompt, LogEvent,
+    side_note_text, Ask, CompactProgress, CompactStatus, ElicitPrompt, LogEvent, PageToolInput,
     PermissionOptionKind, PermissionPrompt, PlanApprovalPrompt, PlanDecision, Sessions,
     TurnEndStatus, UserImage, AUTO_COMPACT_FAILED_PREFIX, COMPACT_NOTICE, INTERRUPTED_TOOL_RESULT,
     PERMISSION_DENIED_TOOL_RESULT, ROOT_IDENTITY, STEER_REMINDER,
@@ -734,6 +734,34 @@ impl Transcript {
             turn_id: self.projector.turn_id.clone(),
             timestamp: iso_now(),
             payload,
+        });
+    }
+
+    /// 模型还在写某次工具调用的参数：又流进来一段（`item/tool_input_delta`）。
+    ///
+    /// 和压缩进展一样只推不记：`seq` 为 0，不进 `thread/history`。随后的
+    /// `item/tool_started`（同一个 `toolCallId`）才算数——`llm/stream` 可能改写调用、
+    /// 采样也可能中途失败，推过的调用不一定会开始。已经开始的调用不再推。
+    pub fn tool_input(&mut self, input: &PageToolInput) {
+        if self.projector.seen_tools.contains(&input.call_id) {
+            return;
+        }
+        let _ = self.tx.send(ProjectedEvent {
+            seq: 0,
+            method: "item/tool_input_delta".into(),
+            page: self.page.clone(),
+            thread_id: self.thread_id.clone(),
+            turn_id: self.projector.turn_id.clone(),
+            timestamp: iso_now(),
+            payload: json!({
+                "threadId": self.thread_id,
+                "turnId": self.projector.turn_id,
+                "toolCallId": input.call_id,
+                "itemId": input.call_id,
+                "toolName": input.name,
+                "chunk": input.chunk,
+                "delta": input.delta,
+            }),
         });
     }
 
@@ -1833,6 +1861,49 @@ mod tests {
         assert_eq!(params["outputTokens"], 120);
         assert_eq!(params["beforeTokens"], 90_000);
         assert_eq!(params["turnId"], "t1");
+    }
+
+    /// 工具参数的流式片段只推不记；那次调用开始之后不再推。
+    #[test]
+    fn tool_input_deltas_are_pushed_but_not_recorded() {
+        let mut t = Transcript::new();
+        let mut rx = t.tx.subscribe();
+        t.ingest_log(LogEvent::User("hi".into()));
+        let before = t.latest_seq();
+        let input = |chunk: u32, delta: &str| PageToolInput {
+            page: std::sync::Arc::from(ROOT_IDENTITY),
+            call_id: "c1".into(),
+            name: "mcp_whiteboard__whiteboard_edit".into(),
+            chunk,
+            delta: delta.into(),
+        };
+        t.tool_input(&input(0, r#"{"add":["#));
+        assert_eq!(t.latest_seq(), before, "不占序号");
+        assert!(!methods(&t).iter().any(|m| m == "item/tool_input_delta"));
+        let pushed: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter(|e| e.method == "item/tool_input_delta")
+            .collect();
+        assert_eq!(pushed.len(), 1, "推给订阅者");
+        let params = &pushed[0].as_notification()["params"];
+        assert_eq!(params["seq"], 0);
+        assert_eq!(params["toolCallId"], "c1");
+        assert_eq!(params["toolName"], "mcp_whiteboard__whiteboard_edit");
+        assert_eq!(params["chunk"], 0);
+        assert_eq!(params["delta"], r#"{"add":["#);
+        assert_eq!(params["turnId"], "t1");
+        // 采样收尾、调用开始了：同一个调用晚到的片段不再推。
+        t.ingest_log(LogEvent::LlmStream(LlmOutput {
+            tool_calls: vec![cordis_spine::ToolCall {
+                id: "c1".into(),
+                name: "mcp_whiteboard__whiteboard_edit".into(),
+                arguments: r#"{"add":[]}"#.into(),
+            }],
+            ..LlmOutput::default()
+        }));
+        t.tool_input(&input(1, "]}"));
+        assert!(
+            !std::iter::from_fn(|| rx.try_recv().ok()).any(|e| e.method == "item/tool_input_delta")
+        );
     }
 
     #[test]

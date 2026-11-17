@@ -9,7 +9,7 @@ use cordis::{plugin, Context, Inject, Plugin};
 use crate::host::settings::AppSettings;
 use crate::names::{
     SESSIONS, SESSION_CHILD_EVENT, SESSION_COMPACTION, SESSION_EVENT, SESSION_PAGE_EVENT,
-    SESSION_RESET, SESSION_TURN_END, SETTINGS,
+    SESSION_RESET, SESSION_TOOL_INPUT, SESSION_TURN_END, SETTINGS,
 };
 use crate::session::compaction::{
     CompactPhase, CompactProgress, CompactStatus, CompactTrigger, PageCompaction,
@@ -48,6 +48,19 @@ pub(crate) struct ContextAnchor {
 
 /// 摘要流式计数的事件节流间隔。
 const COMPACTION_EMIT_EVERY: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// 同一个工具调用的参数片段最多多久推一段（中间到的拼在一起）。上游按 token 切片，
+/// 大参数（`write_file` 的整份文件）一秒能有上百片；每片一条事件会把网关的推送缓冲挤满，
+/// 挤掉的是别的事件。第一段马上推（面板要尽早跟过去）。
+const TOOL_INPUT_EMIT_EVERY: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// 一个还在写的工具调用：推到第几段、上次什么时候推的、还没推出去的片段。
+#[derive(Default)]
+struct ToolInputCursor {
+    chunk: u32,
+    emitted: Option<Instant>,
+    held: String,
+}
 
 static STEER_SEQ: AtomicU64 = AtomicU64::new(1);
 
@@ -159,6 +172,9 @@ pub struct Sessions {
     compaction: Arc<Mutex<Option<CompactProgress>>>,
     /// 上一次发 [`SESSION_COMPACTION`] 的时刻：摘要流式计数按它节流。
     compaction_emitted: Arc<Mutex<Option<Instant>>>,
+    /// 这一次采样里每个工具调用推参数片段的进度（[`SESSION_TOOL_INPUT`]，按
+    /// [`TOOL_INPUT_EMIT_EVERY`] 节流）。每次采样开始清空。
+    tool_input: Arc<Mutex<std::collections::HashMap<String, ToolInputCursor>>>,
     /// Optional live-thread title (gateway `thread/rename` / `thread/start`).
     /// Empty means derive from the first user message, same as `/resume`.
     display_title: Arc<Mutex<Option<String>>>,
@@ -259,6 +275,24 @@ pub struct PageLogEvent {
     pub preamble: bool,
 }
 
+/// [`SESSION_TOOL_INPUT`] 的载荷：哪一页的哪次工具调用的参数又流进来一段。
+///
+/// 只推不记（不进日志、不落盘）：模型还在写参数时给界面实时看的。收尾时
+/// [`LogEvent::LlmStream`] 里的 `tool_calls` 才算数——`llm/stream` 可能改写、
+/// 采样也可能中途失败，所以这里推过的调用不一定真的会开始。
+#[derive(Clone, Debug)]
+pub struct PageToolInput {
+    pub page: Arc<str>,
+    /// 工具调用 id：和随后开始的那次调用相同（除非 `llm/stream` 改写了它）。
+    pub call_id: String,
+    pub name: String,
+    /// 这次调用的第几段（从 0 起）。中途接入的接收方据此认出前面漏了，别拿残缺的
+    /// 后半截去拼。
+    pub chunk: u32,
+    /// 原样的 JSON 片段：按 `chunk` 依次拼起来是参数的一个前缀。
+    pub delta: String,
+}
+
 /// [`SESSION_CHILD_EVENT`] 的载荷：哪个子代理（`child` 是它的 agent id）的会话
 /// 发了哪条事件。
 #[derive(Clone, Debug)]
@@ -357,6 +391,7 @@ impl Sessions {
             compacting: Arc::new(AtomicBool::new(false)),
             compaction: Arc::new(Mutex::new(None)),
             compaction_emitted: Arc::new(Mutex::new(None)),
+            tool_input: Arc::new(Mutex::new(std::collections::HashMap::new())),
             display_title: Arc::new(Mutex::new(None)),
             queued_followups: Arc::new(AtomicUsize::new(0)),
             steers: Arc::new(Mutex::new(VecDeque::new())),
@@ -1140,6 +1175,7 @@ impl Sessions {
             usage.official = false;
         }
         *self.pending_call.lock().unwrap() = None;
+        self.tool_input.lock().unwrap().clear();
         *self.turn_started.lock().unwrap() = Some(Instant::now());
         self.append(LogEvent::LlmStream(cordis_base::types::LlmOutput::default()));
     }
@@ -1216,6 +1252,44 @@ impl Sessions {
                     _ => LogEvent::LlmStream(cordis_base::types::LlmOutput::default()),
                 };
                 self.emit_session(current);
+            }
+            // 工具参数的片段不进日志：收尾时的 `tool_calls` 才算数（见 [`PageToolInput`]）。
+            // 子代理的页不推：界面只跟着主会话的调用走。
+            //
+            // 节流：离上次推不到 [`TOOL_INPUT_EMIT_EVERY`] 的先攒着，下一段一起推。最后攒下
+            // 的那点不补推——随后的 `item/tool_started` 带着完整参数。
+            cordis_base::stream_acc::StreamDelta::ToolInput {
+                id, name, delta, ..
+            } => {
+                if !self.emit || delta.is_empty() {
+                    return;
+                }
+                let (chunk, delta) = {
+                    let mut calls = self.tool_input.lock().unwrap();
+                    let cursor = calls.entry(id.clone()).or_default();
+                    cursor.held.push_str(delta);
+                    let now = Instant::now();
+                    if cursor
+                        .emitted
+                        .is_some_and(|t| now.duration_since(t) < TOOL_INPUT_EMIT_EVERY)
+                    {
+                        return;
+                    }
+                    cursor.emitted = Some(now);
+                    let chunk = cursor.chunk;
+                    cursor.chunk += 1;
+                    (chunk, std::mem::take(&mut cursor.held))
+                };
+                self.ctx.emit(
+                    SESSION_TOOL_INPUT,
+                    PageToolInput {
+                        page: self.identity.clone(),
+                        call_id: id.clone(),
+                        name: name.clone(),
+                        chunk,
+                        delta,
+                    },
+                );
             }
         }
     }
@@ -2325,6 +2399,64 @@ mod tests {
             LogEvent::LlmStream(out) => assert_eq!(out.text, "Hello"),
             other => panic!("{other:?}"),
         }
+    }
+
+    /// 工具参数的片段按调用编号推给界面，不进日志；同一个调用按间隔节流（攒着的拼进
+    /// 下一段）；每次采样从 0 重新数。
+    #[tokio::test]
+    async fn tool_input_deltas_are_pushed_but_not_logged() {
+        use cordis_base::stream_acc::StreamDelta;
+        let root = Context::new();
+        let seen = Arc::new(Mutex::new(Vec::<(String, String, u32, String)>::new()));
+        let _sub = {
+            let seen = seen.clone();
+            root.on(SESSION_TOOL_INPUT, move |e: &PageToolInput| {
+                seen.lock().unwrap().push((
+                    e.call_id.clone(),
+                    e.name.clone(),
+                    e.chunk,
+                    e.delta.clone(),
+                ));
+            })
+            .unwrap()
+        };
+        let sessions = Sessions::new(root.clone());
+        let input = |id: &str, delta: &str| StreamDelta::ToolInput {
+            index: 0,
+            id: id.into(),
+            name: "mcp_whiteboard__whiteboard_edit".into(),
+            delta: delta.into(),
+        };
+        sessions.begin_llm();
+        // 第一段马上推；紧跟着的先攒着，过了节流间隔和下一段一起推。
+        sessions.apply_llm_delta(&input("c1", r#"{"add":["#));
+        sessions.apply_llm_delta(&input("c1", "{},"));
+        assert_eq!(seen.lock().unwrap().len(), 1, "紧跟着的一段先攒着");
+        std::thread::sleep(TOOL_INPUT_EMIT_EVERY + std::time::Duration::from_millis(10));
+        sessions.apply_llm_delta(&input("c1", "{}]}"));
+        // 流到一半，日志里那条 LlmStream 还没有任何工具调用。
+        match sessions.events().last() {
+            Some(LogEvent::LlmStream(out)) => assert!(out.tool_calls.is_empty()),
+            other => panic!("{other:?}"),
+        }
+        // 下一次采样：同一个 id 从 0 重新数（各家缺 id 时都叫 call-N）。
+        sessions.begin_llm();
+        sessions.apply_llm_delta(&input("c1", "{}"));
+        let tool = "mcp_whiteboard__whiteboard_edit".to_string();
+        assert_eq!(
+            *seen.lock().unwrap(),
+            [
+                ("c1".into(), tool.clone(), 0, r#"{"add":["#.into()),
+                ("c1".into(), tool.clone(), 1, "{},{}]}".into()),
+                ("c1".into(), tool, 0, "{}".into()),
+            ]
+        );
+        // 子代理（不发会话事件的页）不推。
+        seen.lock().unwrap().clear();
+        let child = Sessions::isolated(root);
+        child.begin_llm();
+        child.apply_llm_delta(&input("c9", "{}"));
+        assert!(seen.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

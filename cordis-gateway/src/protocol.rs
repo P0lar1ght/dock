@@ -64,6 +64,9 @@ pub const CAPABILITIES: &[(&str, bool)] = &[
     // `context/compacted`（压缩进展推送）+ `item/compaction`（压缩完成标记）+
     // `thread/environment/get` 的 `context.lastCompaction`。
     ("compactionProgress", true),
+    // 推送 `item/tool_input_delta`：模型还在写工具调用的参数时，参数一段段推过来（只推不记）。
+    // 收尾的 `item/tool_started` 才算数。
+    ("toolInputStream", true),
     // `subagent/list` / `history` / `send` / `interrupt` / `stop` + 推送 `subagent/updated`
     // （状态）与 `subagent/event`（子代理自己的对话事件，包在父线程上）。
     ("subagents", true),

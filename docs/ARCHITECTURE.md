@@ -139,7 +139,9 @@ cwd。系统提示照样按页组装：`SystemPrompt::assemble_on(exec)` 收的�
 失败不是 `Err`，本轮最后一次采样带错误时也记成失败），再发 `session/turn-end`
 （`PageTurnEnd { page, status }`）。它和 `Notice` 一样只给用户看，不进模型历史。
 整份实时日志被换掉（`Sessions::clear` / `restore`，不管是终端 `/new` 还是网关 `thread/start`）发 `session/reset`（载荷是页身份），网关据此重建那一页的投影。压缩进展另走 `session/compaction`（`PageCompaction { page, progress }`），不是
-`LogEvent`、不落盘：TUI 每帧直接读 `Sessions::compaction()`，网关推成 `context/compacted`。网关的
+`LogEvent`、不落盘：TUI 每帧直接读 `Sessions::compaction()`，网关推成 `context/compacted`。
+工具参数的流式片段同理走 `session/tool-input`（`PageToolInput { page, call_id, name, chunk, delta }`），
+不进日志：收尾时 `LlmStream` 里的 `tool_calls` 才算数；网关推成 `item/tool_input_delta`。网关的
 `turn/completed` 只由这条事件触发，实时和回放同一条路，一轮一次，`status` 随之是
 completed / cancelled / failed（failed 带 `error`）；更早的会话没有这一行，回放时按旧规则补。
 
