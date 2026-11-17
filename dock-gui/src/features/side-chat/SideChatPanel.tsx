@@ -202,7 +202,8 @@ export function SideChatPanel({ sessionId, onClose, lead, controls }: PanelProps
           <Transcript thread={thread} sessionKey={asideId!} />
         </TranscriptOptionsContext.Provider>
       )}
-      <div className="flex-1" />
+      {/* 不另放 flex-1 占位：Transcript / Centered 自己就是 flex-1（basis 0），再放一个会平分剩余高度，
+          对话流只剩一半。 */}
       <HandbackCard
         state={handback}
         onCancel={() => setHandback({ step: "idle" })}
