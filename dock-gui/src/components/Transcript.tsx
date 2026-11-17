@@ -211,9 +211,10 @@ export function Transcript({
 
   let prevAt: number | undefined;
   return (
-    // 不写 flex-1：内容短时按自身高度收，输入框跟着浮起来（wonder-ui/chat/ComposerFloating）；
-    // 内容长了再被 flex 压回可滚动的高度。
-    <div className="relative flex min-h-0 shrink flex-col">
+    // flex-1：输入框固定在会话区底部，内容短时空白留在对话流下面（不再像 wonder-ui 的
+    // ComposerFloating 那样跟着内容浮起来）。basis 是 0 也是为了不挤输入区：basis 按内容高度算时，
+    // flex 按「shrink × basis」分摊超出的高度，对话越长输入区被压得越狠（输入区自 #296 起能被压矮）。
+    <div className="relative flex min-h-0 flex-1 flex-col">
       <div
         ref={scrollRef}
         // 换会话重挂滚动区（进场动效、滚动位置）。和下面的 TurnNav 是兄弟：key 要带前缀，不能都用
