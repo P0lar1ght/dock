@@ -131,8 +131,15 @@ function FileBlock({
     if (focus === null) return;
     setOpen(true);
     setFlash(true);
-    // 等展开那一帧排好再滚，不然落点按收起时的高度算。
-    const raf = requestAnimationFrame(() => ref.current?.scrollIntoView({ block: "start", behavior: "smooth" }));
+    // 等展开那一帧排好再滚，不然落点按收起时的高度算。只动最近那个滚动容器：scrollIntoView
+    // 会连带滚外层（overflow:hidden 的也算），整个面板跟着挪（同 #296）。
+    const raf = requestAnimationFrame(() => {
+      const el = ref.current;
+      const box = el && scrollParent(el);
+      if (!el || !box) return;
+      const top = box.scrollTop + el.getBoundingClientRect().top - box.getBoundingClientRect().top - 8;
+      box.scrollTo({ top: Math.max(0, top), behavior: "smooth" });
+    });
     return () => cancelAnimationFrame(raf);
   }, [focus]);
   useEffect(() => {
@@ -145,7 +152,7 @@ function FileBlock({
     <section
       ref={ref}
       data-diff-path={file.path}
-      className={`md-surface flex scroll-mt-2 flex-col overflow-hidden rounded-[10px] border bg-white transition-[border-color,box-shadow] duration-[var(--dur-base)] ${
+      className={`md-surface flex flex-col overflow-hidden rounded-[10px] border bg-white transition-[border-color,box-shadow] duration-[var(--dur-base)] ${
         flash ? "border-accent shadow-[0_0_0_3px_rgba(10,132,255,0.15)]" : "border-[#e5e5ea]"
       }`}
     >
@@ -192,6 +199,15 @@ function FileBlock({
       </div>
     </section>
   );
+}
+
+/** 最近一个能竖着滚的祖先。 */
+function scrollParent(el: HTMLElement): HTMLElement | null {
+  for (let p = el.parentElement; p; p = p.parentElement) {
+    const y = getComputedStyle(p).overflowY;
+    if ((y === "auto" || y === "scroll") && p.scrollHeight > p.clientHeight) return p;
+  }
+  return null;
 }
 
 const NO_COMMENTS = new Map<string, ReviewFinding[]>();

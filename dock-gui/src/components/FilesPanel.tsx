@@ -444,7 +444,8 @@ export function FilesPanel({
 
   /** 树上的键：F2 改名、⌘⌫ 移到废纸篓（对着打开的那个文件）。 */
   const onTreeKey = (e: ReactKeyboardEvent) => {
-    if (!canEdit || !selected || naming) return;
+    // 工作区外的文件只读：F2 / ⌘⌫ 不动它。
+    if (!canEdit || !selected || naming || isOutside(selected)) return;
     if (e.key === "F2") {
       e.preventDefault();
       setNaming({ kind: "rename", path: selected, isDir: false });
@@ -474,14 +475,14 @@ export function FilesPanel({
                   icon={FilePlus}
                   label="新建文件"
                   size={14}
-                  onClick={() => startNew("file", selected ? parentOf(selected) : "")}
+                  onClick={() => startNew("file", selected && !isOutside(selected) ? parentOf(selected) : "")}
                   className="size-7 text-ink-4"
                 />
                 <IconButton
                   icon={FolderPlus}
                   label="新建文件夹"
                   size={14}
-                  onClick={() => startNew("dir", selected ? parentOf(selected) : "")}
+                  onClick={() => startNew("dir", selected && !isOutside(selected) ? parentOf(selected) : "")}
                   className="size-7 text-ink-4"
                 />
               </>

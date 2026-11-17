@@ -11,7 +11,7 @@ import { IconButton } from "../../components/chrome";
 import { MenuButton } from "../../components/Popover";
 import { ReviewDiff, type DiffFocus } from "../../components/review/ReviewDiff";
 import { useFeatureHost, type PanelProps } from "../registry";
-import { useFocusRequest } from "./focus";
+import { changesSignature, useFocusRequest } from "./focus";
 
 type Diff =
   | { kind: "loading" }
@@ -39,7 +39,7 @@ export function ChangesPanel({ kind, sessionId, onClose, lead, controls }: Panel
   const request = useFocusRequest();
   const [focus, setFocus] = useState<DiffFocus | null>(null);
   useEffect(() => {
-    if (!request || request.sessionId !== sessionId || Date.now() - request.seq > 3000) return;
+    if (!request || request.sessionId !== sessionId || Date.now() - request.at > 3000) return;
     setSource(`turn:${request.turnId}`);
     setFocus({ path: request.path, seq: request.seq });
   }, [request?.seq, sessionId]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -71,9 +71,7 @@ export function ChangesPanel({ kind, sessionId, onClose, lead, controls }: Panel
   const reviewing = workflows.order.some((id) => workflows.byId[id].name === "code-review" && workflows.byId[id].status === "running");
 
   // 改动变了（又改了、撤销了）就重新取：看某一轮时只看那一轮，看工作区时任何一轮变了都算。
-  const changesKey = (turnId ? (changes ? [changes] : []) : Object.values(turnChanges.byTurn))
-    .map((c) => `${c.turnId}:${c.added}/${c.removed}/${c.files.length}/${c.reverted}`)
-    .join(",");
+  const changesKey = (turnId ? (changes ? [changes] : []) : Object.values(turnChanges.byTurn)).map(changesSignature).join(",");
   useEffect(() => {
     if (!sessionId) return;
     let live = true;

@@ -11,7 +11,7 @@ import { dock } from "../../dock/client";
 import { store, useTurnChanges } from "../../dock/store";
 import { DiffBody } from "../../components/review/ReviewDiff";
 import { useFeatureHost, type TurnFooterProps } from "../registry";
-import { focusChangedFile } from "./focus";
+import { changesSignature, focusChangedFile } from "./focus";
 
 const STATUS_ICON = { added: FilePlus, modified: FilePen, deleted: FileMinus } as const;
 const STATUS_COLOR = { added: "text-[#15803d]", modified: "text-ink-3", deleted: "text-[#c0392b]" } as const;
@@ -132,7 +132,7 @@ type FileDiff = { kind: "loading" } | { kind: "ok"; file: DiffFile | null } | { 
 
 /** 这一轮的 diff：第一次展开某个文件时才取，改动变了（又改了、撤销了）作废重取。 */
 function useTurnDiff(threadId: string, turnId: string, changes: TurnChanges | null) {
-  const key = changes ? `${changes.added}/${changes.removed}/${changes.files.length}/${changes.reverted}` : "";
+  const key = changes ? changesSignature(changes) : "";
   const [state, setState] = useState<{ key: string; files: DiffFile[] | null; error: string | null } | null>(null);
   const wanted = useRef(false);
   const fetching = useRef<string | null>(null);

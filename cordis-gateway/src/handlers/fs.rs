@@ -238,12 +238,15 @@ fn edited_outside(page: &cordis::Context, path: &str) -> Result<Option<PathBuf>,
         .map(|c| c.edited_paths(page))
         .unwrap_or_default();
     // 记下的路径和传进来的可能一个走了软链接一个没走（macOS 的 `/tmp` → `/private/tmp`）。
+    // 对上了读的是记下的那个文件（规范化后），不是调用方给的路径：后者在 `/tmp` 这类人人可写的
+    // 目录里，检查完、打开前可能被换成指向别处的软链接。
     let canonical = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
     let want = canonical(wanted);
     edited
         .into_iter()
-        .find(|e| e == wanted || canonical(e) == want)
-        .map(|_| Some(wanted.to_path_buf()))
+        .map(|e| canonical(&e))
+        .find(|e| *e == want)
+        .map(Some)
         .ok_or_else(|| {
             RpcError::invalid_params(format!(
                 "路径不在工作区里：{path}（工作区外只看得到这个会话里 agent 改过的文件）"
@@ -270,7 +273,8 @@ fn read(root: &Path, outside: Option<&Path>, params: &Value) -> Result<Value, Rp
     }
     .map_err(RpcError::invalid_params)?;
     let mut out = json!({
-        "path": file.path,
+        // 工作区外：回调用方给的路径（读的是规范化后的那个，见 `edited_outside`）。
+        "path": if outside.is_some() { path.to_string() } else { file.path },
         "size": file.size,
         "modifiedMs": file.modified_ms,
     });
@@ -312,7 +316,7 @@ fn read_raw(
     .map_err(RpcError::invalid_params)?;
     let end = got.offset + got.bytes.len() as u64;
     Ok(json!({
-        "path": got.path,
+        "path": if outside.is_some() { path.to_string() } else { got.path },
         "size": got.size,
         "modifiedMs": got.modified_ms,
         "kind": "bytes",
