@@ -306,3 +306,61 @@ async fn after_edit_only_refreshes_the_file_it_edited() {
     let paths: Vec<&str> = turns[0].files.iter().map(|f| f.path.as_str()).collect();
     assert_eq!(paths, vec!["a.txt"], "{turns:#?}");
 }
+
+/// 重开会话（Dock 重启、GUI 重新打开它）：日志从盘上读回来，用户消息的时刻只精确到秒，
+/// 记录里存的是活会话的微秒。不能因此把每一轮都当成「撤回作废」删掉——卡片没了，
+/// 盘上的 `turn_changes/<序号>.json` 也没了，撤销再也做不了。读回来之后接着改，也照样记进那一轮。
+#[tokio::test]
+async fn reopened_session_keeps_its_turn_changes() {
+    let home = tempfile::tempdir().unwrap();
+    let project = home.path().join("proj");
+    std::fs::create_dir_all(&project).unwrap();
+    let _env = cordis_base::test_env::scoped()
+        .set("DOCK_HOME", home.path().join("dock-home"))
+        .set("DOCK_CUA_DRIVER", "off")
+        .cwd(&project);
+    let a = project.join("a.txt");
+    let b = project.join("b.txt");
+    std::fs::write(&a, "one\ntwo\n").unwrap();
+    std::fs::write(&b, "b\n").unwrap();
+
+    let script = Arc::new(Script::default());
+    let root = boot(script.clone()).await;
+    root.require::<Sessions>(SESSIONS).unwrap().attach_disk();
+    script.push(vec![edit("c1", &a, "two", "TWO")]);
+    run(&root, "改一下").await;
+    let before = root
+        .require::<TurnChanges>(TURN_CHANGES)
+        .unwrap()
+        .list(&root);
+    assert_eq!(before.len(), 1, "{before:#?}");
+    let dir = root
+        .require::<Sessions>(SESSIONS)
+        .unwrap()
+        .existing_session_dir()
+        .unwrap()
+        .join("turn_changes");
+    assert!(dir.join("0.json").exists());
+
+    // 新的一棵树 = 重启后的 Dock：从盘上恢复这个会话。
+    let again = boot(Arc::new(Script::default())).await;
+    let sessions = again.require::<Sessions>(SESSIONS).unwrap();
+    sessions.attach_disk();
+    assert!(sessions.resume_latest(), "盘上应该有这个会话");
+    let changes = again.require::<TurnChanges>(TURN_CHANGES).unwrap();
+    assert_eq!(changes.list(&again), before, "重开后记录还在");
+    assert!(dir.join("0.json").exists(), "盘上的记录不能被删");
+    assert!(changes.diff(&again, 0).unwrap().contains("-two\n+TWO\n"));
+
+    // 恢复出来的会话里、还没发新消息时接着改（目标续跑、后台任务叫醒）：归到恢复出来的那一轮。
+    changes.before_edit(
+        &again,
+        "search_replace",
+        &json!({ "file_path": &b }).to_string(),
+    );
+    std::fs::write(&b, "B\n").unwrap();
+    changes.after_edit(&again, "search_replace");
+    let turns = changes.list(&again);
+    let paths: Vec<&str> = turns[0].files.iter().map(|f| f.path.as_str()).collect();
+    assert_eq!(paths, vec!["a.txt", "b.txt"], "{turns:#?}");
+}

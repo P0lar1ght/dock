@@ -5,6 +5,7 @@
 //!
 //! - 轮次按这一页日志里第几条用户消息算（`ordinal`，从 0 起；和网关投影的 `user_turns` 同序）。
 //!   记录里另存那条消息的时刻：撤回（rewind）之后同一个序号换了人，旧记录作废、删掉。
+//!   从盘上读回来的会话时刻只到秒，按秒认（[`same_user`]）。
 //! - 子代理（含 workflow 派的）改的算进派它那一页当前这一轮。
 //! - 落盘在会话目录 `turn_changes/<ordinal>.json`（原文和改后全文都在里面，撤销要用）；
 //!   会话还没落盘就只在内存里。单个文件超过 [`MAX_FILE_BYTES`] 或不是 UTF-8 只记「改过」，
@@ -260,7 +261,7 @@ impl TurnChanges {
             let Some(record) = store
                 .turns
                 .get_mut(&ordinal)
-                .filter(|r| r.user_us == user_us)
+                .filter(|r| same_user(user_us, r.user_us))
             else {
                 return false;
             };
@@ -448,7 +449,11 @@ impl TurnChanges {
         let stale: Vec<usize> = store
             .turns
             .values()
-            .filter(|r| users.get(r.ordinal) != Some(&r.user_us))
+            .filter(|r| {
+                !users
+                    .get(r.ordinal)
+                    .is_some_and(|&t| same_user(t, r.user_us))
+            })
             .map(|r| r.ordinal)
             .collect();
         for ordinal in stale {
@@ -489,6 +494,15 @@ fn user_times(page: &Context) -> Vec<u64> {
             .map(|(_, t)| unix_us(*t))
             .collect()
     })
+}
+
+/// 日志里第 N 条用户消息（时刻 `log_us`）是不是记录里那一条（`recorded_us`）。
+/// 会话从盘上读回来时，时刻只精确到秒（`chat_history.jsonl` 的 `ts`），没有零头；活会话是微秒。
+/// 读回来的按秒比，否则重开一次会话，每一轮都被当成撤回作废删掉。活会话照旧精确比：
+/// 撤回后同一秒里又发了一条，也分得出是新的一轮。
+fn same_user(log_us: u64, recorded_us: u64) -> bool {
+    const SEC: u64 = 1_000_000;
+    log_us == recorded_us || (log_us.is_multiple_of(SEC) && log_us / SEC == recorded_us / SEC)
 }
 
 fn summarize(record: &TurnRecord, cwd: &Path) -> Option<TurnSummary> {
