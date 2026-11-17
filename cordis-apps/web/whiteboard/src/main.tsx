@@ -60,6 +60,9 @@ function inView(a: { getAppState: () => Record<string, any> }, els: readonly El[
   return els.every((e) => within(e as never, view, VIEW_PAD));
 }
 
+/** 低于这个缩放画的东西看不清：Agent 开始画时先把它正在画的地方拉近（最多 100%）。 */
+const READABLE_ZOOM = 0.5;
+
 /** 画布上的 Agent（Excalidraw 的协作者）。 */
 const AGENT = "dock-agent";
 /**
@@ -296,6 +299,13 @@ function Board() {
 
   const agentPointer = useRef<{ x: number; y: number } | null>(null);
   const cursorTimer = useRef<number | null>(null);
+  /** 这次调用镜头已经对准过 Agent 画的地方（调用结束清掉）。 */
+  const liveFramed = useRef(false);
+  /** 镜头被 Agent 动过：面板刚打开时那次「缩放到全图」别再盖掉它。 */
+  const agentFramed = useRef(false);
+  /** 画布还没挂上时来的预览 / 结果：挂上后补上（面板是被这次调用打开的，第一段往往就在这时到）。 */
+  const pendingLive = useRef<{ args: Record<string, unknown>; final: boolean } | null>(null);
+  const resultBeforeMount = useRef(false);
 
   /** 画布上的 Agent：光标停在它正在画 / 改的地方，要动的图形高亮成它选中的样子。 */
   const agent = (targets: string[]) =>
@@ -314,7 +324,10 @@ function Board() {
 
   const showLive = (args: Record<string, unknown>, final: boolean) => {
     const a = api.current;
-    if (!a) return;
+    if (!a) {
+      pendingLive.current = { args, final };
+      return;
+    }
     if (cursorTimer.current) window.clearTimeout(cursorTimer.current);
     cursorTimer.current = null;
     const all = a.getSceneElementsIncludingDeleted();
@@ -339,13 +352,23 @@ function Board() {
     } as never);
     applying.current = false;
     setBusy(plan.status);
-    // 画布跟着 Agent：它正在画 / 改的地方不在视野里就挪过去（在视野里就不动，免得一直晃）。
-    const focus = ghosts.length ? ghosts.filter((e) => !e.containerId).slice(-1) : all.filter((e) => plan.targets.includes(e.id));
-    if (focus.length && !inView(a, focus)) a.scrollToContent(focus as never, { fitToContent: false, canvasOffsets: VIEW_PAD, animate: true, duration: 300 });
+    // 镜头跟着 Agent：框住这次已经画出来的草稿（或要动的图形），最多放大到 100%。
+    // 都在视野里就不动（免得一直晃）；整张板缩得太小时，第一次先拉近到看得清。
+    const work = ghosts.length ? ghosts.filter((e) => !e.containerId) : all.filter((e) => plan.targets.includes(e.id));
+    if (work.length) {
+      const zoom = (a.getAppState().zoom?.value as number | undefined) ?? 1;
+      if (!inView(a, work) || (!liveFramed.current && zoom < READABLE_ZOOM)) {
+        liveFramed.current = true;
+        agentFramed.current = true;
+        a.scrollToContent(work as never, { fitToContent: true, viewportZoomFactor: 0.9, canvasOffsets: VIEW_PAD, maxZoom: 1, animate: true, duration: 300 });
+      }
+    }
   };
 
   /** 草稿拿掉；Agent 光标停一会儿再收起。 */
   const clearLive = (linger = false) => {
+    liveFramed.current = false;
+    pendingLive.current = null;
     const a = api.current;
     if (!a) return;
     const all = a.getSceneElementsIncludingDeleted();
@@ -379,6 +402,8 @@ function Board() {
     app.ontoolinput = (p) => showLive(p.arguments ?? {}, true);
     app.ontoolresult = () => {
       setBusy(null);
+      // 画布还没挂上：挂上后再刷新（这时读到的场景可能还是调用之前的）。
+      if (!api.current) resultBeforeMount.current = true;
       void refresh(false, true)
         .catch((e) => setError(String(e?.message ?? e)))
         .finally(() => clearLive(true));
@@ -453,8 +478,16 @@ function Board() {
         excalidrawAPI={(a) => {
           api.current = a as unknown as Api;
           currentApi = a as unknown as ViewApi;
-          // 载入后缩放到能看全所有图形。
-          window.setTimeout(() => api.current?.scrollToContent(undefined, { fitToContent: true }), 50);
+          // 载入后缩放到能看全所有图形——除非面板是被 Agent 正在写的调用打开的：那就先对准它画的地方。
+          window.setTimeout(() => {
+            const live = pendingLive.current;
+            pendingLive.current = null;
+            if (resultBeforeMount.current) {
+              resultBeforeMount.current = false;
+              void refresh(false, true).finally(() => clearLive(true));
+            } else if (live) showLive(live.args, live.final);
+            if (!agentFramed.current) api.current?.scrollToContent(undefined, { fitToContent: true });
+          }, 50);
         }}
         initialData={{ elements: initial.elements as never, appState: { ...initial.appState, zenModeEnabled: inline }, files: initial.files as never, scrollToContent: true }}
         onChange={onChange as never}

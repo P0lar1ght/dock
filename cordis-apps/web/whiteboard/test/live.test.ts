@@ -135,3 +135,22 @@ test("排版类：按 ids 指着现有图形", () => {
   // 还在写：最后一个 id 可能没写完。
   assert.deepEqual(livePlan({ ids: ["a", "b"] }, false, scene).targets, ["a"]);
 });
+
+test("箭头端点还没写到：先不画（流程图先写 edges 再写 nodes 时不出现悬空箭头）", () => {
+  // edges 写完、nodes 才写到第一个：两条边的另一端都还不认识。
+  const graph = livePlan({ edges: [{ from: "a", to: "b" }, { from: "b", to: "c" }], nodes: [{ id: "a" }, { id: "b" }] }, false, []);
+  assert.deepEqual(
+    graph.skeletons.map((s) => s.type),
+    ["rectangle"],
+    "还在写：只画写完的节点 a，边都等两端齐了再画",
+  );
+  const done = livePlan({ edges: [{ from: "a", to: "b" }, { from: "b", to: "c" }], nodes: [{ id: "a" }, { id: "b" }] }, true, []);
+  assert.deepEqual(
+    done.skeletons.map((s) => s.type),
+    ["rectangle", "rectangle", "arrow"],
+    "写完了：c 不存在的那条边服务器也会拒，不画",
+  );
+  // edit 里引用了还没写到的图形的箭头同理。
+  const edit = livePlan({ add: [{ type: "arrow", from: "x", to: "y" }] }, true, []);
+  assert.equal(edit.skeletons.length, 0);
+});

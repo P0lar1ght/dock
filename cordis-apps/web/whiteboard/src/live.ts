@@ -129,6 +129,14 @@ function addShape(shape: Record<string, any>, index: number, frames: Frame[], by
   const kind = str(shape.type);
   if (!kind || !SHAPES.includes(kind)) return null;
   const linear = kind === "arrow" || kind === "line";
+  // 端点还没写到（流程图常先写 edges 再写 nodes）：先不画，不然会在空地上摆一排悬空的箭头。
+  // 服务器也拒端点不存在的箭头，写完了还认不出的本来就画不出来。
+  if (linear) {
+    for (const end of [shape.from, shape.to]) {
+      const target = str(end);
+      if (target && !byId.has(target)) return null;
+    }
+  }
   const w = kind === "text" ? 120 : (num(shape.width) ?? (linear ? 160 : DEFAULT_W));
   const h = kind === "text" ? 30 : (num(shape.height) ?? (linear ? 0 : DEFAULT_H));
   const b = bounds(frames);
