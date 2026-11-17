@@ -68,7 +68,7 @@ test("edit update / delete：指着要动的现有图形，不画草稿", () => 
   assert.deepEqual(plan.targets, ["a", "b"]);
   assert.deepEqual(plan.pointer, { x: 350, y: 25 });
   assert.equal(plan.skeletons.length, 0);
-  assert.equal(plan.status, "Agent 正在删 2 个、改 1 个图形…");
+  assert.equal(plan.status, "Agent 正在删 1 个、改 1 个图形…", "不存在的 id（nope）不算");
 });
 
 test("草稿和删掉的不算现有内容", () => {

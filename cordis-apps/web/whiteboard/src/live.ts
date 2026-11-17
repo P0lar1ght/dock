@@ -347,7 +347,10 @@ export function livePlan(args: Record<string, unknown>, final: boolean, scene: r
       frames.length = 0;
       byId.clear();
     }
-    const deletes = settled(list(args.delete)).map(str).filter((id): id is string => !!id);
+    // 只算白板上真有的：不存在的 id 服务器会拒，算进「删 N 个」不准。
+    const deletes = settled(list(args.delete))
+      .map(str)
+      .filter((id): id is string => !!id && byId.has(id));
     const updates = settled(list(args.update).map(obj))
       .map((u) => str(u.id))
       .filter((id): id is string => !!id);

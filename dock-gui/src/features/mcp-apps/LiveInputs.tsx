@@ -12,21 +12,32 @@ import { getTools, noticeTool } from "./api";
 import { subscribeLive, type LiveUpdate } from "./live";
 import { focusRemote, panelKind, reseed, route, seed, sinkKey, type RoutedCall } from "./routing";
 
-/** 已经替它自动开过面板的调用：用户在它写参数时把面板关了，就别再给它开。 */
+/**
+ * 已经替它自动开过面板的调用：用户在它写参数时把面板关了，就别再给它开。
+ * 键带会话：没给调用 id 的供应商每次都叫 `call-0`，不带会话会在会话之间串。
+ */
 const opened = new Set<string>();
+const openedKey = (threadId: string, toolCallId: string) => `${threadId}\n${toolCallId}`;
 
 export function LiveInputs({ threadId }: { threadId: string }) {
   const host = useFeatureHost();
   const hostRef = useRef(host);
   hostRef.current = host;
-  useEffect(() => subscribeLive(threadId, (update) => deliver(threadId, update, hostRef.current)), [threadId]);
+  useEffect(() => {
+    const off = subscribeLive(threadId, (update) => deliver(threadId, update, hostRef.current));
+    return () => {
+      off();
+      // 切走这个会话：之后收不到它的 started / dropped，记下的一并清掉。
+      for (const key of [...opened]) if (key.startsWith(`${threadId}\n`)) opened.delete(key);
+    };
+  }, [threadId]);
   return null;
 }
 
 function deliver(threadId: string, update: LiveUpdate, host: FeatureHost) {
   // 开始了：之后归工具卡（InlineApp.tsx）送完整参数和结果。
   if (update.kind === "started") {
-    opened.delete(update.stream.toolCallId);
+    opened.delete(openedKey(threadId, update.stream.toolCallId));
     return;
   }
   const call = liveToolCall(update.stream);
@@ -38,6 +49,7 @@ function deliver(threadId: string, update: LiveUpdate, host: FeatureHost) {
     return;
   }
   const itemId = update.stream.toolCallId;
+  const mark = openedKey(threadId, itemId);
   const key = sinkKey(tool.server, tool.resourceUri, store.sessionCwd(threadId));
   const routed: RoutedCall = {
     threadId,
@@ -48,17 +60,17 @@ function deliver(threadId: string, update: LiveUpdate, host: FeatureHost) {
     partial: true,
   };
   if (update.kind === "dropped") {
-    opened.delete(itemId);
+    opened.delete(mark);
     route(key, routed);
     return;
   }
   if (route(key, routed)) return;
-  if (opened.has(itemId)) {
+  if (opened.has(mark)) {
     // 面板还在打开：种子换成最新的样子。
     reseed(key, routed);
     return;
   }
-  opened.add(itemId);
+  opened.add(mark);
   // 已经拖成独立窗：聚焦那扇窗，不在本窗再开一份。
   if (focusRemote(key, routed)) return;
   seed(key, routed);
