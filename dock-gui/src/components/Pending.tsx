@@ -43,7 +43,9 @@ function PermissionSummary({ summary }: { summary: string }) {
   );
 }
 
-const card = "md-surface enter-up mx-4 mb-2 flex shrink-0 flex-col gap-2.5 rounded-[10px] border border-line-strong bg-[#f5f5f7] p-3";
+/** 卡片外观。问答卡不带 shrink-0：题多、字长时它要能被压矮，题目区在卡内滚动。 */
+const cardBase = "md-surface enter-up mx-4 mb-2 flex flex-col gap-2.5 rounded-[10px] border border-line-strong bg-[#f5f5f7] p-3";
+const card = `${cardBase} shrink-0`;
 const primary =
   "motion-colors flex h-[26px] shrink-0 items-center rounded-[7px] bg-ink px-3 text-[11px] font-medium text-white hover:bg-ink-2 active:scale-[0.97] disabled:bg-line-strong disabled:text-ink-4 disabled:active:scale-100";
 const secondary =
@@ -292,6 +294,16 @@ function QuestionCard({
   };
 
   const ref = useRef<HTMLDivElement>(null);
+  const blocks = useRef<(HTMLDivElement | null)[]>([]);
+  // 单选答完跳到下一题：题目区在卡内滚动时，把那一题滚进来（第一次挂上不滚）。
+  const mounted = useRef(false);
+  useEffect(() => {
+    if (!mounted.current) {
+      mounted.current = true;
+      return;
+    }
+    blocks.current[current]?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }, [current]);
   useEffect(() => {
     const active = document.activeElement;
     const typing = (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) && active.value.trim() !== "";
@@ -315,57 +327,67 @@ function QuestionCard({
   };
 
   const many = item.questions.length > 1;
+  // 卡头、提交钉住，题目区在卡内滚动：题多、字长时卡片不会撑破会话区（外层限高，见 SessionPane）。
   return (
-    <div ref={ref} tabIndex={-1} onKeyDown={onKeyDown} className={`${card} gap-3 outline-none`}>
+    <div ref={ref} tabIndex={-1} onKeyDown={onKeyDown} className={`${cardBase} min-h-0 gap-3 outline-none`}>
       <Header icon={MessageCircleQuestion} title={many ? `Dock 在问你 · ${item.questions.length} 个问题` : "Dock 在问你"} />
-      {item.questions.map((q, qi) => {
-        const d = drafts[q.id] ?? EMPTY;
-        const keys = qi === current;
-        return (
-          <div key={q.id} className="flex flex-col gap-3">
-            {qi > 0 && <div className="h-px bg-line-strong" />}
-            <div className="flex flex-col gap-2">
-              <div className="flex items-center gap-2">
-                {many && (
-                  <span className="flex size-4 shrink-0 items-center justify-center rounded-full bg-ink text-[10px] font-bold text-white">
-                    {qi + 1}
-                  </span>
-                )}
-                <span className="min-w-0 text-sm font-semibold text-ink">{q.question}</span>
-                {(many || q.multiSelect) && (
-                  <span className="shrink-0 rounded-sm border border-line-strong bg-fill px-1.5 py-0.5 text-[11px] font-medium leading-none text-ink-3">
-                    {q.multiSelect ? "可多选" : "单选"}
-                  </span>
-                )}
-                {keys && q.options.length > 0 && (
-                  <span className="enter-fade ml-auto shrink-0 text-xs text-ink-4">按数字键快速选择</span>
-                )}
+      <div className="thin-scroll -mx-3 flex min-h-0 flex-col gap-3 overflow-y-auto px-3 py-px">
+        {item.questions.map((q, qi) => {
+          const d = drafts[q.id] ?? EMPTY;
+          const keys = qi === current;
+          return (
+            <div
+              key={q.id}
+              ref={(el) => {
+                blocks.current[qi] = el;
+              }}
+              className="flex flex-col gap-3"
+            >
+              {qi > 0 && <div className="h-px bg-line-strong" />}
+              <div className="flex flex-col gap-2">
+                {/* 题干多行时编号、标签和提示对齐第一行（不在整段中间）。 */}
+                <div className="flex items-start gap-2">
+                  {many && (
+                    <span className="mt-0.5 flex size-4 shrink-0 items-center justify-center rounded-full bg-ink text-[10px] font-bold text-white">
+                      {qi + 1}
+                    </span>
+                  )}
+                  <span className="min-w-0 text-sm font-semibold text-ink [overflow-wrap:anywhere]">{q.question}</span>
+                  {(many || q.multiSelect) && (
+                    <span className="mt-0.5 shrink-0 rounded-sm border border-line-strong bg-fill px-1.5 py-0.5 text-[11px] font-medium leading-none text-ink-3">
+                      {q.multiSelect ? "可多选" : "单选"}
+                    </span>
+                  )}
+                  {keys && q.options.length > 0 && (
+                    <span className="enter-fade ml-auto mt-px shrink-0 text-xs text-ink-4">按数字键快速选择</span>
+                  )}
+                </div>
+                <div className="grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-2">
+                  {q.options.map((o, i) => (
+                    <Option
+                      key={o.label}
+                      label={o.label}
+                      description={o.description !== o.label ? o.description : ""}
+                      multi={!!q.multiSelect}
+                      on={d.picked.includes(o.label)}
+                      digit={keys && i < 9 ? i + 1 : undefined}
+                      onClick={() => pick(qi, o.label)}
+                    />
+                  ))}
+                </div>
+                <input
+                  value={d.other}
+                  onChange={(e) => write(qi, e.target.value)}
+                  onFocus={() => setCurrent(qi)}
+                  placeholder={q.multiSelect ? "还可以补一句你自己的回答" : "或者写你自己的回答"}
+                  className="motion-colors h-8 rounded-[7px] border border-line-strong bg-white px-2.5 text-xs text-ink outline-none select-text placeholder:text-ink-4 focus:border-accent"
+                />
               </div>
-              <div className="grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-2">
-                {q.options.map((o, i) => (
-                  <Option
-                    key={o.label}
-                    label={o.label}
-                    description={o.description !== o.label ? o.description : ""}
-                    multi={!!q.multiSelect}
-                    on={d.picked.includes(o.label)}
-                    digit={keys && i < 9 ? i + 1 : undefined}
-                    onClick={() => pick(qi, o.label)}
-                  />
-                ))}
-              </div>
-              <input
-                value={d.other}
-                onChange={(e) => write(qi, e.target.value)}
-                onFocus={() => setCurrent(qi)}
-                placeholder={q.multiSelect ? "还可以补一句你自己的回答" : "或者写你自己的回答"}
-                className="motion-colors h-8 rounded-[7px] border border-line-strong bg-white px-2.5 text-xs text-ink outline-none select-text placeholder:text-ink-4 focus:border-accent"
-              />
             </div>
-          </div>
-        );
-      })}
-      <div className="flex items-center justify-end gap-2 pt-1">
+          );
+        })}
+      </div>
+      <div className="flex shrink-0 items-center justify-end gap-2 pt-1">
         {ready && (
           <span className="enter-fade flex items-center gap-1.5 text-[11px] text-ink-4">
             <kbd className="flex h-[18px] items-center gap-1 rounded border border-line-strong bg-white px-1.5 font-mono text-[10px] text-ink-3">
@@ -408,10 +430,11 @@ function Option({
         on ? "border-accent shadow-sm ring-1 ring-accent" : "border-line-strong hover:bg-[#fbfbfc] hover:border-ink-5"
       }`}
     >
-      <span className="flex min-w-0 items-center gap-2">
+      {/* 标题完整显示（多行时数字键、圆点对齐第一行）。 */}
+      <span className="flex min-w-0 items-start gap-2">
         {digit !== undefined && (
           <kbd
-            className={`motion-colors flex size-4 shrink-0 items-center justify-center rounded-[4px] border font-mono text-[10px] ${
+            className={`motion-colors mt-px flex size-4 shrink-0 items-center justify-center rounded-[4px] border font-mono text-[10px] ${
               on ? "border-accent text-accent" : "border-line-strong bg-fill text-ink-3"
             }`}
           >
@@ -420,7 +443,7 @@ function Option({
         )}
         {multi ? (
           <span
-            className={`motion-colors flex size-3.5 shrink-0 items-center justify-center rounded-sm border ${
+            className={`motion-colors mt-0.5 flex size-3.5 shrink-0 items-center justify-center rounded-sm border ${
               on ? "border-accent bg-accent" : "border-ink-5 bg-white"
             }`}
           >
@@ -428,17 +451,17 @@ function Option({
           </span>
         ) : (
           <span
-            className={`motion-colors flex size-3.5 shrink-0 items-center justify-center rounded-full bg-white ${
+            className={`motion-colors mt-0.5 flex size-3.5 shrink-0 items-center justify-center rounded-full bg-white ${
               on ? "border-2 border-accent" : "border border-ink-5"
             }`}
           >
             {on && <span className="pop-in size-1.5 rounded-full bg-accent" />}
           </span>
         )}
-        <span className={`truncate text-[13px] ${on ? "font-semibold text-accent" : "font-medium text-ink"}`}>{label}</span>
+        <span className={`min-w-0 text-[13px] leading-[18px] [overflow-wrap:anywhere] ${on ? "font-semibold text-accent" : "font-medium text-ink"}`}>{label}</span>
       </span>
       {description && (
-        <span className={`pl-[22px] text-xs ${on ? "text-ink-3" : "text-ink-4"} ${digit !== undefined ? "ml-6" : ""}`}>
+        <span className={`pl-[22px] text-xs [overflow-wrap:anywhere] ${on ? "text-ink-3" : "text-ink-4"} ${digit !== undefined ? "ml-6" : ""}`}>
           {description}
         </span>
       )}

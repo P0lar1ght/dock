@@ -178,8 +178,9 @@ export function SessionPane(props: SessionPaneProps) {
         props.empty
       )}
 
-      {/* 输入区和对话流同一列宽：输入框两侧 mx-4，所以比阅读列宽 32px。 */}
-      <div className={`mx-auto flex w-full shrink-0 flex-col ${COMPOSER_WIDTH}`}>
+      {/* 输入区和对话流同一列宽：输入框两侧 mx-4，所以比阅读列宽 32px。
+          最多占会话区 75%：问答卡题多、字长时被压矮（卡内滚动），头栏、对话流和「提交」都留在视野里。 */}
+      <div className={`mx-auto flex max-h-[75%] min-h-0 w-full flex-col ${COMPOSER_WIDTH}`}>
         {id && app.queued.get(id) && (
           <Queued
             threadId={id}
