@@ -210,7 +210,8 @@ export function SideChatPanel({ sessionId, onClose, lead, controls }: PanelProps
         onMerge={(note) => void merge(note)}
       />
       {asideId && pending && (
-        <div className="px-3">
+        // 同主会话：问答卡最多占面板 60%，题目区在卡内滚动。
+        <div className="flex max-h-[60%] min-h-0 flex-col px-3">
           <Pending
             key={pending.id}
             item={pending}

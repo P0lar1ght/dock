@@ -56,7 +56,7 @@ export function GoalBar({
   if (!goal || (goal.status === "completed" && !done)) return null;
 
   const paused = goal.status === "paused";
-  const shell = `mx-8 -mb-4 flex flex-col border border-b-0 px-3.5 pb-4 transition-[opacity,transform] duration-[var(--dur-fast)] ease-[var(--ease-in)] ${
+  const shell = `mx-8 -mb-4 flex shrink-0 flex-col border border-b-0 px-3.5 pb-4 transition-[opacity,transform] duration-[var(--dur-fast)] ease-[var(--ease-in)] ${
     leaving ? "translate-y-2 opacity-0" : "enter-up"
   } rounded-t-[16px]`;
 
