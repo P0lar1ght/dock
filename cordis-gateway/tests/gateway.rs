@@ -8094,6 +8094,173 @@ async fn turn_changes_project_list_diff_and_revert() {
     );
 }
 
+/// 用户说「改外面」就用绝对路径改工作区外的那个文件（`hello` → `HELLO`）。
+struct EditOutside(std::path::PathBuf);
+
+impl Sampler for EditOutside {
+    fn sample<'a>(
+        &'a self,
+        request: PromptRequest,
+        _on_delta: Box<dyn FnMut(StreamDelta) + Send + 'a>,
+    ) -> BoxFuture<'a, LlmOutput> {
+        let asked = request
+            .history
+            .iter()
+            .rev()
+            .take_while(|e| !matches!(e, LogEvent::ToolExecute { .. }))
+            .any(|e| matches!(e, LogEvent::User(t) if t.contains("改外面")));
+        let path = self.0.clone();
+        Box::pin(async move {
+            if asked {
+                return LlmOutput {
+                    tool_calls: vec![ToolCall {
+                        id: "edit-outside".into(),
+                        name: "search_replace".into(),
+                        arguments: json!({
+                            "file_path": path,
+                            "old_string": "hello",
+                            "new_string": "HELLO",
+                        })
+                        .to_string(),
+                    }],
+                    ..LlmOutput::default()
+                };
+            }
+            LlmOutput {
+                text: "改好了".into(),
+                ..LlmOutput::default()
+            }
+        })
+    }
+}
+
+/// `fs/read` 收绝对路径：这个会话里 agent 改过的工作区外文件看得到（文本、分块字节都行），
+/// 没改过的照旧拒；配对来的网页连问都不让问（只认受信连接）。
+#[tokio::test]
+async fn fs_read_opens_files_the_agent_edited_outside_the_workspace() {
+    let outside = project_dir("fs-outside-files");
+    let note = outside.join("note.md");
+    let untouched = outside.join("untouched.md");
+    std::fs::write(&note, "hello\nworld\n").unwrap();
+    std::fs::write(&untouched, "secret\n").unwrap();
+
+    let root = harness_root_tools(Some(Arc::new(EditOutside(note.clone()))), true).await;
+    root.plugin(agent_presets(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    root.plugin(
+        cordis_spine::tabs(),
+        cordis_spine::TabsConfig::headless(test_page_mount()),
+    )
+    .unwrap()
+    .wait()
+    .await
+    .unwrap();
+    root.plugin(cordis_spine::turn_changes(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    let (addr, ticket, _serve) = serve_trusted(&root).await;
+    let (mut gui, _) = Rpc::connect_as(addr, &ticket, GUI_ORIGIN).await;
+    let init = gui.call("initialize", json!({})).await;
+    assert_eq!(
+        init["result"]["capabilities"]["workspaceFilesOutside"], true,
+        "{init}"
+    );
+    let dir = project_dir("fs-outside-proj");
+    let started = gui
+        .call("thread/start", json!({ "cwd": dir.display().to_string() }))
+        .await;
+    let id = started["result"]["thread"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{started}"))
+        .to_string();
+    let _ = gui
+        .call("thread/subscribe", json!({ "threadId": id }))
+        .await;
+    let _ = gui
+        .call(
+            "thread/approval/set",
+            json!({ "threadId": id, "mode": "auto" }),
+        )
+        .await;
+
+    // 还没改过：工作区外的绝对路径一律拒。
+    let before = gui
+        .call(
+            "fs/read",
+            json!({ "threadId": id, "path": note.display().to_string() }),
+        )
+        .await;
+    assert_eq!(
+        before["error"]["details"]["code"], "invalid_params",
+        "{before}"
+    );
+
+    let _ = gui
+        .call("turn/start", json!({ "threadId": id, "message": "改外面" }))
+        .await;
+    notes_until(&mut gui, Duration::from_secs(10), |n| {
+        n["method"] == "turn/completed"
+    })
+    .await;
+    assert_eq!(std::fs::read_to_string(&note).unwrap(), "HELLO\nworld\n");
+
+    let read = gui
+        .call(
+            "fs/read",
+            json!({ "threadId": id, "path": note.display().to_string() }),
+        )
+        .await;
+    assert_eq!(read["result"]["kind"], "text", "{read}");
+    assert_eq!(read["result"]["text"], "HELLO\nworld\n", "{read}");
+    assert_eq!(read["result"]["path"], note.display().to_string(), "{read}");
+    let raw = gui
+        .call(
+            "fs/read",
+            json!({ "threadId": id, "path": note.display().to_string(), "raw": true, "offset": 0, "length": 5 }),
+        )
+        .await;
+    assert_eq!(raw["result"]["kind"], "bytes", "{raw}");
+    assert_eq!(raw["result"]["data"], "SEVMTE8=", "{raw}");
+    // 同一个目录里 agent 没改过的文件照旧拒。
+    let denied = gui
+        .call(
+            "fs/read",
+            json!({ "threadId": id, "path": untouched.display().to_string() }),
+        )
+        .await;
+    assert_eq!(
+        denied["error"]["details"]["code"], "invalid_params",
+        "{denied}"
+    );
+    assert!(
+        denied["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("agent 改过")),
+        "{denied}"
+    );
+}
+
+/// 配对来的网页：`fs/read` 的绝对路径在连接这一层就挡掉（不管有没有这个会话）；相对路径不受影响。
+#[tokio::test]
+async fn paired_pages_cannot_read_absolute_paths() {
+    let h = Harness::boot().await;
+    let ticket = h.pair_ticket().await;
+    let mut page = Rpc::connect(h.addr, &ticket).await;
+    let _ = page.call("initialize", json!({})).await;
+    let denied = page.call("fs/read", json!({ "path": "/etc/hosts" })).await;
+    assert_eq!(denied["error"]["details"]["code"], "forbidden", "{denied}");
+    let relative = page.call("fs/read", json!({ "path": "README.md" })).await;
+    assert_ne!(
+        relative["error"]["details"]["code"], "forbidden",
+        "{relative}"
+    );
+}
+
 /// 这个测试二进制共用的记忆目录（`$DOCK_HOME/memory`）。每个用例用自己项目目录算出来的
 /// 工作区 scope，互不相干；全局 scope 是共用的，断言只看自己写的那几篇。
 fn memory_home() -> std::path::PathBuf {

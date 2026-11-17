@@ -533,24 +533,39 @@ pub fn list(root: &Path, rel: &str, hidden: bool) -> Result<Listing, String> {
 /// 读一个文件：文本（UTF-8、不含 NUL）按 `max_text` 截断；常见图片给字节；其它只给大小。
 pub fn read(root: &Path, rel: &str, max_text: usize) -> Result<FileRead, String> {
     let file = confine(root, rel)?;
-    let meta = std::fs::metadata(&file).map_err(|e| format!("读不了 {rel}：{e}"))?;
+    let root = root.canonicalize().map_err(|e| e.to_string())?;
+    let canonical = file.canonicalize().map_err(|e| e.to_string())?;
+    read_at(&file, rel, relative(&root, &canonical), max_text)
+}
+
+/// 同 [`read`]，但不限在工作区里：调用方已经确认过这个绝对路径能看（网关只放行这个会话里
+/// agent 改过的文件）。回的 `path` 就是这个绝对路径。
+pub fn read_absolute(path: &Path, max_text: usize) -> Result<FileRead, String> {
+    let label = path.display().to_string();
+    if !path.is_absolute() {
+        return Err(format!("不是绝对路径：{label}"));
+    }
+    read_at(path, &label, label.clone(), max_text)
+}
+
+/// `file` 是解析好的路径，`rel` 只用来写报错，`path` 是回给调用方的显示路径。
+fn read_at(file: &Path, rel: &str, path: String, max_text: usize) -> Result<FileRead, String> {
+    let meta = std::fs::metadata(file).map_err(|e| format!("读不了 {rel}：{e}"))?;
     if !meta.is_file() {
         return Err(format!("不是文件：{rel}"));
     }
-    let root = root.canonicalize().map_err(|e| e.to_string())?;
-    let path = relative(&root, &file.canonicalize().map_err(|e| e.to_string())?);
     let size = meta.len();
-    let mime = image_mime(&file);
+    let mime = image_mime(file);
     let content = match mime {
         Some(m) if m != "image/svg+xml" => {
             if size > IMAGE_LIMIT {
                 Content::Binary
             } else {
-                let bytes = std::fs::read(&file).map_err(|e| format!("读不了 {rel}：{e}"))?;
+                let bytes = std::fs::read(file).map_err(|e| format!("读不了 {rel}：{e}"))?;
                 Content::Image { mime: m, bytes }
             }
         }
-        _ => read_text(&file, max_text)?,
+        _ => read_text(file, max_text)?,
     };
     Ok(FileRead {
         path,
@@ -573,16 +588,35 @@ pub struct RangeRead {
 }
 
 pub fn read_range(root: &Path, rel: &str, offset: u64, len: usize) -> Result<RangeRead, String> {
-    use std::io::{Read, Seek, SeekFrom};
     let file = confine(root, rel)?;
-    let mut f = std::fs::File::open(&file).map_err(|e| format!("读不了 {rel}：{e}"))?;
+    let root = root.canonicalize().map_err(|e| e.to_string())?;
+    let canonical = file.canonicalize().map_err(|e| e.to_string())?;
+    read_range_at(&file, rel, relative(&root, &canonical), offset, len)
+}
+
+/// 同 [`read_range`]，不限在工作区里（见 [`read_absolute`]）。
+pub fn read_range_absolute(path: &Path, offset: u64, len: usize) -> Result<RangeRead, String> {
+    let label = path.display().to_string();
+    if !path.is_absolute() {
+        return Err(format!("不是绝对路径：{label}"));
+    }
+    read_range_at(path, &label, label.clone(), offset, len)
+}
+
+fn read_range_at(
+    file: &Path,
+    rel: &str,
+    path: String,
+    offset: u64,
+    len: usize,
+) -> Result<RangeRead, String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(file).map_err(|e| format!("读不了 {rel}：{e}"))?;
     // 用打开后的句柄取元数据：和读到的字节是同一个文件。
     let meta = f.metadata().map_err(|e| format!("读不了 {rel}：{e}"))?;
     if !meta.is_file() {
         return Err(format!("不是文件：{rel}"));
     }
-    let root = root.canonicalize().map_err(|e| e.to_string())?;
-    let path = relative(&root, &file.canonicalize().map_err(|e| e.to_string())?);
     let size = meta.len();
     let mut bytes = Vec::with_capacity(len.min(size.saturating_sub(offset) as usize));
     if offset < size {
@@ -753,6 +787,25 @@ mod tests {
             let err = read(dir.path(), "escape/secret.txt", TEXT_LIMIT).unwrap_err();
             assert!(err.contains("不在工作区"), "{err}");
         }
+    }
+
+    /// 绝对路径版不看工作区（放不放行由调用方定），回的 `path` 是这个绝对路径；相对路径拒。
+    #[test]
+    fn absolute_reads_report_the_absolute_path_and_refuse_relative_ones() {
+        let outside = tempfile::tempdir().unwrap();
+        let file = outside.path().join("note.md");
+        std::fs::write(&file, "外面的笔记\n").unwrap();
+        let got = read_absolute(&file, TEXT_LIMIT).unwrap();
+        assert_eq!(got.path, file.display().to_string());
+        assert!(matches!(got.content, Content::Text { ref text, .. } if text == "外面的笔记\n"));
+        let range = read_range_absolute(&file, 3, 6).unwrap();
+        assert_eq!(range.path, file.display().to_string());
+        assert_eq!(range.bytes, "面的".as_bytes());
+        assert!(read_absolute(Path::new("note.md"), TEXT_LIMIT).is_err());
+        assert!(read_range_absolute(Path::new("note.md"), 0, 1).is_err());
+        assert!(read_absolute(outside.path(), TEXT_LIMIT)
+            .unwrap_err()
+            .contains("不是文件"));
     }
 
     #[test]

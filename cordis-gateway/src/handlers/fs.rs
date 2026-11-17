@@ -25,6 +25,8 @@
 //! - `fs/trash { threadId?, path }` → `{}`：移到系统废纸篓；没有回收站回 `write_failed`，不硬删。
 //!
 //! 路径都相对会话的 cwd，出了这个目录就拒绝（见 [`cordis_base::workspace_files`]）。
+//! 例外：`fs/read` 收这个会话里 agent 改过的文件的绝对路径（工作区外的也算，只读；能力
+//! `workspaceFilesOutside`，只认受信连接）。
 //! 只认开着的会话（要从页上拿 cwd）。读盘放到阻塞线程里，不占网关的异步线程。
 //!
 //! - `fs/dirs { path?, hidden? }` → `{ path, parent, home, entries: [{ name, path }], truncated }`：
@@ -60,10 +62,15 @@ pub async fn dispatch(
 ) -> Result<Value, RpcError> {
     let page = threads::resolve_param(gateway, &params)?;
     let root = cordis_spine::session_cwd(&page.ctx);
+    let outside = if method == protocol::FS_READ {
+        edited_outside(&page.ctx, path_param(&params))?
+    } else {
+        None
+    };
     let method = method.to_string();
     tokio::task::spawn_blocking(move || match method.as_str() {
         protocol::FS_LIST => list(&root, &params),
-        protocol::FS_READ => read(&root, &params),
+        protocol::FS_READ => read(&root, outside.as_deref(), &params),
         protocol::FS_FIND => find(&root, &params),
         other => Err(RpcError::method_not_found(other)),
     })
@@ -219,22 +226,55 @@ fn list(root: &std::path::Path, params: &Value) -> Result<Value, RpcError> {
     }))
 }
 
-fn read(root: &std::path::Path, params: &Value) -> Result<Value, RpcError> {
+/// `fs/read` 的绝对路径：只放行这一页 agent 改过的文件（每轮改动里记着的，工作区外的也算）。
+/// 相对路径回 `None`，照常限在工作区里读。配对来的网页在 `ws` 那一层就被挡了（只认受信连接）。
+fn edited_outside(page: &cordis::Context, path: &str) -> Result<Option<PathBuf>, RpcError> {
+    let wanted = Path::new(path.trim());
+    if !wanted.is_absolute() {
+        return Ok(None);
+    }
+    let edited = page
+        .get::<cordis_spine::TurnChanges>(cordis_spine::TURN_CHANGES)
+        .map(|c| c.edited_paths(page))
+        .unwrap_or_default();
+    // 记下的路径和传进来的可能一个走了软链接一个没走（macOS 的 `/tmp` → `/private/tmp`）。
+    // 对上了读的是记下的那个文件（规范化后），不是调用方给的路径：后者在 `/tmp` 这类人人可写的
+    // 目录里，检查完、打开前可能被换成指向别处的软链接。
+    let canonical = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let want = canonical(wanted);
+    edited
+        .into_iter()
+        .map(|e| canonical(&e))
+        .find(|e| *e == want)
+        .map(Some)
+        .ok_or_else(|| {
+            RpcError::invalid_params(format!(
+                "路径不在工作区里：{path}（工作区外只看得到这个会话里 agent 改过的文件）"
+            ))
+        })
+}
+
+fn read(root: &Path, outside: Option<&Path>, params: &Value) -> Result<Value, RpcError> {
     let path = path_param(params);
     if path.is_empty() {
         return Err(RpcError::invalid_params("path is required"));
     }
     if params.get("raw").and_then(Value::as_bool) == Some(true) {
-        return read_raw(root, path, params);
+        return read_raw(root, outside, path, params);
     }
     let max = params
         .get("maxBytes")
         .and_then(Value::as_u64)
         .map(|n| (n as usize).clamp(1, files::TEXT_LIMIT))
         .unwrap_or(files::TEXT_LIMIT);
-    let file = files::read(root, path, max).map_err(RpcError::invalid_params)?;
+    let file = match outside {
+        Some(abs) => files::read_absolute(abs, max),
+        None => files::read(root, path, max),
+    }
+    .map_err(RpcError::invalid_params)?;
     let mut out = json!({
-        "path": file.path,
+        // 工作区外：回调用方给的路径（读的是规范化后的那个，见 `edited_outside`）。
+        "path": if outside.is_some() { path.to_string() } else { file.path },
         "size": file.size,
         "modifiedMs": file.modified_ms,
     });
@@ -257,17 +297,26 @@ fn read(root: &std::path::Path, params: &Value) -> Result<Value, RpcError> {
     Ok(out)
 }
 
-fn read_raw(root: &Path, path: &str, params: &Value) -> Result<Value, RpcError> {
+fn read_raw(
+    root: &Path,
+    outside: Option<&Path>,
+    path: &str,
+    params: &Value,
+) -> Result<Value, RpcError> {
     let offset = params.get("offset").and_then(Value::as_u64).unwrap_or(0);
     let length = params
         .get("length")
         .and_then(Value::as_u64)
         .map(|n| (n as usize).clamp(1, RAW_CHUNK_MAX))
         .unwrap_or(RAW_CHUNK_DEFAULT);
-    let got = files::read_range(root, path, offset, length).map_err(RpcError::invalid_params)?;
+    let got = match outside {
+        Some(abs) => files::read_range_absolute(abs, offset, length),
+        None => files::read_range(root, path, offset, length),
+    }
+    .map_err(RpcError::invalid_params)?;
     let end = got.offset + got.bytes.len() as u64;
     Ok(json!({
-        "path": got.path,
+        "path": if outside.is_some() { path.to_string() } else { got.path },
         "size": got.size,
         "modifiedMs": got.modified_ms,
         "kind": "bytes",

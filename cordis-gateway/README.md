@@ -504,7 +504,7 @@ MCP 服务器向用户要信息（表单 / URL）。网关把提问投影成 `el
 | 方法 | 作用 |
 |---|---|
 | `fs/list { threadId?, path?, hidden? }` | 列一层：`entries[{ name, path, kind, size?, modifiedMs? }]`、`truncated` |
-| `fs/read { threadId?, path, maxBytes? }` | 读一个文件，`kind` 见下 |
+| `fs/read { threadId?, path, maxBytes? }` | 读一个文件，`kind` 见下；`path` 也可以是 agent 改过的文件的绝对路径（见下） |
 | `fs/read { threadId?, path, raw: true, offset?, length? }` | 原样读一段字节，见下 |
 | `fs/find { threadId?, query, limit? }` | 按名字找文件（快速打开）：`paths` |
 | `fs/write { threadId?, path, text \| data \| uploadId, baseModifiedMs?, create? }` | 保存 / 新建，见下 |
@@ -523,6 +523,10 @@ MCP 服务器向用户要信息（表单 / URL）。网关把提问投影成 `el
 - 照 `.gitignore`（不管是不是 git 仓库）；默认不列点开头的文件，`hidden: true` 才列。
 - 一层最多 5000 项；找文件最多走 10 万个文件，按文件名连续命中打分。
 - 出了会话 cwd 就拒（`..`、绝对路径、指到外面的符号链接）：`invalid_params`。
+- 例外（能力 `workspaceFilesOutside`）：`fs/read` 收这个会话里 agent 改过的文件的绝对路径，工作区外的也算，只读。
+- 「改过」= 每轮改动（`turn/changes/*`）里记着的：`search_replace` / `write_file` 改的；bash 里改的不算。
+- 回的 `path` 是那个绝对路径；`raw` 分块读同样认。别的绝对路径照旧 `invalid_params`。
+- 绝对路径只认受信连接（桌面 GUI、设备令牌）：配对来的网页在连接这一层就回 `forbidden`。
 - 只认开着的会话（`thread_not_open`）；不占连接锁，读盘在阻塞线程里。
 - 改文件的四个方法（能力 `workspaceEdit`）只认受信连接；配对来的网页 `forbidden`。
 - `fs/write` 回 `path`、`size`、`modifiedMs`；先写同目录临时文件再换上，照原文件权限。

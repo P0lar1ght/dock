@@ -9,8 +9,9 @@ import { codeReviewOf, turnChangesOf, type ReviewFinding } from "dock-core";
 import { store, useThread, useTurnChanges, useWorkflows } from "../../dock/store";
 import { IconButton } from "../../components/chrome";
 import { MenuButton } from "../../components/Popover";
-import { ReviewDiff } from "../../components/review/ReviewDiff";
+import { ReviewDiff, type DiffFocus } from "../../components/review/ReviewDiff";
 import { useFeatureHost, type PanelProps } from "../registry";
+import { changesSignature, useFocusRequest } from "./focus";
 
 type Diff =
   | { kind: "loading" }
@@ -32,6 +33,16 @@ export function ChangesPanel({ kind, sessionId, onClose, lead, controls }: Panel
   const turnChanges = useTurnChanges(sessionId);
   const workflows = useWorkflows(sessionId);
   const changes = turnId ? turnChangesOf(turnChanges, turnId) : null;
+
+  // 改动卡上点了文件：切到那一轮，diff 到了滚到它（面板刚打开时请求可能已经先到了，
+  // 太旧的不认——别让手动打开的审查面板跳到很久以前点过的文件）。
+  const request = useFocusRequest();
+  const [focus, setFocus] = useState<DiffFocus | null>(null);
+  useEffect(() => {
+    if (!request || request.sessionId !== sessionId || Date.now() - request.at > 3000) return;
+    setSource(`turn:${request.turnId}`);
+    setFocus({ path: request.path, seq: request.seq });
+  }, [request?.seq, sessionId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // 有改动的轮次，按对话里的先后；标签用那一轮的第一句话。
   const turns = useMemo(
@@ -60,9 +71,7 @@ export function ChangesPanel({ kind, sessionId, onClose, lead, controls }: Panel
   const reviewing = workflows.order.some((id) => workflows.byId[id].name === "code-review" && workflows.byId[id].status === "running");
 
   // 改动变了（又改了、撤销了）就重新取：看某一轮时只看那一轮，看工作区时任何一轮变了都算。
-  const changesKey = (turnId ? (changes ? [changes] : []) : Object.values(turnChanges.byTurn))
-    .map((c) => `${c.turnId}:${c.added}/${c.removed}/${c.files.length}/${c.reverted}`)
-    .join(",");
+  const changesKey = (turnId ? (changes ? [changes] : []) : Object.values(turnChanges.byTurn)).map(changesSignature).join(",");
   useEffect(() => {
     if (!sessionId) return;
     let live = true;
@@ -85,6 +94,12 @@ export function ChangesPanel({ kind, sessionId, onClose, lead, controls }: Panel
     };
     // changes 只看内容变没变。
   }, [sessionId, turnId, nonce, changesKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!focus || diff.kind !== "ok") return;
+    const t = setTimeout(() => setFocus(null), 2000);
+    return () => clearTimeout(t);
+  }, [focus, diff.kind]);
 
   const askAgent = async () => {
     if (!sessionId || asking) return;
@@ -151,7 +166,7 @@ export function ChangesPanel({ kind, sessionId, onClose, lead, controls }: Panel
           <div className="flex flex-col gap-2">
             {diff.note && <div className="text-[11.5px] text-[#b25e00]">{diff.note}</div>}
             {findings.length > 0 && <div className="text-[11.5px] text-ink-4">批注来自这个会话最近一次 code-review；之后又改过的话可能对不上行。</div>}
-            <ReviewDiff diff={diff.diff} findings={findings} />
+            <ReviewDiff diff={diff.diff} findings={findings} focus={focus} />
           </div>
         )}
       </div>

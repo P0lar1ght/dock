@@ -96,6 +96,7 @@ fn settings_gate(
     auth: Option<&Auth>,
     gateway: &GatewayHandle,
     method: &str,
+    params: &Value,
 ) -> Result<(), RpcError> {
     // 桌面操作是核心方法，登记不进方法表，策略要在这里单独认。
     // `open` / `close` 仍给配对页只读画面；列窗口、钉住、点击按键只认受信连接。
@@ -103,7 +104,14 @@ fn settings_gate(
         method,
         protocol::DESKTOP_VIEW_WINDOWS | protocol::DESKTOP_VIEW_PIN | protocol::DESKTOP_VIEW_INPUT
     );
-    if (desktop_control || crate::methods::policy_of(gateway, method).trusted_only)
+    // `fs/read` 的绝对路径能读到工作区外（agent 改过的文件）：配对来的网页只看工作区。
+    // `fs/read` 是插件方法，这里只拦，不分派（别写成 `method == …`：那是核心方法分支的写法）。
+    let outside_read = matches!(method, protocol::FS_READ)
+        && params
+            .get("path")
+            .and_then(Value::as_str)
+            .is_some_and(|p| std::path::Path::new(p.trim()).is_absolute());
+    if (desktop_control || outside_read || crate::methods::policy_of(gateway, method).trusted_only)
         && !auth.is_some_and(Auth::trusted)
     {
         return Err(RpcError::app(
@@ -314,7 +322,7 @@ async fn detached(
                 "initialize is required after authenticate",
             ))
         } else {
-            settings_gate(c.auth.as_ref(), &c.gateway, &method).map(|()| c.gateway.clone())
+            settings_gate(c.auth.as_ref(), &c.gateway, &method, &params).map(|()| c.gateway.clone())
         }
     };
     Some(async move {
@@ -417,7 +425,7 @@ async fn dispatch_locked(
             "initialize is required after authenticate",
         ));
     }
-    settings_gate(conn.auth.as_ref(), &conn.gateway, method)?;
+    settings_gate(conn.auth.as_ref(), &conn.gateway, method, &params)?;
     if CONNECTION_BOUND.contains(&method) {
         if let Some(obj) = params.as_object_mut() {
             match &conn.connection_lease_id {

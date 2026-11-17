@@ -45,9 +45,9 @@ import {
   X,
 } from "lucide-react";
 import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
-import type { ThreadState } from "dock-core";
+import type { ThreadState, TurnChangesState } from "dock-core";
 import { dock } from "../dock/client";
-import { store, useApp, useThread } from "../dock/store";
+import { store, useApp, useThread, useTurnChanges } from "../dock/store";
 import { IconButton } from "./chrome";
 import { Markdown } from "./Markdown";
 import { imeComposing } from "../dock/ime";
@@ -163,6 +163,9 @@ export function FilesPanel({
   const guarded = (run: () => void) => (dirty.current ? setConfirm({ run }) : run());
 
   const { paths: changed, writes } = useMemo(() => agentChanges(thread, root), [thread, root]);
+  // 这个会话里 agent 改过的工作区外文件（每轮改动里路径是绝对的那些）：树里没有，单列一组只读看。
+  const turnChanges = useTurnChanges(sessionId);
+  const outside = useMemo(() => (dock.capabilities.workspaceFilesOutside ? outsideEdits(turnChanges) : []), [turnChanges]);
   // 按写的次数而不是按路径集合触发重读：同一个文件再改一次，集合不变，内容变了。
   const changedKey = writes.join("\n");
 
@@ -254,6 +257,12 @@ export function FilesPanel({
 
   // 快速打开选中深处的文件：把一路上的目录都展开。
   const reveal = (path: string, line: number | null = null) => {
+    // 工作区外的文件（绝对路径）不在树里：直接打开。
+    if (isOutside(path)) {
+      open(path);
+      if (line) setJump({ path, line, seq: Date.now() });
+      return;
+    }
     const parts = path.split("/");
     const parents = parts.slice(0, -1).map((_, i) => parts.slice(0, i + 1).join("/"));
     setExpanded((prev) => new Set([...prev, ...parents]));
@@ -266,7 +275,9 @@ export function FilesPanel({
   useEffect(() => {
     if (!target || !sessionId) return;
     let alive = true;
-    void locate(sessionId, target.path).then((found) => {
+    // 工作区里的文件给的是绝对路径：换成相对的，照常在树里展开。
+    const path = root && target.path.startsWith(`${root}/`) ? target.path.slice(root.length + 1) : target.path;
+    void locate(sessionId, path).then((found) => {
       if (!alive) return;
       onTargetHandled?.();
       if (found) guarded(() => reveal(found, target.line));
@@ -433,7 +444,8 @@ export function FilesPanel({
 
   /** 树上的键：F2 改名、⌘⌫ 移到废纸篓（对着打开的那个文件）。 */
   const onTreeKey = (e: ReactKeyboardEvent) => {
-    if (!canEdit || !selected || naming) return;
+    // 工作区外的文件只读：F2 / ⌘⌫ 不动它。
+    if (!canEdit || !selected || naming || isOutside(selected)) return;
     if (e.key === "F2") {
       e.preventDefault();
       setNaming({ kind: "rename", path: selected, isDir: false });
@@ -463,14 +475,14 @@ export function FilesPanel({
                   icon={FilePlus}
                   label="新建文件"
                   size={14}
-                  onClick={() => startNew("file", selected ? parentOf(selected) : "")}
+                  onClick={() => startNew("file", selected && !isOutside(selected) ? parentOf(selected) : "")}
                   className="size-7 text-ink-4"
                 />
                 <IconButton
                   icon={FolderPlus}
                   label="新建文件夹"
                   size={14}
-                  onClick={() => startNew("dir", selected ? parentOf(selected) : "")}
+                  onClick={() => startNew("dir", selected && !isOutside(selected) ? parentOf(selected) : "")}
                   className="size-7 text-ink-4"
                 />
               </>
@@ -543,8 +555,11 @@ export function FilesPanel({
               ) : (
                 <span className="px-2 py-1 text-xs text-ink-4">正在读目录…</span>
               )}
+              {outside.length > 0 && (
+                <OutsideGroup paths={outside} selected={selected} onOpen={(path) => path !== selected && guarded(() => open(path))} />
+              )}
             </div>
-            {changed.size > 0 && (
+            {(changed.size > 0 || outside.length > 0) && (
               <div className="flex items-center gap-1.5 border-t border-line-soft px-4 py-2.5">
                 <span className="size-1.5 rounded-full bg-accent" />
                 <span className="text-[11px] text-ink-4">这个会话里 agent 改过的文件</span>
@@ -553,7 +568,7 @@ export function FilesPanel({
           </div>
           <Preview
             sessionId={sessionId}
-            canEdit={canEdit}
+            canEdit={canEdit && !(selected && isOutside(selected))}
             editRequest={editRequest}
             dirtyRef={dirty}
             guard={guarded}
@@ -562,13 +577,13 @@ export function FilesPanel({
             file={file}
             selected={selected}
             jump={jump}
-            changed={!!selected && changed.has(selected)}
+            changed={!!selected && (changed.has(selected) || isOutside(selected))}
             onMention={mention}
             onReveal={
-              cwd && selected && !app.remote ? () => revealItemInDir(`${cwd}/${selected}`).catch(store.reportError) : undefined
+              cwd && selected && !app.remote ? () => revealItemInDir(fullPath(cwd, selected)).catch(store.reportError) : undefined
             }
             onOpenExternal={
-              cwd && selected && !app.remote ? () => openPath(`${cwd}/${selected}`).catch(store.reportError) : undefined
+              cwd && selected && !app.remote ? () => openPath(fullPath(cwd, selected)).catch(store.reportError) : undefined
             }
           />
         </div>
@@ -1025,12 +1040,21 @@ function Preview({
             {dir.split("/").join(" / ")} /
           </span>
         )}
-        <span className="min-w-0 shrink truncate text-[13px] font-semibold text-ink" title={selected}>
+        <span className="min-w-12 shrink truncate text-[13px] font-semibold text-ink" title={selected}>
           {name}
         </span>
-        {changed && (
+        {changed && !isOutside(selected) && (
           <span className="flex h-5 shrink-0 items-center rounded-full bg-[#eaf3ff] px-2 text-[11px] font-medium text-[#0a6fd6]">
             Agent 改过
+          </span>
+        )}
+        {isOutside(selected) && (
+          <span
+            title={`Agent 改过的工作区外文件：${selected}`}
+            // 窄的时候让给文件名：左边那组和底栏已经写着「只读」。
+            className="hidden h-5 shrink-0 items-center rounded-full bg-fill px-2 text-[11px] font-medium text-ink-3 @[520px]:flex"
+          >
+            工作区外 · 只读
           </span>
         )}
         <div className="flex-1" />
@@ -1376,15 +1400,58 @@ function agentChanges(thread: ThreadState, root: string | null): { paths: Set<st
       const raw = keys.map((k) => item.arguments[k]).find((v): v is string => typeof v === "string" && !!v.trim());
       if (!raw) continue;
       let path = raw.trim().replace(/^\.\//, "");
+      // 工作区外的也算一次写：正在看的那个（「工作区外」那组）要跟着重读。
+      writes.push(item.id);
       if (path.startsWith("/")) {
         if (!root || !path.startsWith(`${root}/`)) continue;
         path = path.slice(root.length + 1);
       }
       out.add(path);
-      writes.push(item.id);
     }
   }
   return { paths: out, writes };
+}
+
+/** 工作区外的文件：路径是绝对的（树里的都是相对工作区根的）。 */
+const isOutside = (path: string) => path.startsWith("/");
+
+const fullPath = (cwd: string, path: string) => (isOutside(path) ? path : `${cwd}/${path}`);
+
+/** 每轮改动里工作区外的文件（显示路径是绝对的），删掉的不算，去重、按路径排。 */
+function outsideEdits(state: TurnChangesState): string[] {
+  const out = new Set<string>();
+  for (const turn of Object.values(state.byTurn)) {
+    for (const f of turn.files) if (isOutside(f.path) && f.status !== "deleted") out.add(f.path);
+  }
+  return [...out].sort();
+}
+
+/** 树下面的「工作区外」一组：agent 改过的工作区外文件，点开只读看。 */
+function OutsideGroup({ paths, selected, onOpen }: { paths: string[]; selected: string | null; onOpen: (path: string) => void }) {
+  return (
+    <div className="mt-2 flex flex-col gap-px border-t border-line-soft pt-2">
+      <div className="px-2 pb-1 text-[11px] font-medium text-ink-4">工作区外 · agent 改过（只读）</div>
+      {paths.map((path) => {
+        const name = path.slice(path.lastIndexOf("/") + 1);
+        const dir = path.slice(0, path.lastIndexOf("/")) || "/";
+        const active = selected === path;
+        return (
+          <button
+            key={path}
+            type="button"
+            title={path}
+            onClick={() => onOpen(path)}
+            className={`motion-colors flex h-7 shrink-0 items-center gap-1.5 rounded-md pl-2 pr-2 text-left ${active ? "bg-selected" : "hover:bg-hover"}`}
+          >
+            <TypeIcon name={name} />
+            <span className={`shrink-0 truncate text-[13px] text-ink ${active ? "font-medium" : ""}`}>{name}</span>
+            <span className="min-w-0 flex-1 truncate text-[11.5px] text-ink-4">{dir}</span>
+            <span className="size-1.5 shrink-0 rounded-full bg-accent" />
+          </button>
+        );
+      })}
+    </div>
+  );
 }
 
 /** 宿主自己能预览的文件：Markdown 排版、SVG 看图（表格 / 文档走登记的预览器）。 */
