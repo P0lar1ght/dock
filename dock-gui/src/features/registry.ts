@@ -273,6 +273,20 @@ export function registerComposerItem(Item: ComponentType<{ threadId: string }>) 
 
 export const useComposerItems = () => composerItems;
 
+// ---- 跟着会话的后台功能 ----
+
+const threadWatchers: ComponentType<{ threadId: string }>[] = [];
+
+/**
+ * 跟着当前显示的会话、不画东西的功能（订推送、开面板）。挂在输入框旁边：会话在屏幕上才挂，
+ * 能用 `useFeatureHost` 开面板。
+ */
+export function registerThreadWatcher(Watcher: ComponentType<{ threadId: string }>) {
+  threadWatchers.push(Watcher);
+}
+
+export const useThreadWatchers = () => threadWatchers;
+
 // ---- 文件预览 ----
 
 /** 宿主（文件面板）已经读到的：文本带正文；表格 / 文档这类只读了大小。 */

@@ -46,6 +46,11 @@ export interface RoutedCall {
   tool: McpAppTool;
   args: Record<string, unknown>;
   status: ToolStatus;
+  /**
+   * 模型还在写参数（`args` 是补全过的残缺参数，见 live.ts）：界面收 tool-input-partial。
+   * 调用开始后工具卡再送一遍同一个 itemId、不带这一项。没开始就作废的，带着它、`status` 为 `cancelled`。
+   */
+  partial?: boolean;
 }
 
 type Sink = (call: RoutedCall) => void;
@@ -131,6 +136,11 @@ export function focusRemote(key: string, call: RoutedCall | null): boolean {
 /** 请求打开面板时带上这次调用：面板挂上后第一件事就是显示它。 */
 export function seed(key: string, call: RoutedCall) {
   if (!route(key, call)) seeds.set(key, call);
+}
+
+/** 面板正在打开（种子还没被取走）：换成这次调用的最新样子。没在等就什么也不做。 */
+export function reseed(key: string, call: RoutedCall) {
+  if (seeds.has(key)) seeds.set(key, call);
 }
 
 /** 这个面板开在哪：本窗、别的窗口、没开（订阅：面板开关时重渲染）。 */

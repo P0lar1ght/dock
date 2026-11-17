@@ -20,7 +20,7 @@ import type { ComposerSettings, ContextBreakdown, ImageInput, SlashCommand, Slas
 import { store, useGatewayId, type SendMode } from "../dock/store";
 import { COMING_SOON } from "./chrome";
 import { ContextRing } from "./ContextRing";
-import { useComposerItems } from "../features/registry";
+import { useComposerItems, useThreadWatchers } from "../features/registry";
 import { ImageViewer } from "./ImageViewer";
 import { MAX_IMAGES, describeImage, prepareImage } from "./imageInput";
 import { MenuButton } from "./Popover";
@@ -82,6 +82,7 @@ export function Composer({
   ...on
 }: { threadId: string; settings: ComposerSettings; running: boolean; stopping: boolean } & ComposerActions) {
   const composerItems = useComposerItems();
+  const threadWatchers = useThreadWatchers();
   const gw = useGatewayId();
   const draftId = `${gw}\n${threadId}`;
   const [text, setText] = useState(() => drafts.get(draftId) ?? "");
@@ -554,6 +555,10 @@ export function Composer({
           {/* 功能登记的工具栏小部件（插件状态项），见 features/registry.ts。 */}
           {composerItems.map((Item, i) => (
             <Item key={i} threadId={threadId} />
+          ))}
+          {/* 跟着这个会话、不画东西的功能（见 registerThreadWatcher）。 */}
+          {threadWatchers.map((Watcher, i) => (
+            <Watcher key={`w${i}`} threadId={threadId} />
           ))}
           <ContextRing
             usage={settings.context}
