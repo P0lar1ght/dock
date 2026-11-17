@@ -48,6 +48,9 @@ pub const CAPABILITIES: &[(&str, bool)] = &[
     ("workspaceFiles", true),
     // `fs/read { raw: true, offset?, length? }` → `kind:"bytes"`：分块原样读字节（表格 / 文档预览）。
     ("workspaceFilesRaw", true),
+    // `fs/read` 也收绝对路径：只放行这个会话里 agent 用 `search_replace` / `write_file` 改过的
+    // 文件（每轮改动里记着的，工作区外的也算），只读。只认受信连接。
+    ("workspaceFilesOutside", true),
     // `fs/write` / `fs/mkdir` / `fs/rename` / `fs/trash`：文件面板里直接改工作区（保存文本、
     // 新建、改名 / 移动、移到废纸篓）。只认受信连接；改了的下一步提醒 agent。
     ("workspaceEdit", true),

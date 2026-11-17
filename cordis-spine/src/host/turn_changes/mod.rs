@@ -295,6 +295,21 @@ impl TurnChanges {
         })
     }
 
+    /// `page` 这一页各轮真改了的文件（绝对路径，去重，按记下的先后）。网关的 `fs/read` 拿它
+    /// 放行工作区外的文件：只给看 agent 自己改过的。
+    pub fn edited_paths(&self, page: &Context) -> Vec<PathBuf> {
+        let users = user_times(page);
+        self.with_store(page, &users, |store, _| {
+            let mut out: Vec<PathBuf> = Vec::new();
+            for file in store.turns.values().flat_map(|r| &r.files) {
+                if file.before != file.after && !out.contains(&file.path) {
+                    out.push(file.path.clone());
+                }
+            }
+            out
+        })
+    }
+
     /// 第 `ordinal` 轮的改动；没有改动是 `None`。
     pub fn summary(&self, page: &Context, ordinal: usize) -> Option<TurnSummary> {
         let users = user_times(page);

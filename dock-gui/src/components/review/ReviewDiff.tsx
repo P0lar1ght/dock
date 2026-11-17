@@ -3,7 +3,7 @@
 // 落在它指的那一行下面，左边一道按严重程度着色的竖条。对不上 diff 行的批注挂在文件头下，
 // 连文件都对不上的列在最上面。
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronRight, FileCode2, MessageSquareWarning } from "lucide-react";
 import {
   lineKey,
@@ -31,7 +31,21 @@ const STATUS_LABEL: Record<DiffFile["status"], string | null> = {
 /** 文件多、又没有批注时默认收起：一次画几千行没必要。 */
 const COLLAPSE_LINES = 400;
 
-export function ReviewDiff({ diff, findings }: { diff: string; findings: readonly ReviewFinding[] }) {
+/** 要定位到的文件（改动卡上点的那个）：`seq` 变了就再滚一次。 */
+export interface DiffFocus {
+  path: string;
+  seq: number;
+}
+
+export function ReviewDiff({
+  diff,
+  findings,
+  focus = null,
+}: {
+  diff: string;
+  findings: readonly ReviewFinding[];
+  focus?: DiffFocus | null;
+}) {
   const files = useMemo(() => parseUnifiedDiff(diff), [diff]);
   const placed = useMemo(() => placeFindings(files, findings), [files, findings]);
   const totalLines = files.reduce((n, f) => n + f.hunks.reduce((m, h) => m + h.lines.length, 0), 0);
@@ -61,6 +75,7 @@ export function ReviewDiff({ diff, findings }: { diff: string; findings: readonl
             fileComments={placed.byFile.get(fi) ?? []}
             comments={comments}
             startOpen={comments > 0 || totalLines <= COLLAPSE_LINES}
+            focus={focus && focus.path === file.path ? focus.seq : null}
           />
         );
       })}
@@ -98,6 +113,7 @@ function FileBlock({
   fileComments,
   comments,
   startOpen,
+  focus,
 }: {
   file: DiffFile;
   index: number;
@@ -105,11 +121,34 @@ function FileBlock({
   fileComments: ReviewFinding[];
   comments: number;
   startOpen: boolean;
+  /** 改动卡上点了这个文件（值是那次点击的 seq）：展开、滚到它、描一下边。 */
+  focus: number | null;
 }) {
   const [open, setOpen] = useState(startOpen);
+  const [flash, setFlash] = useState(false);
+  const ref = useRef<HTMLElement>(null);
+  useEffect(() => {
+    if (focus === null) return;
+    setOpen(true);
+    setFlash(true);
+    // 等展开那一帧排好再滚，不然落点按收起时的高度算。
+    const raf = requestAnimationFrame(() => ref.current?.scrollIntoView({ block: "start", behavior: "smooth" }));
+    return () => cancelAnimationFrame(raf);
+  }, [focus]);
+  useEffect(() => {
+    if (!flash) return;
+    const t = setTimeout(() => setFlash(false), 1600);
+    return () => clearTimeout(t);
+  }, [flash]);
   const status = STATUS_LABEL[file.status];
   return (
-    <section className="md-surface flex flex-col overflow-hidden rounded-[10px] border border-[#e5e5ea] bg-white">
+    <section
+      ref={ref}
+      data-diff-path={file.path}
+      className={`md-surface flex scroll-mt-2 flex-col overflow-hidden rounded-[10px] border bg-white transition-[border-color,box-shadow] duration-[var(--dur-base)] ${
+        flash ? "border-accent shadow-[0_0_0_3px_rgba(10,132,255,0.15)]" : "border-[#e5e5ea]"
+      }`}
+    >
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
@@ -148,42 +187,57 @@ function FileBlock({
               ))}
             </div>
           )}
-          {file.binary ? (
-            <div className="px-3 py-2 text-[12px] text-ink-4">二进制文件，不显示内容</div>
-          ) : (
-            <div className="thin-scroll overflow-x-auto font-mono text-[11.5px] leading-[1.6]">
-              {file.hunks.map((hunk, hi) => (
-                <div key={hi}>
-                  <div className="min-w-max bg-[#f0f4fa] px-3 py-0.5 text-[11px] text-[#6e7781]">{hunk.header}</div>
-                  {hunk.lines.map((line, li) => {
-                    const here = line.newNo !== null ? byLine.get(lineKey(index, line.newNo)) : undefined;
-                    return (
-                      <div key={li}>
-                        <div className={`flex min-w-max ${line.kind === "del" ? "bg-[#fdecec]" : line.kind === "add" ? "bg-[#e9f7ee]" : ""} ${here ? "outline outline-1 -outline-offset-1 outline-[#ffd8a8]" : ""}`}>
-                          <span className="w-10 shrink-0 select-none pr-1.5 text-right text-ink-5">{line.oldNo ?? ""}</span>
-                          <span className="w-10 shrink-0 select-none pr-1.5 text-right text-ink-5">{line.newNo ?? ""}</span>
-                          <span className={`w-4 shrink-0 select-none text-center ${line.kind === "del" ? "text-[#c0392b]" : line.kind === "add" ? "text-[#1a7f37]" : "text-ink-5"}`}>
-                            {line.kind === "del" ? "−" : line.kind === "add" ? "+" : " "}
-                          </span>
-                          <span className={`whitespace-pre pr-4 ${line.kind === "del" ? "text-[#8f1d1d]" : line.kind === "add" ? "text-[#14532d]" : "text-ink-3"}`}>{line.text || " "}</span>
-                        </div>
-                        {here && (
-                          <div className="flex flex-col gap-1.5 border-y border-[#ececf0] bg-[#fafafa] py-2 pl-[88px] pr-3 font-sans">
-                            {here.map((f, i) => (
-                              <Comment key={i} finding={f} />
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              ))}
-            </div>
-          )}
+          <DiffBody file={file} index={index} byLine={byLine} />
         </div>
       </div>
     </section>
+  );
+}
+
+const NO_COMMENTS = new Map<string, ReviewFinding[]>();
+
+/** 一个文件的 diff 正文（块头 + 增删行，新旧行号）；`byLine` 有批注就落在行下面。改动卡里也用它。 */
+export function DiffBody({
+  file,
+  index = 0,
+  byLine = NO_COMMENTS,
+}: {
+  file: DiffFile;
+  index?: number;
+  byLine?: Map<string, ReviewFinding[]>;
+}) {
+  return file.binary ? (
+    <div className="px-3 py-2 text-[12px] text-ink-4">二进制文件，不显示内容</div>
+  ) : (
+    <div className="thin-scroll overflow-x-auto font-mono text-[11.5px] leading-[1.6]">
+      {file.hunks.map((hunk, hi) => (
+        <div key={hi}>
+          <div className="min-w-max bg-[#f0f4fa] px-3 py-0.5 text-[11px] text-[#6e7781]">{hunk.header}</div>
+          {hunk.lines.map((line, li) => {
+            const here = line.newNo !== null ? byLine.get(lineKey(index, line.newNo)) : undefined;
+            return (
+              <div key={li}>
+                <div className={`flex min-w-max ${line.kind === "del" ? "bg-[#fdecec]" : line.kind === "add" ? "bg-[#e9f7ee]" : ""} ${here ? "outline outline-1 -outline-offset-1 outline-[#ffd8a8]" : ""}`}>
+                  <span className="w-10 shrink-0 select-none pr-1.5 text-right text-ink-5">{line.oldNo ?? ""}</span>
+                  <span className="w-10 shrink-0 select-none pr-1.5 text-right text-ink-5">{line.newNo ?? ""}</span>
+                  <span className={`w-4 shrink-0 select-none text-center ${line.kind === "del" ? "text-[#c0392b]" : line.kind === "add" ? "text-[#1a7f37]" : "text-ink-5"}`}>
+                    {line.kind === "del" ? "−" : line.kind === "add" ? "+" : " "}
+                  </span>
+                  <span className={`whitespace-pre pr-4 ${line.kind === "del" ? "text-[#8f1d1d]" : line.kind === "add" ? "text-[#14532d]" : "text-ink-3"}`}>{line.text || " "}</span>
+                </div>
+                {here && (
+                  <div className="flex flex-col gap-1.5 border-y border-[#ececf0] bg-[#fafafa] py-2 pl-[88px] pr-3 font-sans">
+                    {here.map((f, i) => (
+                      <Comment key={i} finding={f} />
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      ))}
+    </div>
   );
 }
 
