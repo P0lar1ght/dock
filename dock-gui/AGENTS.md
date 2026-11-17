@@ -32,7 +32,7 @@
 - 红绿灯占位 62px（`chrome.tsx` 的 TrafficLights，真窗口和浏览器预览各一处）。
 - 窄栏的窗口按钮由 App 固定画（FloatingWindowControls）；头栏里只放透明占位，别再画一份。
 - 对话流和输入区同一列宽：Transcript.tsx 的 READING_WIDTH / COMPOSER_WIDTH。
-- 输入框上方那一列（Pending 卡、排队、目标条）最多占会话区 75%：会变高的卡要 min-h-0 + 卡内滚动，头和提交钉住（Pending.tsx 的问答卡）。
+- 排队、Pending 卡、目标条和输入框在同一个容器里，合计最多占会话区 75%（SessionPane）：会变高的卡要 min-h-0 + 卡内滚动，头和提交钉住（Pending.tsx 的问答卡）；别把输入框拆出这个容器。
 - 左边消息导航在 TurnNav.tsx：按轮次根节点的 data-nav-turn 找位置，别删这个属性。
 - 回复渲染在 Markdown.tsx + components/markdown/（Shiki 高亮、Mermaid、KaTeX）。
 - Shiki / Mermaid 第一次用到才 import：别在启动路径上静态引入。

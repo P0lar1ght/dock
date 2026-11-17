@@ -156,7 +156,7 @@ export function Pending({
 /** 卡头：浅蓝圆底图标 + 标题，右侧可放标签。 */
 function Header({ icon: Icon, title, children }: { icon: typeof Shield; title: string; children?: ReactNode }) {
   return (
-    <div className="flex min-w-0 items-center justify-between gap-3">
+    <div className="flex min-w-0 shrink-0 items-center justify-between gap-3">
       <div className="flex min-w-0 items-center gap-2">
         <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-[#0a84ff1a]">
           <Icon size={12} className="text-accent" />
@@ -295,14 +295,23 @@ function QuestionCard({
 
   const ref = useRef<HTMLDivElement>(null);
   const blocks = useRef<(HTMLDivElement | null)[]>([]);
+  const body = useRef<HTMLDivElement>(null);
   // 单选答完跳到下一题：题目区在卡内滚动时，把那一题滚进来（第一次挂上不滚）。
+  // 只动题目区自己的 scrollTop：scrollIntoView 会连带滚会话区等外层容器。
   const mounted = useRef(false);
   useEffect(() => {
     if (!mounted.current) {
       mounted.current = true;
       return;
     }
-    blocks.current[current]?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    const box = body.current;
+    const el = blocks.current[current];
+    if (!box || !el) return;
+    const b = box.getBoundingClientRect();
+    const r = el.getBoundingClientRect();
+    // 同 block: "nearest"：在上面就对齐顶，在下面就对齐底（比题目区还高时对齐顶）。
+    const delta = r.top < b.top ? r.top - b.top : r.bottom > b.bottom ? Math.min(r.bottom - b.bottom, r.top - b.top) : 0;
+    if (delta) box.scrollBy({ top: delta, behavior: "smooth" });
   }, [current]);
   useEffect(() => {
     const active = document.activeElement;
@@ -331,7 +340,7 @@ function QuestionCard({
   return (
     <div ref={ref} tabIndex={-1} onKeyDown={onKeyDown} className={`${cardBase} min-h-0 gap-3 outline-none`}>
       <Header icon={MessageCircleQuestion} title={many ? `Dock 在问你 · ${item.questions.length} 个问题` : "Dock 在问你"} />
-      <div className="thin-scroll -mx-3 flex min-h-0 flex-col gap-3 overflow-y-auto px-3 py-px">
+      <div ref={body} className="thin-scroll -mx-3 flex min-h-0 flex-col gap-3 overflow-y-auto px-3 py-px">
         {item.questions.map((q, qi) => {
           const d = drafts[q.id] ?? EMPTY;
           const keys = qi === current;
