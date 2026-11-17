@@ -348,6 +348,12 @@ export type DockEvent = EventBase &
     /** 模型的思考过程（增量）。旧网关不推，就没有。 */
     | { method: 'item/reasoning_delta'; delta: string }
     | { method: 'item/tool_started'; toolCallId: string; toolName: string; arguments: Record<string, unknown> }
+    /**
+     * 模型还在写这次调用的参数，又流进来一段（能力 `toolInputStream`）。只推不记（`seq` 为 0），
+     * 同一个 `toolCallId` 按 `chunk` 拼起来是参数 JSON 的前缀；随后的 `item/tool_started` 才算数。
+     * 拼接与补全见 toolInput.ts。
+     */
+    | { method: 'item/tool_input_delta'; toolCallId: string; toolName: string; chunk: number; delta: string }
     | {
         method: 'item/tool_completed';
         toolCallId: string;
@@ -483,6 +489,15 @@ export function parseEvent(method: string, params: Raw): DockEvent | null {
         toolCallId: str(params.toolCallId),
         toolName: str(params.toolName),
         arguments: obj(params.arguments),
+      };
+    case 'item/tool_input_delta':
+      return {
+        ...base,
+        method,
+        toolCallId: str(params.toolCallId),
+        toolName: str(params.toolName),
+        chunk: num(params.chunk),
+        delta: str(params.delta),
       };
     case 'item/tool_completed':
       return {

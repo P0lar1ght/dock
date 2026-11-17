@@ -7,7 +7,8 @@
 //   读资源只认同一服务器的 `ui://`，发消息走输入框同一条路（在跑就排队）。
 //
 // 调用（工具输入 / 结果）是声明式的：`call` 换了就先发 tool-input，结果到了再发 tool-result。
-// 面板里一个界面会陆续收到多次调用。
+// 模型还在写参数时（`call.partial`）发 tool-input-partial，参数写完、调用开始后同一个 key 再来
+// 一遍完整的（见 live.ts）。面板里一个界面会陆续收到多次调用。
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle } from "lucide-react";
@@ -25,6 +26,8 @@ export interface FrameCall {
   /** 换了就是新的一次调用（工具调用 id）。 */
   key: string;
   args: Record<string, unknown>;
+  /** 模型还在写参数：`args` 是补全过的残缺参数，发 tool-input-partial。 */
+  partial?: boolean;
   result?: Record<string, unknown> | null;
   cancelled?: string | null;
 }
@@ -317,6 +320,19 @@ export function AppFrame({ server, uri, threadId, tool, call, displayMode, onReq
   useEffect(() => {
     const b = bridge.current;
     if (!ready || !b || !call) return;
+    // 模型还在写参数：发补全过的残缺参数（规范允许发零到多次，完整的 tool-input 之前）。
+    // 完整参数已经发过了（晚到的一次节流）就不再发；没开始就作废的发 tool-cancelled。
+    if (call.partial) {
+      if (call.cancelled) {
+        if (sentResult.current !== call.key) {
+          sentResult.current = call.key;
+          void b.sendToolCancelled({ reason: call.cancelled });
+        }
+      } else if (sentInput.current !== call.key) {
+        void b.sendToolInputPartial({ arguments: call.args });
+      }
+      return;
+    }
     if (sentInput.current !== call.key) {
       sentInput.current = call.key;
       sentResult.current = null;

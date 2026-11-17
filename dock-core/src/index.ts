@@ -4,6 +4,7 @@ export * from './subagents.ts';
 export * from './plugins.ts';
 export * from './pluginSettings.ts';
 export * from './mcpApps.ts';
+export * from './toolInput.ts';
 export * from './workflows.ts';
 export * from './turnChanges.ts';
 export * from './diff.ts';

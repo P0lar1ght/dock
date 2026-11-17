@@ -11,8 +11,8 @@
 - **源码**：服务 `cordis-apps/src/whiteboard/`；界面 `cordis-apps/web/whiteboard/`，构建产物 `cordis-apps/assets/whiteboard.html`
 
 项目白板：同一个项目（工作目录）的会话共用一张，Agent 和用户在同一张上改。
-桌面端里 Agent 一调 `whiteboard_edit`，工具卡下面出现白板（只看）；点「在面板中编辑」进右侧常驻面板，
-之后这个项目里的调用都送进那个面板。终端里没有界面，工具照样能用。
+桌面端里 Agent 一开始写白板工具的参数，右侧常驻面板就打开（或切过去），边写边画草稿；
+之后这个项目里的调用都送进那个面板，工具卡只留一行入口。终端里没有界面，工具照样能用。
 
 | 工具 | 作用 |
 |---|---|
@@ -89,6 +89,11 @@ $DOCK_HOME/apps/whiteboard/<项目目录名>-<哈希>/scene.json   （旁边一�
 - 内联只看；面板里完整编辑。用户改的按版本存回去，并经 `ui/update-model-context` 把「改了什么、选中了什么」
   交给模型（下一步的 system-reminder，只留最新一份）。
 - Agent 改了（收到 tool-result，或轮询发现 `rev` 变了）就重载、合并进画布。
+- Agent 还在写参数时（`tool-input-partial`）先画半透明草稿（`web/whiteboard/src/live.ts`）：
+  - 位置照服务器算（`add_one` / `free_slot` / `graph_positions`），结果到了同一帧换成真的；
+  - 改 / 删 / 排版类的目标高亮成 Agent 选中的样子；
+  - 画布上有个「Agent」光标停在它正在画的地方，不在视野里就挪过去；
+  - 草稿 id 带 `dock-live:`，不存回服务器、不交给模型。
 - 资源 CSP 只在 `resourceDomains` 放开 `https://esm.sh`（字体走 `@font-face`，不开 `connect-src`）：
   Excalidraw 的手写字体从那里取，离线退回系统字体。
 - 改界面：`cd cordis-apps/web/whiteboard && npm ci && npm run build`（产物拷进 `cordis-apps/assets/`，随源码提交）。

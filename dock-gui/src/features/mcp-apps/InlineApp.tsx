@@ -28,12 +28,12 @@ export function useAppTool(toolName: string, args: Record<string, unknown>): Mcp
 
 /** 一次调用交给界面的样子：完成了就去拿 Dock 存下的原始结果。没有调用回 null。 */
 export function useFrameCall(
-  c: { threadId: string; itemId: string; args: Record<string, unknown>; status: ToolStatus } | null,
+  c: { threadId: string; itemId: string; args: Record<string, unknown>; status: ToolStatus; partial?: boolean } | null,
 ): FrameCall | null {
   const [result, setResult] = useState<{ key: string; value: Record<string, unknown> | null } | null>(null);
   const threadId = c?.threadId ?? "";
   const itemId = c?.itemId ?? "";
-  const completed = c?.status === "completed";
+  const completed = c?.status === "completed" && !c.partial;
   useEffect(() => {
     if (!completed) return;
     let alive = true;
@@ -47,9 +47,18 @@ export function useFrameCall(
   }, [completed, threadId, itemId]);
   if (!c) return null;
   const value = result?.key === c.itemId ? result.value : null;
-  const cancelled =
-    c.status === "cancelled" ? "已中断" : c.status === "denied" ? "用户拒绝了这次调用" : c.status === "failed" ? "调用失败" : null;
-  return { key: c.itemId, args: c.args, result: value, cancelled };
+  const cancelled = c.partial
+    ? c.status === "cancelled"
+      ? "这次调用没有开始"
+      : null
+    : c.status === "cancelled"
+      ? "已中断"
+      : c.status === "denied"
+        ? "用户拒绝了这次调用"
+        : c.status === "failed"
+          ? "调用失败"
+          : null;
+  return { key: c.itemId, args: c.args, result: value, cancelled, ...(c.partial ? { partial: true } : {}) };
 }
 
 /** 页面打开的时间：比它早开始的是历史里的调用。 */

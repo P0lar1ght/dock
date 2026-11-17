@@ -7,6 +7,8 @@
 // - Agent 改的：收到 tool-result（或轮询发现 `rev` 变了）就重载，用 `reconcileElements` 合并；
 // - 内联（Gen UI）只看不改，点「在面板中编辑」请求 fullscreen，宿主把它放进常驻面板。
 // - 面板里那份还给宿主几颗界面工具（viewTools.ts：选中、视野、挪视图、截图），模型经宿主调。
+// - Agent 还在写参数时（tool-input-partial），先画半透明的草稿、高亮要动的图形，画布跟着 Agent
+//   的光标走（live.ts 算位置）；结果到了换成真的。草稿不存回去、不交给模型。
 
 import "./shim";
 import { StrictMode, useCallback, useEffect, useRef, useState } from "react";
@@ -20,7 +22,8 @@ import {
 } from "@excalidraw/excalidraw";
 import "@excalidraw/excalidraw/index.css";
 import { App, applyHostStyleVariables, type McpUiHostContext } from "@modelcontextprotocol/ext-apps";
-import { sortByRemoteOrder } from "./geometry";
+import { sortByRemoteOrder, viewportOf, within } from "./geometry";
+import { isLive, LIVE_PREFIX, livePlan } from "./live";
 import { installViewTools, type ViewApi } from "./viewTools";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -44,6 +47,30 @@ interface Scene {
 const INLINE_HEIGHT = 420;
 const SAVE_DELAY = 700;
 const POLL_MS = 2500;
+/** 草稿的不透明度（0–100）。 */
+const LIVE_OPACITY = 45;
+/** 调用结束后 Agent 光标再停一会儿再收起。 */
+const CURSOR_LINGER_MS = 1500;
+/** 画布上下盖着的工具条（屏幕像素）：Agent 画的东西要落在这圈里面才算看得见。 */
+const VIEW_PAD = { top: 72, right: 40, bottom: 80, left: 40 };
+
+/** 这些元素整个看得见（不被工具条挡住）。 */
+function inView(a: { getAppState: () => Record<string, any> }, els: readonly El[]): boolean {
+  const view = viewportOf(a.getAppState() as never);
+  return els.every((e) => within(e as never, view, VIEW_PAD));
+}
+
+/** 低于这个缩放画的东西看不清：Agent 开始画时先把它正在画的地方拉近（最多 100%）。 */
+const READABLE_ZOOM = 0.5;
+
+/** 画布上的 Agent（Excalidraw 的协作者）。 */
+const AGENT = "dock-agent";
+/**
+ * Excalidraw 0.18 不看 `color`，光标颜色按 `id` 的哈希取色相（hsl(色相, 100%, 83%)）：
+ * 这个 id 落在 210（浅蓝，和状态条同色系）。
+ */
+const AGENT_ID = "dock-agent-12";
+const AGENT_COLOR = { background: "#0a84ff", stroke: "#0a84ff" };
 
 const app = new App({ name: "dock-whiteboard", version: "0.1.0" }, { tools: { listChanged: true } }, { autoResize: false });
 /** 当前画布（界面工具用）。 */
@@ -176,7 +203,8 @@ function Board() {
     const a = api.current;
     // 内联（Gen UI）只看不改：存回去的只有面板里那一份，免得两个界面各存一遍。
     if (!a || isInline()) return;
-    const all = a.getSceneElementsIncludingDeleted();
+    // Agent 还在写时的草稿不存。
+    const all = a.getSceneElementsIncludingDeleted().filter((e) => !isLive(e));
     const changed = [...all.filter((e) => synced.current.get(e.id) !== e.version), ...extra];
     // 顺序变了才带 order：服务端按它重排数组（z 序）。没变就别带，免得盖掉服务端刚排好的。
     const order = all.filter((e) => !e.isDeleted).map((e) => e.id);
@@ -207,7 +235,7 @@ function Board() {
     contextTimer.current = window.setTimeout(() => {
       const a = api.current;
       if (!a) return;
-      const all = a.getSceneElementsIncludingDeleted();
+      const all = a.getSceneElementsIncludingDeleted().filter((e) => !isLive(e));
       const live = all.filter((e) => !e.isDeleted && !e.containerId);
       const selected = Object.keys(a.getAppState().selectedElementIds ?? {})
         .map((id) => all.find((e) => e.id === id))
@@ -222,20 +250,26 @@ function Board() {
     }, 1200);
   }, []);
 
-  /** 重载服务器上的场景并合并进画布（Agent 改过、别的会话改过）。一个接一个跑：轮询和 tool-result 会撞。 */
-  const refresh = useCallback((force = false) => {
-    const next = refreshing.current.then(() => reload(force));
+  /**
+   * 重载服务器上的场景并合并进画布（Agent 改过、别的会话改过）。一个接一个跑：轮询和 tool-result 会撞。
+   * `dropLive`：这次调用的结果到了，草稿和真的同一帧换掉。
+   */
+  const refresh = useCallback((force = false, dropLive = false) => {
+    const next = refreshing.current.then(() => reload(force, dropLive));
     refreshing.current = next.catch(() => {});
     return next;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const reload = async (force: boolean) => {
+  const reload = async (force: boolean, dropLive = false) => {
     const a = api.current;
     if (!a) return;
     const r = (await tool("whiteboard_load", force ? {} : { sinceRev: rev.current })) as Scene & { unchanged?: boolean };
+    // 跟过这次调用（画过草稿）：视图已经在 Agent 画的地方，别再缩放到全图。
+    const followed = dropLive && a.getSceneElementsIncludingDeleted().some(isLive);
+    // 没变（这次调用失败了之类）：草稿由调用方收（ontoolresult 的 clearLive）。
     if (r.unchanged) return;
-    const local = a.getSceneElementsIncludingDeleted();
+    const local = a.getSceneElementsIncludingDeleted().filter((e) => !(dropLive && isLive(e)));
     const remote = r.elements ?? [];
     const { made, touched } = materialize(r.pending ?? [], [...local, ...remote]);
     const incoming = restoreElements(byIdLast(remote, touched, made) as never, null, { refreshDimensions: true, repairBindings: true }) as unknown as El[];
@@ -251,8 +285,109 @@ function Board() {
     for (const id of Object.keys(r.files ?? {})) syncedFiles.current.add(id);
     if (made.length || touched.length) {
       await save(r.pending.map((p) => p.id));
-      if (made.length) a.scrollToContent(undefined, { fitToContent: true, animate: true });
+      // 没跟过：照旧缩放到全图。跟过：视图本来就在 Agent 画的地方，新画的没整个露出来才框一下——
+      // 让开工具条，只缩小不放大（放大会让人觉得画面在跳）。
+      if (made.length && !followed) a.scrollToContent(undefined, { fitToContent: true, animate: true });
+      else if (made.length && !inView(a, made)) {
+        const zoom = (a.getAppState().zoom?.value as number | undefined) ?? 1;
+        a.scrollToContent(made as never, { fitToContent: true, viewportZoomFactor: 0.95, canvasOffsets: VIEW_PAD, maxZoom: zoom, animate: true });
+      }
     }
+  };
+
+  // ---- Agent 还在写参数时的预览（live.ts） ----
+
+  const agentPointer = useRef<{ x: number; y: number } | null>(null);
+  const cursorTimer = useRef<number | null>(null);
+  /** 这次调用镜头已经对准过 Agent 画的地方（调用结束清掉）。 */
+  const liveFramed = useRef(false);
+  /** 镜头被 Agent 动过：面板刚打开时那次「缩放到全图」别再盖掉它。 */
+  const agentFramed = useRef(false);
+  /** 画布还没挂上时来的预览 / 结果：挂上后补上（面板是被这次调用打开的，第一段往往就在这时到）。 */
+  const pendingLive = useRef<{ args: Record<string, unknown>; final: boolean } | null>(null);
+  const resultBeforeMount = useRef(false);
+
+  /** 画布上的 Agent：光标停在它正在画 / 改的地方，要动的图形高亮成它选中的样子。 */
+  const agent = (targets: string[]) =>
+    new Map([
+      [
+        AGENT,
+        {
+          id: AGENT_ID,
+          username: "Agent",
+          color: AGENT_COLOR,
+          ...(agentPointer.current ? { pointer: { ...agentPointer.current, tool: "pointer" as const } } : {}),
+          selectedElementIds: Object.fromEntries(targets.map((id) => [id, true])),
+        },
+      ],
+    ]);
+
+  const showLive = (args: Record<string, unknown>, final: boolean) => {
+    const a = api.current;
+    if (!a) {
+      pendingLive.current = { args, final };
+      return;
+    }
+    if (cursorTimer.current) window.clearTimeout(cursorTimer.current);
+    cursorTimer.current = null;
+    const all = a.getSceneElementsIncludingDeleted();
+    const plan = livePlan(args, final, all);
+    const converted = convertToExcalidrawElements(plan.skeletons as never, { regenerateIds: false }) as unknown as El[];
+    // convert 给标签另生的文字元素也得带草稿前缀（不然存回去、交给模型时认不出是草稿）。
+    const rename = new Map<string, string>();
+    for (const e of converted) if (!isLive(e)) rename.set(e.id, `${LIVE_PREFIX}${e.id}`);
+    const ghosts: El[] = converted.map((e) => ({
+      ...e,
+      id: rename.get(e.id) ?? e.id,
+      boundElements: Array.isArray(e.boundElements) ? e.boundElements.map((b: any) => (rename.has(b.id) ? { ...b, id: rename.get(b.id) } : b)) : e.boundElements,
+      opacity: LIVE_OPACITY,
+      locked: true,
+    }));
+    if (plan.pointer) agentPointer.current = plan.pointer;
+    applying.current = true;
+    a.updateScene({
+      elements: [...all.filter((e) => !isLive(e)), ...ghosts],
+      collaborators: agent(plan.targets),
+      captureUpdate: CaptureUpdateAction.NEVER,
+    } as never);
+    applying.current = false;
+    setBusy(plan.status);
+    // 镜头跟着 Agent：框住这次已经画出来的草稿（或要动的图形），最多放大到 100%。
+    // 都在视野里就不动（免得一直晃）；整张板缩得太小时，第一次先拉近到看得清。
+    const work = ghosts.length ? ghosts.filter((e) => !e.containerId) : all.filter((e) => plan.targets.includes(e.id));
+    if (work.length) {
+      const zoom = (a.getAppState().zoom?.value as number | undefined) ?? 1;
+      if (!inView(a, work) || (!liveFramed.current && zoom < READABLE_ZOOM)) {
+        liveFramed.current = true;
+        agentFramed.current = true;
+        a.scrollToContent(work as never, { fitToContent: true, viewportZoomFactor: 0.9, canvasOffsets: VIEW_PAD, maxZoom: 1, animate: true, duration: 300 });
+      }
+    }
+  };
+
+  /** 草稿拿掉；Agent 光标停一会儿再收起。 */
+  const clearLive = (linger = false) => {
+    liveFramed.current = false;
+    pendingLive.current = null;
+    const a = api.current;
+    if (!a) return;
+    const all = a.getSceneElementsIncludingDeleted();
+    if (all.some(isLive)) {
+      applying.current = true;
+      a.updateScene({ elements: all.filter((e) => !isLive(e)), captureUpdate: CaptureUpdateAction.NEVER } as never);
+      applying.current = false;
+    }
+    const hide = () => {
+      cursorTimer.current = null;
+      agentPointer.current = null;
+      api.current?.updateScene({ collaborators: new Map() } as never);
+    };
+    if (cursorTimer.current) window.clearTimeout(cursorTimer.current);
+    if (linger) {
+      // 光标留着，高亮先收：结果已经画出来了。
+      api.current?.updateScene({ collaborators: agent([]) } as never);
+      cursorTimer.current = window.setTimeout(hide, CURSOR_LINGER_MS);
+    } else hide();
   };
 
   // 连宿主。
@@ -263,12 +398,20 @@ function Board() {
       if (p.displayMode) toolsChanged();
       if (p.styles?.variables) applyHostStyleVariables(p.styles.variables);
     };
-    app.ontoolinput = () => setBusy("Agent 正在改白板…");
+    app.ontoolinputpartial = (p) => showLive(p.arguments ?? {}, false);
+    app.ontoolinput = (p) => showLive(p.arguments ?? {}, true);
     app.ontoolresult = () => {
       setBusy(null);
-      void refresh().catch((e) => setError(String(e?.message ?? e)));
+      // 画布还没挂上：挂上后再刷新（这时读到的场景可能还是调用之前的）。
+      if (!api.current) resultBeforeMount.current = true;
+      void refresh(false, true)
+        .catch((e) => setError(String(e?.message ?? e)))
+        .finally(() => clearLive(true));
     };
-    app.ontoolcancelled = () => setBusy(null);
+    app.ontoolcancelled = () => {
+      setBusy(null);
+      clearLive();
+    };
     app.onteardown = async () => {
       if (saveTimer.current) window.clearTimeout(saveTimer.current);
       await save().catch(() => {});
@@ -311,8 +454,9 @@ function Board() {
     return () => window.clearInterval(t);
   }, [connected, refresh]);
 
-  const onChange = (elements: readonly El[], appState: Record<string, any>) => {
+  const onChange = (all: readonly El[], appState: Record<string, any>) => {
     if (applying.current || inline) return;
+    const elements = all.filter((e) => !isLive(e));
     const order = elements.filter((e) => !e.isDeleted).map((e) => e.id);
     const orderChanged = order.join(",") !== syncedOrder.current.join(",");
     if (orderChanged || elements.some((e) => synced.current.get(e.id) !== e.version)) {
@@ -334,8 +478,16 @@ function Board() {
         excalidrawAPI={(a) => {
           api.current = a as unknown as Api;
           currentApi = a as unknown as ViewApi;
-          // 载入后缩放到能看全所有图形。
-          window.setTimeout(() => api.current?.scrollToContent(undefined, { fitToContent: true }), 50);
+          // 载入后缩放到能看全所有图形——除非面板是被 Agent 正在写的调用打开的：那就先对准它画的地方。
+          window.setTimeout(() => {
+            const live = pendingLive.current;
+            pendingLive.current = null;
+            if (resultBeforeMount.current) {
+              resultBeforeMount.current = false;
+              void refresh(false, true).finally(() => clearLive(true));
+            } else if (live) showLive(live.args, live.final);
+            if (!agentFramed.current) api.current?.scrollToContent(undefined, { fitToContent: true });
+          }, 50);
         }}
         initialData={{ elements: initial.elements as never, appState: { ...initial.appState, zenModeEnabled: inline }, files: initial.files as never, scrollToContent: true }}
         onChange={onChange as never}

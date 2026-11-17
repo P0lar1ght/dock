@@ -109,11 +109,11 @@ pub use names::{
     MCP_APP_VIEW_CALL, MCP_ELICIT_EVENT, MEMORY, PERMISSIONS, PERMISSION_EVENT, PLAN_EVENT,
     PLAN_MODE, PLUGIN_SETTINGS, PLUGIN_SETTINGS_CHANGED, PRE_STEP, PROMPT_ASSEMBLE, RHAI_BAGS,
     ROSTER, SCHEDULE_CHANGED, SESSION, SESSIONS, SESSION_CHILD_EVENT, SESSION_COMPACTION,
-    SESSION_EVENT, SESSION_PAGE_EVENT, SESSION_PORT, SESSION_RESET, SESSION_TURN_END, SETTINGS,
-    SKILLS, SLASH, STATUS_CHANGED, STATUS_ITEMS, STEP_START, SUBAGENTS, SUBAGENT_CHANGED,
-    SYSTEM_PROMPT, TABS, TABS_PAGE_OPENED, TODOS, TOOLS, TOOLS_EXECUTE, TOOLS_PRE_EXECUTE,
-    TOOL_VIEWS, TOOL_VIEWS_CHANGED, TUI_SLOTS, TUI_SLOTS_CHANGED, TURN, TURN_CHANGES,
-    TURN_CHANGES_CHANGED, TURN_END, USER_EDITS, WORKFLOWS, WORKFLOW_CHANGED,
+    SESSION_EVENT, SESSION_PAGE_EVENT, SESSION_PORT, SESSION_RESET, SESSION_TOOL_INPUT,
+    SESSION_TURN_END, SETTINGS, SKILLS, SLASH, STATUS_CHANGED, STATUS_ITEMS, STEP_START, SUBAGENTS,
+    SUBAGENT_CHANGED, SYSTEM_PROMPT, TABS, TABS_PAGE_OPENED, TODOS, TOOLS, TOOLS_EXECUTE,
+    TOOLS_PRE_EXECUTE, TOOL_VIEWS, TOOL_VIEWS_CHANGED, TUI_SLOTS, TUI_SLOTS_CHANGED, TURN,
+    TURN_CHANGES, TURN_CHANGES_CHANGED, TURN_END, USER_EDITS, WORKFLOWS, WORKFLOW_CHANGED,
 };
 pub use prompt::assemble::{system_prompt, PromptAssembly, PromptPart, SystemPrompt};
 pub use prompt::context_book::{context, own_sections, ContextBook};
@@ -133,8 +133,8 @@ pub use session::compaction::{
 };
 pub use session::cwd::{change_dir, current_cwd, session_cwd, ChangedDir};
 pub use session::log::{
-    sessions, ArchivedSession, ChildLogEvent, PageLogEvent, PageTurnEnd, Sampling, Sessions, Steer,
-    TokenUsage, TurnEndStatus, ROOT_IDENTITY,
+    sessions, ArchivedSession, ChildLogEvent, PageLogEvent, PageToolInput, PageTurnEnd, Sampling,
+    Sessions, Steer, TokenUsage, TurnEndStatus, ROOT_IDENTITY,
 };
 pub use session::persist::{
     count_subagents, first_user_title, load_subagent, load_subagents, sessions_cwd_dir,

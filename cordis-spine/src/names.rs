@@ -98,6 +98,9 @@ pub const SESSION_TURN_END: &str = "session/turn-end";
 /// 一页的压缩进展变了（开始、换阶段、摘要又吐了一段、结束），载荷
 /// [`crate::PageCompaction`]。摘要计数最多 250ms 一条。
 pub const SESSION_COMPACTION: &str = "session/compaction";
+/// 一页的模型正在写某次工具调用的参数，又流进来一段，载荷 [`crate::PageToolInput`]。
+/// 只推不记：收尾时日志里的 `tool_calls` 才算数。子代理的页不发。
+pub const SESSION_TOOL_INPUT: &str = "session/tool-input";
 /// 子代理会话发了一条事件，载荷 [`crate::ChildLogEvent`]。子代理的会话不发
 /// `session/event` / `session/page-event`（TUI 只画主会话），要看子代理过程的监听者
 /// （网关的子代理投影）订这一条。

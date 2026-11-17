@@ -527,6 +527,8 @@ export class DockStore {
         this.applyWorkflow(id, event);
         return;
       }
+      // 还在写的工具参数只给 MCP App 面板实时看（features/mcp-apps/live.ts 自己订），不进会话。
+      if (event.method === "item/tool_input_delta") return;
       if (event.method === "turn/changes/updated") {
         this.turnChanges.set(id, reduceTurnChanges(this.getTurnChanges(id), event));
         this.emit();

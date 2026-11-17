@@ -4,9 +4,10 @@
 // 协议：cordis-gateway/README.md「MCP Apps」；只在这里往宿主登记，宿主不 import 本目录。
 
 import { AppWindow } from "lucide-react";
-import { registerPanel, registerPanelEntryGroup, registerSplitGroup, registerToolCard } from "../registry";
+import { registerPanel, registerPanelEntryGroup, registerSplitGroup, registerThreadWatcher, registerToolCard } from "../registry";
 import { AppEntryGroup, AppPanel, AppSplitGroup } from "./AppPanel";
 import { InlineApp } from "./InlineApp";
+import { LiveInputs } from "./LiveInputs";
 import { MCP_APP_PANEL } from "./routing";
 
 // 界面在右侧面板，消息流里只留一行入口（见 InlineApp.tsx）。
@@ -15,6 +16,8 @@ import { MCP_APP_PANEL } from "./routing";
 registerToolCard({
   Attachment: InlineApp,
 });
+// 模型还在写参数时面板就跟过去，参数边写边交给界面（tool-input-partial，见 LiveInputs.tsx）。
+registerThreadWatcher(LiveInputs);
 // 能拖出成独立窗（Rust open_panel_window 认 `mcp-app:` kind），窗跟着拖出时的会话（也就定了项目）；
 // 主窗口和独立窗之间的调用路由见 routing.ts。
 registerPanel({ prefix: MCP_APP_PANEL, Panel: AppPanel, poppable: true, perSession: true, label: (kind) => kind.split(":")[1] || "应用", icon: AppWindow });

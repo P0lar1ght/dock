@@ -20,6 +20,16 @@ pub enum StreamDelta {
         model: String,
         cost_usd_ticks: Option<i64>,
     },
+    /// 一次工具调用的参数又流进来一段（原样的 JSON 片段，可能残缺）。只给界面实时看：
+    /// 收尾时的 [`LlmOutput::tool_calls`] 才算数——`llm/stream` 还可能改写它。
+    ///
+    /// `id` / `name` 是到这一段为止知道的（id 缺省时与收尾一致，记成 `call-0`）。
+    ToolInput {
+        index: u32,
+        id: String,
+        name: String,
+        delta: String,
+    },
 }
 
 /// Per-response accumulators from Grok's L2 chat-completions transform.
@@ -32,6 +42,8 @@ pub struct ChatStreamAcc {
     reasoning_visible_emitted: String,
     /// index → (id, name, arguments)
     tool_calls: BTreeMap<u32, (String, String, String)>,
+    /// index → 已经作为 [`StreamDelta::ToolInput`] 推出去的参数字节数。
+    tool_input_pushed: BTreeMap<u32, usize>,
     /// provider 在流中途发的错误。与 messages / responses 两条 wire 同构：
     /// 只进 [`LlmOutput::error`]，不进 `text`（`text` 是下一轮回放历史的门槛）。
     error: Option<String>,
@@ -103,6 +115,22 @@ impl ChatStreamAcc {
                     if let Some(args) = func.arguments {
                         entry.2.push_str(&args);
                     }
+                }
+                // 推给界面：名字到了才推（认不出是哪颗工具的片段没用）；名字晚到时把之前
+                // 攒下的一并补上，界面拼出来的总是从头开始的完整前缀。
+                let pushed = self.tool_input_pushed.entry(tc_delta.index).or_default();
+                if !entry.1.is_empty() && entry.2.len() > *pushed {
+                    out.push(StreamDelta::ToolInput {
+                        index: tc_delta.index,
+                        id: if entry.0.is_empty() {
+                            "call-0".into()
+                        } else {
+                            entry.0.clone()
+                        },
+                        name: entry.1.clone(),
+                        delta: entry.2[*pushed..].to_string(),
+                    });
+                    *pushed = entry.2.len();
                 }
             }
         }
@@ -272,6 +300,73 @@ mod tests {
         assert_eq!(out.text, "Hello");
         assert_eq!(out.tool_calls[0].name, "grep");
         assert_eq!(out.tool_calls[0].arguments, r#"{"p":"x"}"#);
+    }
+
+    fn tool_inputs(deltas: Vec<StreamDelta>) -> Vec<(u32, String, String, String)> {
+        deltas
+            .into_iter()
+            .filter_map(|d| match d {
+                StreamDelta::ToolInput {
+                    index,
+                    id,
+                    name,
+                    delta,
+                } => Some((index, id, name, delta)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn tool_arguments_stream_as_tool_input_deltas() {
+        let mut acc = ChatStreamAcc::default();
+        let d1 = acc.ingest(
+            serde_json::from_str(
+                r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"grep","arguments":"{\"p\""}}]}}]}"#,
+            )
+            .unwrap(),
+        );
+        let d2 = acc.ingest(
+            serde_json::from_str(
+                r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":":\"x\"}"}},{"index":1,"id":"c2","function":{"name":"ls","arguments":"{}"}}]}}]}"#,
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            tool_inputs(d1),
+            vec![(0, "c1".into(), "grep".into(), r#"{"p""#.into())]
+        );
+        assert_eq!(
+            tool_inputs(d2),
+            vec![
+                (0, "c1".into(), "grep".into(), r#":"x"}"#.into()),
+                (1, "c2".into(), "ls".into(), "{}".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn tool_input_waits_for_the_name_then_backfills() {
+        let mut acc = ChatStreamAcc::default();
+        let d1 = acc.ingest(
+            serde_json::from_str(
+                r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"a\""}}]}}]}"#,
+            )
+            .unwrap(),
+        );
+        assert!(tool_inputs(d1).is_empty(), "名字没到不推");
+        let d2 = acc.ingest(
+            serde_json::from_str(
+                r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"edit","arguments":":1}"}}]}}]}"#,
+            )
+            .unwrap(),
+        );
+        // 没有 id：和收尾时一样记成 call-0；前面攒下的片段一并补上。
+        assert_eq!(
+            tool_inputs(d2),
+            vec![(0, "call-0".into(), "edit".into(), r#"{"a":1}"#.into())]
+        );
+        assert_eq!(acc.finish().tool_calls[0].id, "call-0");
     }
 
     #[test]

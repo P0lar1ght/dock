@@ -133,7 +133,8 @@ export function replayHistory(events: readonly Record<string, unknown>[]): Threa
 
 export function reduceThread(state: ThreadState, event: DockEvent): ThreadState {
   // 子代理、工作流 run 的推送不属于这个线程自己的时间线（各有自己的 reducer）。
-  if (event.method === 'subagent/updated' || event.method === 'subagent/event' || event.method === 'workflow/updated' || event.method === 'turn/changes/updated') return state;
+  // 还在写的工具参数只是实时预览，不进时间线（随后的 item/tool_started 才算数，见 toolInput.ts）。
+  if (event.method === 'subagent/updated' || event.method === 'subagent/event' || event.method === 'workflow/updated' || event.method === 'turn/changes/updated' || event.method === 'item/tool_input_delta') return state;
   if (event.seq && event.seq <= state.seq) return state;
   const seq = event.seq || state.seq;
 

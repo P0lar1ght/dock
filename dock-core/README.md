@@ -45,6 +45,11 @@ dock.1 协议核心：线程事件的类型化契约 + 线程状态 reducer。�
     Worker 也是脚本，官方 map 示例的 Cesium 从 CDN 起 Worker，不放开地球是黑的。
   - `viewToolsForExpose` / `parseViewCall`：界面自己的工具——`tools/list` 结果整理成
     `mcp/app/view/expose` 要的样子；解析推送 `mcp/app/view/call`。
+- 工具参数流式（`src/toolInput.ts`，契约见 `cordis-gateway/README.md`「工具参数流式」）：
+  - `feedToolInput`：按 `chunk` 拼 `item/tool_input_delta`；漏了段就作废（`broken`）；
+  - `partialJson`：残缺 JSON 前缀尽量补全（没写完的字符串照收、没写到值的键丢掉）；
+  - `liveToolCall`：调的是哪颗、参数是什么（经 `use_tool` 的等 `tool_name` 写完才认）。
+  - `reduceThread` 不收它：只是实时预览，不进时间线。
 - **不猜**：一轮的结果看 `turn/completed.status`，工具的结果看 `item/tool_completed.status`，都由 Dock 给出。
 
 ## 用法

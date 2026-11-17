@@ -51,6 +51,7 @@
 - 加一种扩展：registry 加一张表 + 宿主加一个插槽。
 - 工具卡插槽：useIcon（图标）、Body（展开后的正文）、Attachment（标题行下、不用展开）、isArtifact（不随过程折起）、keepMounted（跑着时也不挪，只给含 iframe 的）。
 - 轮次脚注插槽（registerTurnFooter）：一轮结束后、回复操作行上面；每轮改动卡用它（features/turn-changes）。
+- 会话后台插槽（registerThreadWatcher）：跟着当前会话、不画东西；MCP App 面板跟着流式参数走用它（features/mcp-apps/LiveInputs.tsx）。
 - 侧栏整页插槽（registerNavPage）：导航里多一项，key 是 `feature:<id>`；记忆页用它（features/memory-graph）。
 - 登记都在启动时完成：工具卡的 `useIcon` 是 hook，宿主按固定顺序调。
 - 老组件碰到再迁，不搬家式重构。

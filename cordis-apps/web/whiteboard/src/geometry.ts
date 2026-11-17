@@ -79,6 +79,19 @@ export function viewportOf(s: { scrollX: number; scrollY: number; width: number;
   return { x: -s.scrollX, y: -s.scrollY, width: s.width / zoom, height: s.height / zoom, zoom };
 }
 
+/**
+ * 包围盒整个落在区域里，四边各让出 `pad`（屏幕像素，按 `view.zoom` 换成画布坐标）。
+ * 画布上下盖着工具条：只露一半的不算看得见。
+ */
+export function within(e: El, view: Area & { zoom: number }, pad: { top: number; right: number; bottom: number; left: number }): boolean {
+  const z = view.zoom || 1;
+  const x1 = Math.min(e.x, e.x + e.width);
+  const y1 = Math.min(e.y, e.y + e.height);
+  const x2 = Math.max(e.x, e.x + e.width);
+  const y2 = Math.max(e.y, e.y + e.height);
+  return x1 >= view.x + pad.left / z && y1 >= view.y + pad.top / z && x2 <= view.x + view.width - pad.right / z && y2 <= view.y + view.height - pad.bottom / z;
+}
+
 /** 包围盒和区域相交（大致：旋转、多点线按未旋转的包围盒算）。 */
 export function intersects(e: El, view: Area): boolean {
   const x1 = Math.min(e.x, e.x + e.width);
