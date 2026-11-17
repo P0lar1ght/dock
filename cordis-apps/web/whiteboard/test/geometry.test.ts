@@ -63,3 +63,18 @@ test("按服务端顺序排 z 序：不在远端里的接在后面", () => {
   assert.deepEqual(sortByRemoteOrder(merged, ["b", "a"]).map((e) => e.id), ["b", "a", "x"]);
   assert.deepEqual(sortByRemoteOrder(merged, []).map((e) => e.id), ["b", "x", "a"]);
 });
+
+test("within：整个落在视野里、四边让出工具条（按缩放换算）", async () => {
+  const { within } = await import("../src/geometry.ts");
+  const view = { x: 0, y: 0, width: 1000, height: 800, zoom: 2 };
+  const pad = { top: 72, right: 40, bottom: 80, left: 40 };
+  const box = (x: number, y: number, width = 100, height = 50) => ({ id: "a", type: "rectangle", x, y, width, height }) as never;
+  assert.equal(within(box(100, 100), view, pad), true);
+  // 上边进了工具条（72px / 2 = 36）：不算看得见。
+  assert.equal(within(box(100, 30), view, pad), false);
+  // 下边：800 - 40 = 760 以下被挡住。
+  assert.equal(within(box(100, 720), view, pad), false);
+  assert.equal(within(box(100, 700), view, pad), true);
+  // 负宽高（从右往左画的）按包围盒算。
+  assert.equal(within(box(200, 200, -100, -50), view, pad), true);
+});
