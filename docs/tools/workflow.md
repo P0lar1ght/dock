@@ -68,15 +68,27 @@ run 归**起它的那一页**（工具调用时的 `exec_ctx`；桌面端每个�
 
 ### code-review
 
-内置脚本 `workflows/code_review.rhai`，`/code-review [范围或关注点]`（如 `/code-review #42`）或 `source.name=code-review`（args：`target` / `pr` / `focus` / `angles`）。
+内置脚本 `workflows/code_review.rhai`，`/code-review [范围或关注点]`（如 `/code-review #42`、`/code-review HEAD~3..HEAD`、`/code-review 快速`）或 `source.name=code-review`（args：`target` / `pr` / `focus` / `angles` / `level`）。
 
-- Scope：一个只读子代理定范围，交回一条**单条只读**的 `git diff …` / `git show …` / `gh pr diff <n>`（带管道、重定向、拼接的拒掉，审查员要自己跑它，只读命令不用等批准；`gh pr view|diff|list|checks|status`、`gh repo view`、`gh issue view|list` 算只读）。点名了 PR 就审 PR，否则默认审未提交改动，再否则当前分支相对默认分支；没改动就收尾。审 PR 时审查员 / 核实员被告知本地检出不一定是 PR 分支、以 diff 为准；scope 用 `gh pr view --json headRefOid` + `git cat-file -e` 查 PR 的提交在不在本地，在就让它们用只读的 `git show <sha>:<路径>` 看 PR 版本的文件，不在就只看 diff。每个子代理的提示都带「只用只读命令（不写文件、不建目录、不重定向、不用 awk）」——之前审一个大 PR 时子代理把仓库拷到磁盘上看，弹了 75 次批准。
-- Review：每个角度一个只读审查员并行（默认正确性 / 安全 / 性能 / 可维护性 / 测试——测试角度找改了行为却没有测试覆盖、或被削弱的测试；`angles` 可选，不认识的当自定义要求），只报这次改动引入的问题，每条带文件行号、引用代码、具体后果。
-- 同一 `file:line` 先精确合并；再由一个子代理按意思把「同一个问题、行号差几行 / 措辞不同」的分组，脚本按组合并（取更严重的，角度都记上；它失败就只留精确合并）。按严重程度排，最多核实 24 条。
-- Verify：每个核实员最多 6 条，逐条对照代码，否掉误读 / 已处理 / 只在旧代码里 / 推测；只能调低严重程度，可以改正引错的行号。verdict 逐条认，同 deep-research。
-- Report：确定性 markdown（不再过模型），`complete` 交回 `status`（`clean` / `issues` / `partial` / `failed`）、`findings` 数、报告路径与短摘要。
-- 结构化结果放在 `complete` 的 `data`：`{ kind: "code-review", diff_command, pr, findings: [{ file, line, severity, title, detail, suggestion, angles, note }] }`。`data` 不摊进给模型的摘要（`WorkflowRunSnap::result_data`，网关 `resultData`）；GUI 据此把批注画到差异视图上（工作流卡「在改动上看批注」→ 面板，diff 经 `vcs/diff` 现取；PR 页抽屉「查看改动」，diff 经 `vcs/pr/diff`，审完的 PR 批注存在本机）。
-- 行为由 `tests/code_review.rs` 用扮演各角色的假模型跑真脚本覆盖。
+两档，默认标准：
+
+- **标准**：一个审查员 + 一个核实员，共 2 个子代理。
+- **快速**（`level: "quick"`，或文字开头 / 结尾写「快速」「quick」）：只有审查员，不逐条核实；审查员自己置信度不到 0.5 的不进报告，报告注明「没有逐条核实」。
+
+流程：
+
+- **Review**：一个只读审查员自己定范围、把改动打出来读一遍、审完一起交回。
+  - 定范围的规则同以前：点名 PR 就 `gh pr diff <n>`（另取 `headRefOid`，提交在本地就用只读的 `git show <sha>:<路径>` 看 PR 版本，不在就只看 diff）；点名了范围就审它；否则未提交改动（`git diff HEAD` + `git status` 里的未跟踪新文件）；再否则当前分支相对默认分支；都没有就 `empty`。
+  - 改动只打一次：长了用 `<命令> | sed -n 'A,Bp'` 大页翻，读过的不再打；特别大的先看最可能出 bug 的代码，没看的写进 `skipped`。
+  - 准则一份（参考 Codex `/review` 的准则）：正确性、安全、性能、测试（改了行为没测试，最高「中」）、项目规约（AGENTS.md / CLAUDE.md，要引原文）；只报这次改动引入的、作者会修的、有具体失败路径的；宁可不报也不报弱的。每条带文件行号、引用代码、后果、类别、置信度；另给整体判断（能不能合）。
+  - `angles` 不再拆审查员，原文并进关注点（「也请特别看：…」）。
+- **Verify**（只标准档、有发现时）：一个核实员一次核完，按审查员给的命令看改动、逐条对照代码；只能调低严重程度、可以改正行号。verdict 逐条认：漏答 / 重复的那条照列、标「未核实」；核实员整个没交回结果也照列全部发现、标「未核实」，状态记 `partial`，不整份丢掉。
+- 同一 `file:line` 合并（取更严重的，类别都记上）；按严重程度、同级按置信度排。
+- **Report**：确定性 markdown（不再过模型），写范围、档位、关注点、结论、整体判断、问题和覆盖说明；`complete` 交回 `status`（`clean` / `issues` / `partial` / `failed`）、`findings` 数、报告路径与短摘要。有没看的部分或没核实的发现记 `partial`；审查员没交回结果记 `failed`。
+- 范围命令只认单条只读的 `git diff …` / `git show …` / `gh pr diff <n>`（带管道、重定向、拼接、`--ext-diff` / `--textconv` / `--no-index` 的不认）：不认就不交给核实员和界面（`diff_command` 为空），发现照出，覆盖说明里写明。`gh pr view|diff|list|checks|status`、`gh repo view`、`gh issue view|list` 算只读。每个子代理的提示都带「只用只读命令」——之前审一个大 PR 时子代理把仓库拷到磁盘上看，弹了 75 次批准。
+- 结构化结果放在 `complete` 的 `data`：`{ kind: "code-review", diff_command, pr, findings: [{ file, line, severity, title, detail, suggestion, angles, note }] }`（`angles` 现在是类别，如 `["安全"]`）。`data` 不摊进给模型的摘要（`WorkflowRunSnap::result_data`，网关 `resultData`）；GUI 据此把批注画到差异视图上（工作流卡「在改动上看批注」→ 面板，diff 经 `vcs/diff` 现取；PR 页抽屉「查看改动」，diff 经 `vcs/pr/diff`，审完的 PR 批注存在本机）。
+- 为什么这样拆：以前范围、五个角度、去重、核实各是子代理（8–11 个）。五个审查员各自把同一份 diff 翻页重读，本机 2026-11 的记录里一次 19 个文件、两百来行的 PR 跑了 108 分钟（一个审查员就跑了 111 次 `git diff` / `git show`），跑得最久的审查员还常交不回结果。
+- 行为由 `tests/code_review.rs` 用扮演审查员 / 核实员的假模型跑真脚本覆盖。
 
 ### deep-research 的评分
 
