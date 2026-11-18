@@ -140,10 +140,13 @@ impl HttpShared {
         self.protocol_watch.borrow().clone()
     }
 
+    // 用 `send_replace`，不用 `send`：`send` 在没有接收端时直接返回错误、**不更新值**。
+    // 接收端只有后台的 GET 监听，服务器不给 GET 流（405 / 没 session 的 404）它就退出了，
+    // 之后重新握手拿到的新 session id / 协议版本会被悄悄丢掉，一直带着作废的那个发请求。
     fn set_protocol(&self, p: String) {
         self.modern
             .store(protocol::is_modern(&p), Ordering::Relaxed);
-        let _ = self.protocol_watch.send(p);
+        self.protocol_watch.send_replace(p);
     }
 
     fn session_id(&self) -> Option<String> {
@@ -151,7 +154,7 @@ impl HttpShared {
     }
 
     fn set_session_id(&self, id: Option<String>) {
-        let _ = self.session_watch.send(id);
+        self.session_watch.send_replace(id);
     }
 }
 
@@ -162,7 +165,7 @@ async fn handshake(s: &HttpShared) -> Result<Vec<protocol::ListedTool>, String> 
             if let Some(supported) = unsupported_versions(&v) {
                 return negotiate(s, &supported).await;
             }
-            if looks_legacy_error(&v) {
+            if looks_legacy_error(&v) || demands_session(&v) {
                 initialize_legacy(s).await?;
                 return list_pages(s, &s.server.name).await;
             }
@@ -252,6 +255,25 @@ fn looks_legacy_http(err: &str) -> bool {
 
 fn looks_legacy_error(v: &Value) -> bool {
     protocol::jsonrpc_error_code(v) == Some(protocol::ERR_METHOD_NOT_FOUND)
+}
+
+/// 有些 MCP 服务器只认 session：没带 `Mcp-Session-Id` 的请求直接回
+/// `-32602 Missing session ID`（Yaklang/Yakit 的 MCP 就是这样）。它不是
+/// `-32601`，`looks_legacy_error` 认不出来，握手就会把这个错误原样甩给用户。
+/// 认出来就退回 initialize 那一套，把 session id 换上。
+///
+/// session 过期时这类服务器也不回 404（规范的过期信号），而是 HTTP 400 +
+/// `-32602 Invalid session ID`（Yakit 重启后就是这样）：`post` 对带着 session
+/// 的请求同样认它，重新 initialize 一次再发。只重来一次——工具自己的参数里有
+/// session 字样时，第二次照样错，原样交回那个错误，不改写成「session 过期」。
+fn demands_session(v: &Value) -> bool {
+    if protocol::jsonrpc_error_code(v) != Some(protocol::ERR_INVALID_PARAMS) {
+        return false;
+    }
+    v.pointer("/error/message")
+        .and_then(|m| m.as_str())
+        .map(|m| m.to_ascii_lowercase().contains("session"))
+        .unwrap_or(false)
 }
 
 fn build_client(
@@ -512,6 +534,11 @@ async fn post(
                 .await
                 .unwrap_or_else(|_| "<failed to read body>".into());
             if let Ok(v) = serde_json::from_str::<Value>(&body) {
+                if had_session && !recovered && demands_session(&v) {
+                    recovered = true;
+                    Box::pin(recover_session(s)).await?;
+                    continue;
+                }
                 if v.get("error").is_some() || v.get("result").is_some() {
                     if let Some(hit) = ingest(s, v.clone(), want_id).await {
                         return Ok(Some(hit));
@@ -546,6 +573,11 @@ async fn post(
         if content_type.as_bytes().starts_with(JSON_MIME.as_bytes()) {
             match response.json::<Value>().await {
                 Ok(v) => {
+                    if had_session && !recovered && demands_session(&v) {
+                        recovered = true;
+                        Box::pin(recover_session(s)).await?;
+                        continue;
+                    }
                     if let Some(hit) = ingest(s, v.clone(), want_id).await {
                         return Ok(Some(hit));
                     }
@@ -581,7 +613,7 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
-    #[derive(Clone, Copy)]
+    #[derive(Clone, Copy, PartialEq)]
     enum Mode {
         Modern,
         Legacy,
@@ -589,6 +621,16 @@ mod tests {
         Unauthorized,
         Paged,
         SessionDrop,
+        /// 只认 session 的服务器：没带 `Mcp-Session-Id` 的请求回 HTTP 400 +
+        /// `-32602 Missing session ID`，带了过期的回 `-32602 Invalid session ID`
+        /// （Yaklang/Yakit 的 MCP 就是这样，2026-11-18 对本机 Yakit 实测）。
+        SessionRequired,
+        /// 同上，但第一次 `tools/call` 时服务器「重启」了：握手拿到的
+        /// `sess-1` 作废，回 `-32602 Invalid session ID`，不回 404。
+        SessionRestart,
+        /// 同 `SessionRequired`，但 `tools/call` 总回工具自己的参数错误，里面带着
+        /// session 字样：重来一次之后要原样交回这个错误。
+        SessionParamError,
         /// `tools/call` 的回复是一条 SSE 流，里面先是一个**没人会回答**的
         /// `elicitation/create`，然后才是调用结果。用来钉住「读侧不被
         /// elicitation 挡住」。
@@ -848,6 +890,9 @@ mod tests {
                 ),
             },
             Mode::Legacy => legacy_handle(headers, &v, &id, false, calls, false),
+            Mode::SessionRequired | Mode::SessionRestart | Mode::SessionParamError => {
+                session_only_handle(mode, headers, method, &id, calls)
+            }
             Mode::SessionDrop => legacy_handle(headers, &v, &id, false, calls, true),
             Mode::UnsupportedThenLegacy => {
                 let proto = v
@@ -872,6 +917,91 @@ mod tests {
                     legacy_handle(headers, &v, &id, true, calls, false)
                 }
             }
+        }
+    }
+
+    /// 只认 session 的服务器（照本机 Yakit 实测的回法）：每次 initialize 发一个新的
+    /// `sess-N`，之后的请求只认最新那个；没带回 `Missing session ID`，不对回
+    /// `Invalid session ID`，都是 HTTP 400 + `-32602`。
+    fn session_only_handle(
+        mode: Mode,
+        headers: &str,
+        method: &str,
+        id: &Value,
+        sessions: &AtomicU32,
+    ) -> Vec<u8> {
+        let rpc_error = |message: &str| {
+            json_response(
+                400,
+                "",
+                &json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32602, "message": message } })
+                    .to_string(),
+            )
+        };
+        if method == "initialize" {
+            let n = sessions.fetch_add(1, Ordering::SeqCst) + 1;
+            return json_response(
+                200,
+                &format!("Mcp-Session-Id: sess-{n}\r\n"),
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "protocolVersion": "2025-11-25",
+                        "capabilities": {},
+                        "serverInfo": { "name": "fake", "version": "0" }
+                    }
+                })
+                .to_string(),
+            );
+        }
+        if method == "notifications/initialized" {
+            return b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n".to_vec();
+        }
+        let sid = headers.lines().find_map(|l| {
+            let (k, v) = l.split_once(':')?;
+            k.trim()
+                .eq_ignore_ascii_case("mcp-session-id")
+                .then(|| v.trim().to_string())
+        });
+        let Some(sid) = sid else {
+            return rpc_error("Missing session ID");
+        };
+        let current = format!("sess-{}", sessions.load(Ordering::SeqCst));
+        // 「重启」：握手时发的第一个 session 在调用时已经不认了。
+        let stale = mode == Mode::SessionRestart && method == "tools/call" && sid == "sess-1";
+        if sid != current || stale {
+            return rpc_error("Invalid session ID");
+        }
+        match method {
+            "tools/list" => json_response(
+                200,
+                "",
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": { "tools": [{
+                        "name": "ping",
+                        "description": "ping",
+                        "inputSchema": { "type": "object" }
+                    }] }
+                })
+                .to_string(),
+            ),
+            "tools/call" if mode == Mode::SessionParamError => {
+                rpc_error("Invalid params: session_id must be a string")
+            }
+            "tools/call" => json_response(
+                200,
+                "",
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": { "content": [{ "type": "text", "text": "pong" }] }
+                })
+                .to_string(),
+            ),
+            _ => json_response(400, "", "{}"),
         }
     }
 
@@ -978,6 +1108,95 @@ mod tests {
         .await;
         assert_eq!(result.content, "hi");
         handle.abort();
+    }
+
+    /// 只认 session 的服务器（Yaklang/Yakit 的 MCP）：没带 `Mcp-Session-Id`
+    /// 的 `tools/list` 回 `-32602 Missing session ID`。它不是 `-32601`，改之前
+    /// 握手把这个错误原样甩出去，工具一个都列不出来。
+    #[tokio::test]
+    async fn session_only_server_falls_back_to_initialize() {
+        let (url, handle) = spawn_server(Mode::SessionRequired).await;
+        let (listed, call) = connect_test(&http_server(url)).await.expect("connect");
+        assert_eq!(listed[0].public, "mcp_local__ping");
+        let result = call(
+            "mcp_local__ping".into(),
+            ToolCall {
+                id: "1".into(),
+                name: "mcp_local__ping".into(),
+                arguments: "{}".into(),
+            },
+        )
+        .await;
+        assert_eq!(result.content, "pong");
+        handle.abort();
+    }
+
+    /// 服务器重启、握手时的 session 作废：它回 HTTP 400 + `-32602 Invalid session
+    /// ID`，不回 404。改之前只认 404 是过期，这次调用直接失败，之后每次都失败，
+    /// 直到重连。现在当过期处理：重新 initialize 一次，用新 session 再发。
+    #[tokio::test]
+    async fn invalid_session_mid_run_reinitializes_and_retries() {
+        let (url, handle) = spawn_server(Mode::SessionRestart).await;
+        let (listed, call) = connect_test(&http_server(url)).await.expect("connect");
+        assert_eq!(listed[0].public, "mcp_local__ping");
+        let result = call(
+            "mcp_local__ping".into(),
+            ToolCall {
+                id: "1".into(),
+                name: "mcp_local__ping".into(),
+                arguments: "{}".into(),
+            },
+        )
+        .await;
+        assert_eq!(result.content, "pong");
+        handle.abort();
+    }
+
+    /// 工具自己的参数错误里带着 session 字样：重来一次之后还是这个错，就原样交回，
+    /// 不能改写成「session 过期」，模型要看到真正的原因。
+    #[tokio::test]
+    async fn a_tool_error_mentioning_session_is_passed_through() {
+        let (url, handle) = spawn_server(Mode::SessionParamError).await;
+        let (_, call) = connect_test(&http_server(url)).await.expect("connect");
+        let result = call(
+            "mcp_local__ping".into(),
+            ToolCall {
+                id: "1".into(),
+                name: "mcp_local__ping".into(),
+                arguments: "{}".into(),
+            },
+        )
+        .await;
+        assert!(
+            result.content.contains("session_id must be a string"),
+            "{}",
+            result.content
+        );
+        assert!(
+            !result.content.contains("session expired"),
+            "{}",
+            result.content
+        );
+        handle.abort();
+    }
+
+    /// 真机联调：本机的 Yakit（Yaklang MCP）在 127.0.0.1:11432 上开着，只认
+    /// session。默认不跑（依赖本机装了 Yakit）：
+    /// `cargo test -p cordis-spine --lib tools::mcp::http -- --ignored live_yakit`
+    #[tokio::test]
+    #[ignore = "需要本机 Yakit 跑在 127.0.0.1:11432"]
+    async fn live_yakit_session_server() {
+        let (listed, _) = connect_test(&http_server("http://127.0.0.1:11432/mcp".into()))
+            .await
+            .expect("connect to local Yakit MCP");
+        assert!(!listed.is_empty(), "Yakit MCP 应该列出工具");
+        assert!(
+            listed
+                .iter()
+                .any(|t| t.public == "mcp_local__query_web_fuzzer_tabs"),
+            "应该能看到 Yakit 的工具，实际：{:?}",
+            listed.iter().map(|t| &t.public).collect::<Vec<_>>()
+        );
     }
 
     /// 服务器在同一条 SSE 流上先发 `elicitation/create` 再发调用结果。
