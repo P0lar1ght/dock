@@ -956,43 +956,65 @@ export class DockStore {
    * 闲着的后台页超过 {@link IDLE_PAGES_KEPT} 张时，关掉最久没看的（开页之后在后台做，不挡开页；
    * 开页本身不设上限）。关掉不丢：记录在盘上，下次点开再连。只挑有对话、没在跑、没在等你、
    * 没在看、没有子代理在跑、没开侧边聊天、目标没在进行的；从没看过的（别处开的、GUI 重载前
-   * 开的）排最前。
+   * 开的）排最前。收的时候又开了页，收完再收一轮。
    */
   private trimming = false;
+  private trimAgain = false;
   private async trimIdlePages() {
-    if (this.trimming) return;
+    if (this.trimming) {
+      this.trimAgain = true;
+      return;
+    }
     this.trimming = true;
     try {
-      const idle = this.wire
-        .filter(
-          (t) =>
-            t.open &&
-            t.alias !== "live" &&
-            !this.viewing.has(t.id) &&
-            !this.opening.has(t.id) &&
-            // 关主会话会连它的侧边聊天一起关掉。
-            !this.app.asides.has(t.id) &&
-            // 子代理只活在这一页的内存里：关页会把它们停掉。
-            !t.subagentsRunning &&
-            // 网关给还没说过话的页标题「当前会话」：空会话关掉不落盘，等于删了。
-            t.title !== "当前会话",
-        )
-        .sort((a, b) => (this.seenAt.get(a.id) ?? 0) - (this.seenAt.get(b.id) ?? 0));
-      let extra = idle.length - IDLE_PAGES_KEPT;
-      for (const t of idle) {
-        if (extra <= 0) break;
-        // 没拉过记录的（GUI 重载前开的、别处开的）不知道在不在跑：先拉一次再判断，
-        // 关掉正在跑的页会把那一轮停掉。
-        if (!this.threads.has(t.id)) await this.load(t.id);
-        if (this.viewing.has(t.id) || isRunning(this.getThread(t.id)) || this.app.waiting.has(t.id)) continue;
-        if (this.getEnv(t.id).goal?.status === "active") continue;
-        await this.closePage(t.id);
-        extra -= 1;
-      }
+      do {
+        this.trimAgain = false;
+        await this.trimOnce();
+      } while (this.trimAgain);
     } catch {
       // 只是收内存：失败了下次开页再试。
     } finally {
       this.trimming = false;
+    }
+  }
+
+  /** 在跑、在等你、目标在进行、正在看的页都不算闲。 */
+  private busyPage(id: string) {
+    return (
+      this.viewing.has(id) ||
+      isRunning(this.getThread(id)) ||
+      this.app.waiting.has(id) ||
+      this.getEnv(id).goal?.status === "active"
+    );
+  }
+
+  private async trimOnce() {
+    const idle = this.wire
+      .filter(
+        (t) =>
+          t.open &&
+          t.alias !== "live" &&
+          !this.opening.has(t.id) &&
+          // 拉过记录的已经知道忙不忙；没拉过的（GUI 重载前开的、别处开的）下面拉了再判断。
+          !(this.threads.has(t.id) && this.busyPage(t.id)) &&
+          // 关主会话会连它的侧边聊天一起关掉。
+          !this.app.asides.has(t.id) &&
+          // 子代理只活在这一页的内存里：关页会把它们停掉。
+          !t.subagentsRunning &&
+          // 网关给还没说过话的页标题「当前会话」：空会话关掉不落盘，等于删了。
+          t.title !== "当前会话",
+      )
+      .sort((a, b) => (this.seenAt.get(a.id) ?? 0) - (this.seenAt.get(b.id) ?? 0));
+    let extra = idle.length - IDLE_PAGES_KEPT;
+    for (const t of idle) {
+      if (extra <= 0) break;
+      // 关掉正在跑的页会把那一轮停掉：没拉过记录的先拉一次再判断。
+      if (!this.threads.has(t.id)) await this.load(t.id);
+      // 这一张已经算进 extra：拉完发现在忙，它本来就不是闲页，也得从多出来的里扣掉，
+      // 不然会多关一张真闲的。
+      extra -= 1;
+      if (this.busyPage(t.id)) continue;
+      await this.closePage(t.id);
     }
   }
 
