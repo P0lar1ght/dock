@@ -273,6 +273,10 @@ MCP 服务器向用户要信息（表单 / URL）。网关把提问投影成 `el
 - 去重按「不大于已见最大 `seq` 就丢」（dock-core 就这样）：并过的那条带着好几个 `seq` 的正文，按 `seq` 查集合会重复。
 - 起止时间都在；之后的推送照常一条条来，内存里的投影不动。
 
+开页（`thread/open` / `thread/start`、定时任务到点开页、侧边聊天）不设页数上限。
+- 终端自己开页（`Ctrl+N`、分叉、`/btw`）仍是 9 页：`Alt+1..9` 直达、标签栏一行放得下。
+- 每页常驻内存（实测调试版约 26MB）：客户端可以自己关掉闲着的页（桌面端的做法见 dock-gui）。
+
 投影每页一份（`handle.rs` 的 `transcripts`，共用一条 broadcast，事件带页身份）；订阅是「页 → 客户端订阅时用的 `threadId`」，推送时用那个 id。会话事件按 `session/page-event` 路由，`turn/completed` 只在那一页记下 `LogEvent::TurnEnd` 时发（一轮一次，流式中途不发；和其它会话事件一样按 `session/page-event` 路由），`status` 是 `completed` / `cancelled` / `failed`，失败带 `error`（错误文本，以前只回给 TUI）；`item/tool_completed` 的 `status` 照 Dock 落下的 `is_error` 报：`completed` / `failed`，停止时的中断结果（以「已中断。」开头，可能带运行时长和已产出的输出）为 `cancelled`，权限门拒绝的为 `denied`；权限 / 提问 / 计划 / elicitation 的事件载荷是 `()`，挨页按队首序号（`front_seq`）对账——同一条不重报，换了一条先报旧的 resolved。elicitation 的 `elicit/requested` 另带 `server` / `message` / `heading`；URL 模式再带 `url`（完整地址）、`urlDomain`（域名，给客户端高亮）、`urlWarning`（可疑地址的警告：Punycode / 明文 http）——这三个字段老网关不带，客户端按 `null` 兜。提问（`interaction/requested`）每题带 `multiSelect`（多选题可以选多个）；`handoff_to_user` 的提问另带 `browserHandoff: true`（`kind` 仍是 `user_input`），客户端据此打开这个会话的浏览器面板；`interaction/respond` 的 `answers[]` 每题 `{questionId, values: [选项标签…], other?}`，`other` 是自己写的回答，既算答案也作为备注交给模型；旧形状 `{questionId, value, kind: option|other}` 仍收。线程级的斜杠命令用 `GatewayHandle::scoped(page)`，下面一串 `cmd_*` 读的 `gateway.ctx()` 就是那一页。
 
 ### 浏览器画面（能力 `browserView`，`handlers/browser_view.rs`）
@@ -491,7 +495,7 @@ MCP 服务器向用户要信息（表单 / URL）。网关把提问投影成 `el
 - 带着主会话到此为止的上下文（给模型参考），工具只读；会改东西的命令要用户批准。
 - 投影只从分叉那一刻往后：`thread/history` 的 `events` 不重放主线。
   - 旧的 `messages` 字段按会话日志给，仍带着主线快照。
-- 不落盘、不进 `thread/list`、不占 9 页的名额；每个主会话最多一个。
+- 不落盘、不进 `thread/list`；每个主会话最多一个。
   - 同一会话并发 `start` 只开一个，后到的回 `existing: true`。
 - 主会话关页时它一起关（`thread/close`、TUI `/tab close` 都算）。
 - 主会话那一页换了会话（`Ctrl+W` / `/resume`）后，旧的侧边聊天不再属于它：

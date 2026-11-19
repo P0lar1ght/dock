@@ -262,8 +262,11 @@ export interface ProjectPrefs {
   removed: ReadonlySet<string>;
 }
 
-/** Dock 一个进程最多开几页（cordis-tui `MAX_TABS`，含 `dock serve` 起步的第 1 页）。 */
-const MAX_PAGES = 9;
+/**
+ * 闲着的后台页留几张。Dock 不限开着的页数（会话多少都能同时开着、同时跑），但每页常驻
+ * 内存（实测调试版约 26MB）：点开看过的旧会话都留着页会一直涨，超过这么多张就关掉最久没看的。
+ */
+const IDLE_PAGES_KEPT = 16;
 
 export const NO_ENV: ComposerSettings = {
   approval: "ask",
@@ -367,7 +370,7 @@ export class DockStore {
   private asideParent = new Map<string, string>();
   /** 正在看的会话（`focus`，分屏时两个）；它们跑完不算通知。 */
   private viewing = new Set<string>();
-  /** 每个会话最后一次在看的时间：页数满了先关最久没看的（`makeRoom`）。 */
+  /** 每个会话最后一次在看的时间：闲着的后台页太多时先关最久没看的（`trimIdlePages`）。 */
   private seenAt = new Map<string, number>();
   /** 每个会话开始等用户的时间（通知菜单写「N 分钟前」）。 */
   private waitingAt = new Map<string, number>();
@@ -916,6 +919,7 @@ export class DockStore {
       if (this.removed.delete(projectId(presetId, cwd))) localStorage.setItem(this.scoped(REMOVED_KEY), JSON.stringify([...this.removed]));
       await this.refreshThreads();
       await this.load(r.thread.id);
+      void this.trimIdlePages();
       return r.thread.id;
     } catch (e) {
       this.fail(e);
@@ -933,7 +937,6 @@ export class DockStore {
     let p = this.opening.get(id);
     if (!p) {
       p = (async () => {
-        await this.makeRoom();
         await this.client.call("thread/open", { threadId: id });
         await this.refreshThreads();
         // 开页后网关按落盘重建投影，seq 重新编号：旧状态作废，整份重拉。
@@ -942,6 +945,7 @@ export class DockStore {
         this.subagents.delete(id);
         this.workflows.delete(id);
         await this.load(id);
+        void this.trimIdlePages();
       })().finally(() => this.opening.delete(id));
       this.opening.set(id, p);
     }
@@ -949,33 +953,46 @@ export class DockStore {
   }
 
   /**
-   * Dock 一个进程最多开 {@link MAX_PAGES} 页。满了就关掉最久没看的一页腾位置：
-   * 只挑有对话（关掉不丢，下次点开再连）、没在跑、没在等你、没在看的；
-   * 从没看过的（别处开的、GUI 重载前开的）排最前。
-   * 挑不出来就照开，让 Dock 报「最多 9 页」。
+   * 闲着的后台页超过 {@link IDLE_PAGES_KEPT} 张时，关掉最久没看的（开页之后在后台做，不挡开页；
+   * 开页本身不设上限）。关掉不丢：记录在盘上，下次点开再连。只挑有对话、没在跑、没在等你、
+   * 没在看、没有子代理在跑、没开侧边聊天、目标没在进行的；从没看过的（别处开的、GUI 重载前
+   * 开的）排最前。
    */
-  private async makeRoom() {
-    const open = this.wire.filter((t) => t.open);
-    if (open.length < MAX_PAGES) return;
-    const candidates = open
-      .filter(
-        (t) =>
-          t.alias !== "live" &&
-          !this.viewing.has(t.id) &&
-          !this.opening.has(t.id) &&
-          // 关主会话会连它的侧边聊天一起关掉。
-          !this.app.asides.has(t.id) &&
-          // 网关给还没说过话的页标题「当前会话」；GUI 重载后没拉过记录也认得出。
-          t.title !== "当前会话",
-      )
-      .sort((a, b) => (this.seenAt.get(a.id) ?? 0) - (this.seenAt.get(b.id) ?? 0));
-    for (const t of candidates) {
-      // 没拉过记录的（GUI 重载前开的、别处开的）不知道在不在跑：先拉一次再判断，
-      // 关掉正在跑的页会把那一轮停掉。
-      if (!this.threads.has(t.id)) await this.load(t.id);
-      if (isRunning(this.getThread(t.id)) || this.app.waiting.has(t.id)) continue;
-      await this.closePage(t.id);
-      return;
+  private trimming = false;
+  private async trimIdlePages() {
+    if (this.trimming) return;
+    this.trimming = true;
+    try {
+      const idle = this.wire
+        .filter(
+          (t) =>
+            t.open &&
+            t.alias !== "live" &&
+            !this.viewing.has(t.id) &&
+            !this.opening.has(t.id) &&
+            // 关主会话会连它的侧边聊天一起关掉。
+            !this.app.asides.has(t.id) &&
+            // 子代理只活在这一页的内存里：关页会把它们停掉。
+            !t.subagentsRunning &&
+            // 网关给还没说过话的页标题「当前会话」：空会话关掉不落盘，等于删了。
+            t.title !== "当前会话",
+        )
+        .sort((a, b) => (this.seenAt.get(a.id) ?? 0) - (this.seenAt.get(b.id) ?? 0));
+      let extra = idle.length - IDLE_PAGES_KEPT;
+      for (const t of idle) {
+        if (extra <= 0) break;
+        // 没拉过记录的（GUI 重载前开的、别处开的）不知道在不在跑：先拉一次再判断，
+        // 关掉正在跑的页会把那一轮停掉。
+        if (!this.threads.has(t.id)) await this.load(t.id);
+        if (this.viewing.has(t.id) || isRunning(this.getThread(t.id)) || this.app.waiting.has(t.id)) continue;
+        if (this.getEnv(t.id).goal?.status === "active") continue;
+        await this.closePage(t.id);
+        extra -= 1;
+      }
+    } catch {
+      // 只是收内存：失败了下次开页再试。
+    } finally {
+      this.trimming = false;
     }
   }
 

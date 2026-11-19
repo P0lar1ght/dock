@@ -97,7 +97,9 @@
 - 「刚完成」只记实时推来的结束；`store.focus` 标记正在看的会话。
 - 排队消息没有推送：一轮开始 / 结束时重拉 turn/queue/list。
 - 删会话：开着的先 thread/close；空会话关掉即删（不落盘），不再调 delete。
-- 点开会话即开页；Dock 最多 9 页，满了 store.makeRoom 关最久没看的（别关在跑的）。
+- 点开会话即开页；开页不设上限（Dock 只限终端自己的 Ctrl+N）。
+- 闲着的后台页超过 IDLE_PAGES_KEPT 张，开页后在后台关最久没看的（store.trimIdlePages）。
+- 别关在跑 / 在等 / 在看 / 有子代理在跑 / 开着侧边聊天 / 目标进行中 / 空会话的页。
 - 项目在 Dock 里不是实体：侧栏 + 建的空项目只存 GUI 的 localStorage。
 - 原生选文件夹面板是系统进程画的：cua 拿不到树，后台发不进键。
 - 拖到窗口外别靠 WebView 的 pointer 事件：交给 Rust pop_out_drag 问系统鼠标状态。
