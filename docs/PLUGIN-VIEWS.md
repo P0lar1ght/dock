@@ -184,7 +184,7 @@ host.register_slot(#{ id: "trajectory", title: "会话轨迹", render: || { "在
 | 调用 | 回 |
 |---|---|
 | `dock.call("threads.list")` | `thread/list { scope: "all" }` 的结果 |
-| `dock.call("threads.history", { threadId })` | `thread/history` 的结果（完整事件流，`events[].timestamp` 毫秒） |
+| `dock.call("threads.history", { threadId })` | `thread/history` 的结果（完整事件流，`events[].timestamp` 毫秒；连着的增量并过，见下） |
 | `dock.call("threads.watch", { threadId })` | `{ live }`；之后这个会话的实时事件经 `dock.on("event", fn)` 推来 |
 | `dock.call("panel.action", { action })` | 本面板的 `surface/action`，`{ closed }` |
 
@@ -193,6 +193,7 @@ host.register_slot(#{ id: "trajectory", title: "会话轨迹", render: || { "在
 - 实时事件攒约 32ms 一批送进页面，仍逐条派给 `dock.on("event", fn)`。
 - 流式时一秒上百条：别每条都重画。页面和 GUI 同一条主线程，重画慢了 GUI 也跟着卡。
 - 攒一下再画、只换变了的那块（示例：记录表 200ms 一次、只换变了的轮次）。
+- 历史里连着的流式增量是并过的（一条带好几个 `seq` 的正文）：按「不大于见过的最大 `seq` 就丢」去重。
 - 设计 token 以 CSS 变量注入（`--dock-ink`、`--dock-accent`、`--dock-font`、`--dock-mono`…），和 GUI 同一套。
 
 示例：`examples/plugins/trajectory/`（会话轨迹）。

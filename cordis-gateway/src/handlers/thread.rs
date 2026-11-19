@@ -17,7 +17,7 @@ use cordis_spine::{
 use crate::handle::GatewayHandle;
 use crate::protocol::{self, RpcError, LIVE_THREAD_ID};
 use crate::threads::{self, Page};
-use crate::transcript::Transcript;
+use crate::transcript::{compact_stream_deltas, Transcript};
 
 /// 订阅：分页身份 → 客户端订阅时用的 `threadId`（第 1 页可以按 `live` 也可以按
 /// 会话 id 订，推送时用它订的那个）。
@@ -415,8 +415,8 @@ pub fn history(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError
     let id = threads::thread_param(&params);
     if let Ok(page) = threads::resolve(gateway, &id) {
         let sessions = page.sessions()?;
-        let events: Vec<Value> = gateway
-            .history_since(&page.identity, 0)
+        // 开着的页投影里是一个 token 一条增量：并起来再给（见 `compact_stream_deltas`）。
+        let events: Vec<Value> = compact_stream_deltas(gateway.history_since(&page.identity, 0))
             .into_iter()
             .map(|e| e.as_history_item_as(&id))
             .collect();

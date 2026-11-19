@@ -123,7 +123,7 @@
   const OVERVIEW_MS = 1000;
 
   const state = {
-    threadId: null, follow: true, seen: new Set(), live: false,
+    threadId: null, follow: true, maxSeq: 0, live: false,
     // builder：事件流增量折成轮次（见 createBuilder）；loading：拉历史期间推来的事件。
     builder: null, turns: [], loading: null,
     closed: new Set(), allClosed: false, selected: null, tab: null,
@@ -389,7 +389,7 @@
     clearTimeout(state.poll);
     const h = await dock.call("threads.history", { threadId });
     if (token !== openSeq) return;
-    state.builder = createBuilder(); state.turns = state.builder.turns; state.seen = new Set();
+    state.builder = createBuilder(); state.turns = state.builder.turns; state.maxSeq = 0;
     const early = state.loading; state.loading = null;
     for (const it of h.events || []) addEvent(it.method, historyParams(it));
     for (const e of early) addEvent(e.method, e.params);
@@ -423,14 +423,19 @@
     if (id === state.threadId) schedulePoll(performance.now() - t0);
   }
 
-  // 喂一条事件；按序号去重（历史和推送会重叠）。「只推不记」的事件没有序号，
-  // 由 builder 按 id 覆盖同一条。返回有没有喂进去。
+  // 喂一条事件；按序号去重（历史和推送会重叠）：不大于见过的最大序号就是见过的。
+  // 历史里连着的增量是并过的（一条带着好几个序号的正文），只能这么比，不能按序号查集合。
+  // 「只推不记」的事件没有序号，由 builder 按 id 覆盖同一条。返回有没有喂进去。
   function addEvent(method, params) {
     if (state.loading) { state.loading.push({ method, params }); return false; }
     if (!state.builder) return false;
     const seq = Number(params.seq ?? params.transcriptSeq ?? 0);
-    const key = seq ? `${params.turnId}|${seq}` : null;
-    if (key) { if (state.seen.has(key)) return false; state.seen.add(key); }
+    if (seq && seq <= state.maxSeq) {
+      // 没见过的一轮、序号却不大：页被重开过（序号从头编），整份重拉。
+      if (method === "turn/started" && !state.builder.byId.has(params.turnId)) open(state.threadId);
+      return false;
+    }
+    if (seq) state.maxSeq = seq;
     state.builder.feed({ method, params, turnId: params.turnId || "", at: Number(params.timestamp) || Date.now() });
     return true;
   }
