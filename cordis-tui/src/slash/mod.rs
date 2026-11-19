@@ -41,6 +41,7 @@ pub enum SlashCmd {
     Timestamps,
     Thinking,
     Effort,
+    Sandbox,
     Plan,
     ViewPlan,
     Goal,
@@ -78,6 +79,7 @@ pub enum ArgKind {
     Effort,
     LoopInterval,
     Lsp,
+    Sandbox,
 }
 
 pub struct SlashDef {
@@ -447,6 +449,16 @@ pub const CATALOG: &[SlashDef] = &[
         takes_args: true,
         args_required: true,
         arg_kind: Some(ArgKind::Effort),
+    },
+    SlashDef {
+        cmd: SlashCmd::Sandbox,
+        name: "sandbox",
+        aliases: &[],
+        display: "/sandbox",
+        description: "开关这一页的命令沙箱（/sandbox on|off|status）",
+        takes_args: true,
+        args_required: false,
+        arg_kind: Some(ArgKind::Sandbox),
     },
     SlashDef {
         cmd: SlashCmd::Export,
@@ -856,6 +868,14 @@ pub fn lsp_args() -> Vec<ArgItem> {
     ]
 }
 
+pub fn sandbox_args() -> Vec<ArgItem> {
+    vec![
+        ArgItem::new("on", "这一页的命令在沙箱里跑"),
+        ArgItem::new("off", "关掉这一页的沙箱"),
+        ArgItem::new("status", "只看现状、边界与限制"),
+    ]
+}
+
 pub fn args_for(kind: ArgKind, settings: Option<&AppSettings>) -> Vec<ArgItem> {
     match kind {
         ArgKind::Tab => tab_args(),
@@ -866,6 +886,7 @@ pub fn args_for(kind: ArgKind, settings: Option<&AppSettings>) -> Vec<ArgItem> {
         ArgKind::Effort => effort_args(settings),
         ArgKind::LoopInterval => loop_interval_args(),
         ArgKind::Lsp => lsp_args(),
+        ArgKind::Sandbox => sandbox_args(),
     }
 }
 
@@ -1090,6 +1111,7 @@ mod tests {
             cordis_spine::slash(),
             cordis_spine::session_commands(),
             cordis_spine::settings_commands(),
+            cordis_spine::sandbox_plugin(),
             cordis_spine::goal_command(),
             cordis_spine::plan_commands(),
             cordis_spine::loop_command(),

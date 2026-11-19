@@ -70,6 +70,9 @@ pub struct AppSettings {
     thinking: Mutex<bool>,
     timestamps: Mutex<bool>,
     permission_mode: Mutex<PermissionMode>,
+    /// 这一页的 bash / monitor 在不在系统沙箱里跑（`dock-sandbox`）。默认关；`sandbox`
+    /// 插件挂载时按 `[sandbox] enabled` 给第 1 页播种，新开的页抄开它的那一页。
+    sandbox: Mutex<bool>,
     mermaid_engine: Mutex<MermaidEngineKind>,
 }
 
@@ -85,6 +88,7 @@ impl AppSettings {
             thinking: Mutex::new(self.thinking()),
             timestamps: Mutex::new(self.timestamps()),
             permission_mode: Mutex::new(self.permission_mode()),
+            sandbox: Mutex::new(self.sandbox()),
             mermaid_engine: Mutex::new(self.mermaid_engine()),
         }
     }
@@ -98,6 +102,7 @@ impl AppSettings {
             thinking: Mutex::new(true),
             timestamps: Mutex::new(true),
             permission_mode: Mutex::new(PermissionMode::Ask),
+            sandbox: Mutex::new(false),
             mermaid_engine: Mutex::new(MermaidEngineKind::Pure),
         };
         settings.seed_from_model(&model);
@@ -224,6 +229,14 @@ impl AppSettings {
 
     pub fn set_permission_mode(&self, mode: PermissionMode) {
         *self.permission_mode.lock().unwrap() = mode;
+    }
+
+    pub fn sandbox(&self) -> bool {
+        *self.sandbox.lock().unwrap()
+    }
+
+    pub fn set_sandbox(&self, on: bool) {
+        *self.sandbox.lock().unwrap() = on;
     }
 
     /// 设置面板里循环：询问 → 智能授权 → 始终允许 → 询问。Shift+Tab 那一圈

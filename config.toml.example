@@ -238,3 +238,15 @@ prompt_cache = true
 # base = "https://api.openai.com/v1"
 # dimensions = 1024
 # api_key = ""   # or DOCK_MEMORY_EMBEDDING_API_KEY / OPENAI_API_KEY
+
+
+# 命令沙箱（默认关）：bash / monitor 在系统沙箱里跑，不弹权限框。见 docs/SANDBOX.md。
+# 只认这份用户级配置（$DOCK_HOME/config.toml）；项目 .dock/config.toml 里写了也不算。
+# 改了不用重启：每次跑命令现读。/sandbox 按页开关。
+# [sandbox]
+# enabled = false          # 新开的页默认开不开
+# network = true           # 沙箱里的命令能不能联网
+# build_caches = true      # ~/.cargo/registry、~/.npm、~/.cache 等依赖缓存可不可写
+# writable_roots = []      # 额外可写：绝对路径或 ~/ 开头，如 ["~/build"]
+# deny_read = []           # 额外读不到：如 ["~/.npmrc", "~/work/secrets"]
+# keep_env = []            # 默认会去掉的环境变量里要留下的，如 ["OPENAI_API_KEY"]

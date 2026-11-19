@@ -19,6 +19,7 @@ pub mod mcp_app_context;
 pub mod mcp_app_views;
 pub mod permissions;
 pub mod plugin_settings;
+pub mod sandbox;
 pub mod session_port;
 pub mod settings;
 pub mod settings_commands;

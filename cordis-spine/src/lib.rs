@@ -85,6 +85,7 @@ pub use host::mcp_app_views::{
 };
 pub use host::permissions::{permissions, Decision, PermissionPrompt, Permissions, RunApproval};
 pub use host::plugin_settings::{plugin_settings, FieldErrors, PluginSettings};
+pub use host::sandbox::sandbox as sandbox_plugin;
 pub use host::session_port::{QueuedItem, SessionPort, SessionRef};
 pub use host::settings::{settings, AppSettings, MermaidEngineKind, ModelOverride, PermissionMode};
 pub use host::settings_commands::settings_commands;

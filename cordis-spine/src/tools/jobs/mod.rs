@@ -15,6 +15,7 @@ use cordis::{plugin, Inject, Plugin};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::agent::turn::TurnControl;
+use crate::host::sandbox::SandboxRun;
 use crate::names::{JOBS, JOB_FINISHED, JOB_REPORTED, SESSIONS, TOOLS, TURN};
 use crate::session::log::Sessions;
 use crate::tools::bash::STEER_GRACE;
@@ -487,7 +488,7 @@ impl Jobs {
         description: Option<String>,
         is_monitor: bool,
     ) -> String {
-        self.spawn_job(command, description, is_monitor, false, None)
+        self.spawn_job(command, description, is_monitor, false, None, None)
     }
 
     /// `start_ex` 加一个工作目录。`bash` 的 `workdir` 参数走这里——让模型传
@@ -500,13 +501,13 @@ impl Jobs {
         is_monitor: bool,
         cwd: Option<PathBuf>,
     ) -> String {
-        self.spawn_job(command, description, is_monitor, false, cwd)
+        self.spawn_job(command, description, is_monitor, false, cwd, None)
     }
 
     /// Register a **foreground** bash so the TUI can show its output while it
     /// runs. The caller owns the lifetime: wait on the snapshot, then `forget`.
     pub fn start_foreground(&self, command: impl Into<String>) -> String {
-        self.spawn_job(command, None, false, true, None)
+        self.spawn_job(command, None, false, true, None, None)
     }
 
     /// `start_foreground` 加描述与工作目录。
@@ -516,7 +517,29 @@ impl Jobs {
         description: Option<String>,
         cwd: Option<PathBuf>,
     ) -> String {
-        self.spawn_job(command, description, false, true, cwd)
+        self.spawn_job(command, description, false, true, cwd, None)
+    }
+
+    /// 同 [`Self::start_foreground_ex`]（`foreground`）/ [`Self::start_ex_in`]，但命令按
+    /// `sandbox` 包好的样子在系统沙箱里跑（见 `host::sandbox`）。跑完还会把受保护路径的
+    /// 比对结果、以及「像是被沙箱拦了」的提示接在输出后面。
+    pub fn start_sandboxed(
+        &self,
+        command: impl Into<String>,
+        description: Option<String>,
+        is_monitor: bool,
+        foreground: bool,
+        cwd: Option<PathBuf>,
+        sandbox: SandboxRun,
+    ) -> String {
+        self.spawn_job(
+            command,
+            description,
+            is_monitor,
+            foreground,
+            cwd,
+            Some(sandbox),
+        )
     }
 
     /// Drop a finished foreground command from the table so it stops holding
@@ -556,6 +579,7 @@ impl Jobs {
         is_monitor: bool,
         foreground: bool,
         cwd: Option<PathBuf>,
+        sandbox: Option<SandboxRun>,
     ) -> String {
         let command = command.into();
         let id = format!("job-{}", self.seq.fetch_add(1, Ordering::Relaxed));
@@ -583,7 +607,9 @@ impl Jobs {
         };
         // 调用页开着审计：记下这条命令，给它开出口代理口（没开就是 None、什么都不做）。
         let audit = crate::host::audit::for_command(&id, &command, is_monitor, cwd.as_deref());
-        tokio::spawn(run_job(job, command, cancel_rx, cwd, finished, audit));
+        tokio::spawn(run_job(
+            job, command, cancel_rx, cwd, sandbox, finished, audit,
+        ));
         id
     }
 
@@ -804,17 +830,42 @@ async fn run_job(
     command: String,
     mut cancel: tokio::sync::watch::Receiver<bool>,
     cwd: Option<PathBuf>,
+    sandbox: Option<SandboxRun>,
     finished: Finisher,
     audit: Option<crate::host::audit::CommandAudit>,
 ) {
-    let mut builder = tokio::process::Command::new("bash");
+    // 先补上审计的 `export`（写在命令前面，profile 盖不掉），再按沙箱策略包：沙箱规则要看
+    // 最终的命令。包不上就是起不来，命令不会退回沙箱外去跑。
     let run = match &audit {
         Some(audit) => audit.wrap(&command),
         None => command,
     };
+    let (mut builder, guard, network) = match sandbox {
+        Some(sandboxed) => match sandboxed.prepare(&run) {
+            Ok(prepared) => {
+                let (cmd, guard) = prepared.into_command();
+                (
+                    tokio::process::Command::from(cmd),
+                    Some(guard),
+                    Some(sandboxed.network),
+                )
+            }
+            Err(e) => {
+                job.output.lock().unwrap().push(e.as_bytes());
+                if let Some(audit) = audit {
+                    audit.finish(None);
+                }
+                finished.settle(&job, JobEnd::SpawnFailed);
+                return;
+            }
+        },
+        None => {
+            let mut cmd = tokio::process::Command::new("bash");
+            cmd.arg("-lc").arg(&run);
+            (cmd, None, None)
+        }
+    };
     builder
-        .arg("-lc")
-        .arg(&run)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
@@ -870,6 +921,30 @@ async fn run_job(
     if let Some(st) = status {
         if !st.success() && !killed {
             *job.exit_note.lock().unwrap() = Some(format!("exit {st}"));
+        }
+    }
+    if let Some(network) = network {
+        // Landlock 挡不住可写目录里的 `.git/hooks` 这些，跑完在这里比对还原。
+        if let Some(note) = guard
+            .flatten()
+            .and_then(|g| crate::host::sandbox::guard_note(&g.restore()))
+        {
+            job.output
+                .lock()
+                .unwrap()
+                .push(format!("\n{note}\n").as_bytes());
+        }
+        let failed = status.is_some_and(|st| !st.success());
+        if failed && !killed {
+            let text = job.output.lock().unwrap().render();
+            let code = status.and_then(|st| st.code());
+            if dock_sandbox::looks_like_denial(code, &text, !network) {
+                let hint = crate::host::sandbox::denial_hint(network);
+                job.output
+                    .lock()
+                    .unwrap()
+                    .push(format!("\n{hint}\n").as_bytes());
+            }
         }
     }
     if job.output.lock().unwrap().total == 0 && job.exit_note.lock().unwrap().is_none() {

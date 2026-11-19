@@ -1,0 +1,17 @@
+[package]
+name = "dock-sandbox"
+version.workspace = true
+edition = "2021"
+rust-version.workspace = true
+description = "Dock per-command OS sandbox: policy, Seatbelt (macOS) and Landlock + seccomp (Linux) backends"
+license = "Apache-2.0"
+
+[dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = "0.4.7"
+seccompiler = "0.5.0"
+
+[dev-dependencies]
+tempfile = "3"

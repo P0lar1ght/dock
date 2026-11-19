@@ -132,6 +132,23 @@ dock 的权限门 / 计划门 / preset allowlist **全是 tool-level 的**：`ac
 
 「取消带回已产出输出」不变。
 
+**沙箱**（见 [SANDBOX.md](../SANDBOX.md)）：
+这一页开了 `/sandbox` 时，命令在系统沙箱里跑、不弹权限框。
+参数 `sandbox`：不传就是在沙箱里跑；
+传 `false` 是要出沙箱，照常过权限门（弹框写明「不进沙箱运行」）。
+沙箱没开时这个参数不起作用。
+
+- 关卡（`host::sandbox::gate`）判「沙箱里跑」后，经任务局部变量把档位交给工具体。
+  工具体**一定**在沙箱里跑它，包不上就报
+  `Error: 沙箱包不上这条命令，没有运行：…`，不退回沙箱外。
+- 只读场景（计划模式、只读子代理、`/btw`）用只读沙箱，替代只读命令分类。
+- 命令失败且输出像被沙箱拦了（`dock_sandbox::looks_like_denial`），
+  结果末尾接一句 `[沙箱] …`，告诉模型可以带 `"sandbox": false` 重跑。
+- Linux 上命令改了 `.git/hooks` 等，跑完会被还原，结果里也有一句 `[沙箱]`。
+
+沙箱开着时 `write_file` / `search_replace` 写在沙箱可写范围内不弹框；
+`read_file` / `grep` / `glob` / `list_dir` 的目标在拒读名单里（`~/.ssh` 等）要先问。
+
 ### `read_file` / `write_file`
 
 `read_file` 按 Grok 顺序分流：字节读入 → 图片（magic / 扩展名，压缩进 `ToolResult.images`）→ PDF（`pdf_oxide` + `rendering` 在 spine；**默认 `format=image`** 按页渲 JPEG→`UserImage`，与 Grok 一致；`format=text` 抽文本；`pages` 超 10 页必填，每呼最多 20 页，对齐 `MAX_TOOL_IMAGES=20`，50MB / 60s，DPI 150 / JPEG q85）→ PPTX（DrawingML，`--- Slide N ---` + notes）→ binary gate（对齐 Grok `BINARY_EXTENSIONS`，docx 等拒绝；pdf/pptx/已识别图片豁免）→ 文本分页。技能 markdown（`**/SKILL.md` 与 `skills/` 路径下的 Markdown）以及工程指令文件（`AGENTS.md` / `CLAUDE.md` 等）在 **token 上限**（25k，非字节）内整读，显式 `offset`/`limit` 仍走窗口。

@@ -11,6 +11,7 @@ use crate::agent::runtime::BoxFuture;
 use crate::agent::turn::TurnControl;
 use crate::host::approval;
 use crate::host::permissions::{Decision, Permissions};
+use crate::host::sandbox::Gate as SandboxGate;
 use crate::host::settings::PermissionMode;
 use crate::names::{
     AGENT_PRESETS, CAPABILITY, CRON, JOBS, PERMISSIONS, PLAN_MODE, SESSIONS, TOOLS, TOOLS_EXECUTE,
@@ -538,12 +539,26 @@ impl Tools {
             arguments: pre.arguments().to_string(),
         };
 
+        // 这一页开了沙箱时它对这次调用的意见（见 `host::sandbox`）。判成「沙箱里跑」的，
+        // 下面的只读关卡、计划门、权限门都不再拦，执行时经 `with_access` 交给工具体，
+        // 工具体一定在沙箱里跑它。
+        let sandbox_gate = if self.workspace {
+            crate::host::sandbox::gate(exec, &call.name, &call.arguments)
+        } else {
+            SandboxGate::Default
+        };
+        let sandbox_access = match sandbox_gate {
+            SandboxGate::Sandboxed(access) => Some(access),
+            _ => None,
+        };
+
         if self.workspace {
             // 只读场景里的 bash 自己把关（见 `tools::read_only`）：只读命令直接跑，别的
             // 一律问用户、自动批准也不算。过了这一关就不再走下面的计划门和普通权限门。
-            let bash_cleared = if call.name == "bash"
-                && crate::tools::read_only::in_read_only_scene(exec)
-            {
+            // 沙箱判「沙箱里跑」时（只读场景的命令改在只读沙箱里跑），不用这道关。
+            let bash_cleared = if sandbox_access.is_some() {
+                true
+            } else if call.name == "bash" && crate::tools::read_only::in_read_only_scene(exec) {
                 let command = crate::tools::read_only::bash_command(&call.arguments);
                 let decision = if plugin_cleared
                     || cordis_base::read_only_shell::is_read_only_command(&command)
@@ -616,10 +631,13 @@ impl Tools {
                         &plan_expected,
                     )
             });
-            if acp::needs_permission(&call.name)
+            let needs_permission =
+                acp::needs_permission(&call.name) || sandbox_gate == SandboxGate::Ask;
+            if needs_permission
                 && !plan_file_edit
                 && !bash_cleared
                 && !plugin_cleared
+                && sandbox_gate != SandboxGate::SkipPrompt
             {
                 if let Some(perms) = exec.get::<Permissions>(PERMISSIONS) {
                     let (key, summary) = permission_request(exec, &call.name, &call.arguments);
@@ -663,10 +681,13 @@ impl Tools {
             return EXEC_CTX
                 .scope(
                     exec.clone(),
-                    CALL_ID.scope(id, async move {
-                        let result = body(call).await;
-                        finish(&exec, &hook_args, result)
-                    }),
+                    CALL_ID.scope(
+                        id,
+                        crate::host::sandbox::with_access(sandbox_access, async move {
+                            let result = body(call).await;
+                            finish(&exec, &hook_args, result)
+                        }),
+                    ),
                 )
                 .await;
         }
@@ -679,7 +700,7 @@ impl Tools {
                 ..Default::default()
             }
         } else {
-            self.dispatch_local(exec, call).await
+            crate::host::sandbox::with_access(sandbox_access, self.dispatch_local(exec, call)).await
         };
         finish(exec, &hook_args, result)
     }
@@ -936,6 +957,10 @@ fn command_summary(arguments: &str) -> Option<String> {
     {
         out.push('\n');
         out.push_str(&desc);
+    }
+    // 模型要它出沙箱跑：批准的是「不受沙箱约束地跑这条」，弹窗里要说清楚。
+    if crate::host::sandbox::escapes(&v) {
+        out.push_str("\n（不进沙箱运行）");
     }
     Some(out)
 }

@@ -67,3 +67,6 @@
 - **模型工具**：`monitor`（按需）
 
 长命令 stdout 盯梢。按需由预设 `on_demand_tools` 决定
+
+沙箱开着时和 `bash` 一样在沙箱里跑，也认 `"sandbox": false`（见 [SANDBOX.md](../SANDBOX.md)）。
+沙箱里的命令经 `Jobs::start_sandboxed` 起，跑完由它比对受保护路径、接上拦截提示。

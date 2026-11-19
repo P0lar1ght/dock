@@ -12,6 +12,7 @@ use crate::host::mcp_app_context::mcp_app_context;
 use crate::host::mcp_app_views::mcp_app_views;
 use crate::host::permissions::permissions;
 use crate::host::plugin_settings::plugin_settings;
+use crate::host::sandbox::sandbox;
 use crate::host::settings::settings;
 use crate::host::settings_commands::settings_commands;
 use crate::host::slash::slash;
@@ -136,6 +137,8 @@ pub async fn install_app(ctx: &Context) -> Result<()> {
     // 所以这里不必等功能服务先挂好。
     ctx.plugin(session_commands(), ())?.wait().await?;
     ctx.plugin(settings_commands(), ())?.wait().await?;
+    // 命令沙箱：按 `[sandbox] enabled` 给第 1 页播种开关，挂 `/sandbox`。
+    ctx.plugin(sandbox(), ())?.wait().await?;
     ctx.plugin(skills(), ())?.wait().await?;
     ctx.plugin(project_instructions(), ())?.wait().await?;
     // 用户在文件面板里改的文件：下一步提醒 agent（网关写盘后记一条）。

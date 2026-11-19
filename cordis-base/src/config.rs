@@ -1329,6 +1329,124 @@ pub fn load_web_fetch_config() -> WebFetchToolConfig {
     load_web_fetch_config_from(&catalog_paths())
 }
 
+/// `[sandbox]`：bash / monitor 的命令在系统沙箱里跑（`dock-sandbox`）。
+///
+/// **只认用户级** `$DOCK_HOME/config.toml`：项目里的 `.dock/config.toml` 是仓库作者写的，
+/// 不能替用户关掉或放宽沙箱。单独解析这一段：这里写错不连累整份配置（`FileConfig` 一处
+/// 类型不对整份文件都会被丢掉），反过来别的段写错也不让沙箱配置失效。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SandboxConfig {
+    /// 新开的页默认开不开（`/sandbox` 可以按页临时切）。
+    pub enabled: bool,
+    /// 沙箱里的命令能不能联网。
+    pub network: bool,
+    /// 依赖缓存（`~/.cargo/registry`、`~/.npm`、`~/.cache`…）可不可写。
+    pub build_caches: bool,
+    /// 额外可写的目录：绝对路径或 `~/` 开头。
+    pub writable_roots: Vec<String>,
+    /// 额外读不到的路径：绝对路径或 `~/` 开头。
+    pub deny_read: Vec<String>,
+    /// 默认会从命令环境里去掉的变量（名字带 KEY / TOKEN / SECRET / PASSWORD…）里要留下的。
+    pub keep_env: Vec<String>,
+}
+
+impl Default for SandboxConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            network: true,
+            build_caches: true,
+            writable_roots: Vec::new(),
+            deny_read: Vec::new(),
+            keep_env: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct SandboxFile {
+    #[serde(default)]
+    sandbox: SandboxSection,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct SandboxSection {
+    enabled: Option<bool>,
+    network: Option<bool>,
+    build_caches: Option<bool>,
+    writable_roots: Option<Vec<String>>,
+    deny_read: Option<Vec<String>>,
+    keep_env: Option<Vec<String>>,
+}
+
+/// Live-read `[sandbox]` from `$DOCK_HOME/config.toml` only.
+pub fn load_sandbox_config() -> SandboxConfig {
+    load_sandbox_config_from(&dock_home().join("config.toml"))
+}
+
+pub fn load_sandbox_config_from(path: &Path) -> SandboxConfig {
+    let section = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| toml::from_str::<SandboxFile>(&raw).ok())
+        .map(|f| f.sandbox)
+        .unwrap_or_default();
+    let d = SandboxConfig::default();
+    SandboxConfig {
+        enabled: section.enabled.unwrap_or(d.enabled),
+        network: section.network.unwrap_or(d.network),
+        build_caches: section.build_caches.unwrap_or(d.build_caches),
+        writable_roots: section.writable_roots.unwrap_or_default(),
+        deny_read: section.deny_read.unwrap_or_default(),
+        keep_env: section.keep_env.unwrap_or_default(),
+    }
+}
+
+#[cfg(test)]
+mod sandbox_config_tests {
+    use super::*;
+
+    #[test]
+    fn missing_file_or_section_gives_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            load_sandbox_config_from(&dir.path().join("none.toml")),
+            SandboxConfig::default()
+        );
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[models]\ndefault = \"x\"\n").unwrap();
+        assert_eq!(load_sandbox_config_from(&path), SandboxConfig::default());
+    }
+
+    #[test]
+    fn section_overrides_fields_it_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[sandbox]\nenabled = true\nnetwork = false\nwritable_roots = [\"~/build\"]\n",
+        )
+        .unwrap();
+        let cfg = load_sandbox_config_from(&path);
+        assert!(cfg.enabled);
+        assert!(!cfg.network);
+        assert!(cfg.build_caches);
+        assert_eq!(cfg.writable_roots, vec!["~/build".to_string()]);
+    }
+
+    /// 别的段写错了（整份 `FileConfig` 解析失败）不连累沙箱配置。
+    #[test]
+    fn a_broken_other_section_does_not_drop_the_sandbox() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[sandbox]\nenabled = true\n[memory]\nenabled = \"yes\"\n",
+        )
+        .unwrap();
+        assert!(load_sandbox_config_from(&path).enabled);
+    }
+}
+
 /// Live-read `[memory]`. Default off; `DOCK_MEMORY` overrides TOML.
 pub fn load_memory_config() -> MemoryConfig {
     load_memory_config_from(&catalog_paths())
