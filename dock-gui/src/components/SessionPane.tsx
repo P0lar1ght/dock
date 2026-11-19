@@ -3,9 +3,9 @@
 
 import { useEffect, useState, type ReactNode } from "react";
 import { AppWindow, Ellipsis, PanelBottom, SquareSplitHorizontal, X } from "lucide-react";
-import { isRunning, pendingItems } from "dock-core";
+import { isRunning } from "dock-core";
 import type { SessionSummary } from "../model";
-import { store, useApp, useEnv, useSubagents, useThread } from "../dock/store";
+import { firstPending, runningSince, store, useApp, useEnv, useSubagents, useThread, useThreadSelector } from "../dock/store";
 import { Composer } from "./Composer";
 import { GoalBar } from "./GoalBar";
 import { ConnectionBanner } from "./ConnectionBanner";
@@ -45,19 +45,21 @@ export interface SessionPaneProps {
   showConnection?: boolean;
 }
 
-/** 自己订阅当前会话（store 的 `useThread` / `useEnv`）：流式增量只让这里重渲染。 */
+/**
+ * 会话区。整个会话（`useThread`）只有对话流订阅（`SessionTranscript`）：流式增量只让对话流
+ * 重渲染；头栏、输入框、交互卡只订阅派生出来的「在不在跑 / 等什么」，翻转时才重画。
+ */
 export function SessionPane(props: SessionPaneProps) {
   const { session } = props;
   const id = session?.id ?? null;
-  const thread = useThread(id);
   const env = useEnv(id);
   const app = useApp();
   const stopping = app.stopping.has(id ?? "");
-  const running = isRunning(thread);
+  const running = useThreadSelector(id, isRunning);
   const subagents = useSubagents(session?.id ?? null);
   const subagentsRunning = subagents.order.filter((id) => subagents.byId[id].info.status === "running").length;
-  const startedAt = running ? thread.turns[thread.turns.length - 1].startedAt : null;
-  const pending = pendingItems(thread)[0];
+  const startedAt = useThreadSelector(id, runningSince);
+  const pending = useThreadSelector(id, firstPending);
   const PresetIcon = presetIcon(session?.presetId);
   const [renaming, setRenaming] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -168,9 +170,8 @@ export function SessionPane(props: SessionPaneProps) {
       {props.showConnection !== false && <ConnectionBanner app={app} onRestart={store.restartDock} />}
 
       {session ? (
-        <Transcript
-          thread={thread}
-          sessionKey={session.id}
+        <SessionTranscript
+          id={session.id}
           loading={app.loadingIds.has(session.id)}
           onRetry={running ? undefined : (text) => store.send(session.id, text)}
         />
@@ -247,6 +248,12 @@ export function SessionPane(props: SessionPaneProps) {
       )}
     </section>
   );
+}
+
+/** 对话流自己订阅整个会话：流式增量只让它重渲染。 */
+function SessionTranscript({ id, loading, onRetry }: { id: string; loading: boolean; onRetry?: (text: string) => void }) {
+  const thread = useThread(id);
+  return <Transcript thread={thread} sessionKey={id} loading={loading} onRetry={onRetry} />;
 }
 
 /** 运行中：脉冲点 + 用时（每秒刷新）。设计：SessionHeaderRunning。 */

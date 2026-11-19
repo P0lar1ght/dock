@@ -3,7 +3,7 @@
 // 独立窗（`?session` / `?panel`）只连自己那一台，不把每条远程都打开。
 
 import { listen } from "@tauri-apps/api/event";
-import { useSyncExternalStore } from "react";
+import { useRef, useSyncExternalStore } from "react";
 import { bindForegroundClient, DockClient } from "./client";
 import { gatewayClose, gatewayFocus, gatewayOpen, remoteList, type Remote } from "./remote";
 import {
@@ -343,6 +343,41 @@ export function useApp(): AppState {
 export function useThread(id: string | null): ThreadState {
   const s = useForegroundStore();
   return useSyncExternalStore(s.subscribe, () => s.getThread(id));
+}
+
+/**
+ * 只订阅会话里派生出来的一小块（面板要的「最近一次浏览器动作」「改过的文件」）：
+ * `select` 的结果按 `equal` 没变就沿用上一次的值、不重渲染——流式增量每个都换新的
+ * `ThreadState`，用 `useThread` 的面板会跟着每个增量重画一遍。
+ *
+ * `select` 要稳定（模块级函数，或 `useCallback`）；`equal` 要认得出两次算出来的是同一个
+ * 东西（数组用 `sameItems`，配合按条目缓存的派生）。
+ */
+export function useThreadSelector<T>(
+  id: string | null,
+  select: (thread: ThreadState) => T,
+  equal: (a: T, b: T) => boolean = Object.is,
+): T {
+  const s = useForegroundStore();
+  const last = useRef<{ store: DockStore; thread: ThreadState; select: (thread: ThreadState) => T; value: T } | null>(null);
+  const snapshot = () => {
+    const thread = s.getThread(id);
+    const prev = last.current?.store === s ? last.current : null;
+    if (prev && prev.thread === thread && prev.select === select) return prev.value;
+    const next = select(thread);
+    const value = prev && equal(prev.value, next) ? prev.value : next;
+    last.current = { store: s, thread, select, value };
+    return value;
+  };
+  return useSyncExternalStore(s.subscribe, snapshot);
+}
+
+/** 两个数组逐个是同一个引用（派生结果按条目缓存时，没变的条目还是原来那个对象）。 */
+export function sameItems<T>(a: readonly T[], b: readonly T[]): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
 }
 
 export function useSubagents(id: string | null): SubagentsState {

@@ -9,8 +9,8 @@
 
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { AlertCircle, ArrowUp, Check, Copy, CornerDownLeft, GitMerge, Loader2, MessageSquare, Shield, Square, X } from "lucide-react";
-import { isRunning, pendingItems } from "dock-core";
-import { store, useApp, useThread } from "../../dock/store";
+import { isRunning, pendingItems, type ThreadState } from "dock-core";
+import { store, useApp, useThread, useThreadSelector } from "../../dock/store";
 import { imeComposing } from "../../dock/ime";
 import { IconButton } from "../../components/chrome";
 import { Pending } from "../../components/Pending";
@@ -278,23 +278,23 @@ function Centered({ title, body = [], action }: { title: string; body?: string[]
  */
 function ParentBanner({ parentId }: { parentId: string }) {
   const app = useApp();
-  const parent = useThread(parentId);
-  const running = isRunning(parent);
+  // 只订阅主线「在跑 / 怎么停的」：主线流式时横幅不跟着每个增量重画。
+  const status = useThreadSelector(parentId, parentStatus);
+  const running = status === "running";
   const waiting = app.waiting.has(parentId);
   const [flash, setFlash] = useState<string | null>(null);
   const was = useRef(running);
   useEffect(() => {
     if (was.current && !running) {
-      const last = parent.turns[parent.turns.length - 1];
-      if (last && !last.steered && last.status !== "cancelled") {
-        setFlash(last.status === "failed" ? "主线出错了" : "主线已完成");
+      if (status === "failed" || status === "completed") {
+        setFlash(status === "failed" ? "主线出错了" : "主线已完成");
         const t = window.setTimeout(() => setFlash(null), 3000);
         was.current = running;
         return () => window.clearTimeout(t);
       }
     }
     was.current = running;
-  }, [running, parent]);
+  }, [running, status]);
   const text = waiting ? "主线在等你批准或回答" : flash;
   if (!text) return null;
   return (
@@ -495,4 +495,12 @@ function CloseConfirm({ onCancel, onConfirm }: { onCancel: () => void; onConfirm
       </div>
     </div>
   );
+}
+
+/** 主线在跑；停了的话是出错 / 跑完（被插话截开、自己停的不算）。 */
+function parentStatus(thread: ThreadState): "running" | "failed" | "completed" | "quiet" {
+  if (isRunning(thread)) return "running";
+  const last = thread.turns[thread.turns.length - 1];
+  if (!last || last.steered || last.status === "cancelled") return "quiet";
+  return last.status === "failed" ? "failed" : "completed";
 }

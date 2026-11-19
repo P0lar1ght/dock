@@ -10,7 +10,6 @@ import { ArrowLeft, ArrowUp, Bot, ChevronDown, CornerUpRight, Hand, X } from "lu
 import {
   currentActivity,
   elapsedMs,
-  pendingItems,
   taskPrompt,
   toolCallCount,
   type Subagent,
@@ -18,7 +17,7 @@ import {
   type Turn,
   type TurnItem,
 } from "dock-core";
-import { store, useEnv, useSubagents, useThread } from "../dock/store";
+import { firstPending, store, useEnv, useSubagents, useThreadSelector } from "../dock/store";
 import { ContextArc } from "./ContextRing";
 import { IconButton } from "./chrome";
 import { Markdown } from "./Markdown";
@@ -562,7 +561,7 @@ export function Composer({
  * 哪边点都行。单独拆出来：它订阅主会话的对话，流式增量只让这里重渲染。
  */
 function SubagentPending({ threadId, agentId, role }: { threadId: string; agentId: string; role: string | null }) {
-  const pending = pendingItems(useThread(threadId))[0];
+  const pending = useThreadSelector(threadId, firstPending);
   if (!pending || pending.kind !== "permission" || pending.agentId !== agentId) return null;
   return (
     <Pending

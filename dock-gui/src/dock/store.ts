@@ -2,6 +2,8 @@
 // - `useApp()`：连接、预设、会话树、谁在跑、谁在等用户。只在这些变了时重渲染。
 // - `useThread(id)`：一个会话的对话状态（dock-core 的 `ThreadState`）。流式增量
 //   只让正在看它的组件重渲染。
+// - `useThreadSelector(id, select, equal)`：只要对话里派生出的一小块（面板用）：
+//   结果没变就不重渲染，流式增量牵动不到。
 // - `useEnv(id)`：这个会话的审批 / 模型 / 推理。
 // - `useSubagents(id)`：这个会话派出的子代理（状态 + 各自的对话）。
 // - `useWorkflows(id)`：这个会话起的工作流 run（阶段、子代理行、结果）。
@@ -31,6 +33,7 @@ import {
   EMPTY_TURN_CHANGES,
   withHistory,
   type DockEvent,
+  type PendingItem,
   type SubagentApproval,
   type SubagentsState,
   type ThreadState,
@@ -677,7 +680,14 @@ export class DockStore {
     }
     const before = this.threads.get(id) ?? EMPTY_THREAD;
     const after = reduceThread(before, event);
-    if (after === before) return;
+    if (after === before) {
+      // 没见过的一轮、序号却不比已有的大：页在别处被关掉又重开过（投影重建、seq 从头编），
+      // 之后的推送都会被当成重复丢掉。整份重拉。
+      if (event.method === "turn/started" && event.seq && event.seq <= before.seq && !before.turns.some((t) => t.id === event.turnId)) {
+        void this.load(id).catch(this.fail);
+      }
+      return;
+    }
     this.threads.set(id, after);
     if (event.method === "turn/completed" && !event.steered && this.app.stopping.has(id)) {
       const stopping = new Set(this.app.stopping);
@@ -869,7 +879,14 @@ export class DockStore {
    * 点开一个会话。关着的直接开页：Dock 按会话记下的模型 / 推理强度恢复，
    * 一打开输入框就有真实设置可看可切（不开页拿不到 environment）。
    */
-  select = (id: string) => (this.isOpen(id) ? this.load(id) : this.ensureOpen(id)).catch(this.fail);
+  select = (id: string) => {
+    if (!this.isOpen(id)) return this.ensureOpen(id).catch(this.fail);
+    // 开着、订阅着、拉过了：推送一直在合进来，状态就是新的——不再整份重拉（长会话来回切
+    // 每次都要重拉几 MB 历史、整段对话重画）。只补一下环境（模型 / 审批可能在别处改过）。
+    // 页被别的窗口关了又重开（seq 重编）由 apply 认出来再整份重拉。
+    if (this.subscribed.has(id) && this.threads.has(id) && !this.loading.has(id)) return this.loadEnv(id).catch(this.fail);
+    return this.load(id).catch(this.fail);
+  };
 
   /** 正在看哪些会话（主面板 + 分屏；`null` = 新对话页）。看了就从「刚完成」里移出。 */
   focus = (ids: (string | null)[]) => {
@@ -1658,6 +1675,8 @@ export {
   useCanvas,
   useApp,
   useThread,
+  useThreadSelector,
+  sameItems,
   useSubagents,
   useTurnChanges,
   useWorkflows,
@@ -1675,6 +1694,12 @@ export {
   lastSessionKey,
 } from "./gateways";
 export type { GatewayAttention, GatewayHost, GatewayView } from "./gateways";
+
+/** `useThreadSelector` 用：队首那条在等用户的交互（条目对象不变时是同一个引用）。 */
+export const firstPending = (thread: ThreadState): PendingItem | null => pendingItems(thread)[0] ?? null;
+/** `useThreadSelector` 用：最后一轮在跑时它从什么时候开始；不在跑是 `null`。 */
+export const runningSince = (thread: ThreadState): number | null =>
+  isRunning(thread) ? thread.turns[thread.turns.length - 1].startedAt : null;
 
 /** 预设 → 项目（cwd）→ 会话，会话按更新时间新到旧；预设顺序跟 `preset/list`。 */
 export function groupSessions(

@@ -190,6 +190,9 @@ host.register_slot(#{ id: "trajectory", title: "会话轨迹", render: || { "在
 
 - `live: false`：主窗口只转发 GUI 已打开的会话，收不到就自己隔几秒重拉历史；弹出的独立窗自己订阅。
 - `dock.activeThread`：主窗口当前会话 id（独立窗里是 `null`），变了推 `dock.on("activeThread", fn)`。
+- 实时事件攒约 32ms 一批送进页面，仍逐条派给 `dock.on("event", fn)`。
+- 流式时一秒上百条：别每条都重画。页面和 GUI 同一条主线程，重画慢了 GUI 也跟着卡。
+- 攒一下再画、只换变了的那块（示例：记录表 200ms 一次、只换变了的轮次）。
 - 设计 token 以 CSS 变量注入（`--dock-ink`、`--dock-accent`、`--dock-font`、`--dock-mono`…），和 GUI 同一套。
 
 示例：`examples/plugins/trajectory/`（会话轨迹）。

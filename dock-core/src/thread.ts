@@ -361,18 +361,33 @@ export type PendingItem = Extract<TurnItem, { kind: 'permission' | 'question' | 
 export function pendingItems(state: ThreadState): PendingItem[] {
   const out: PendingItem[] = [];
   for (const turn of state.turns) {
-    for (const item of turn.items) {
-      if (
-        (item.kind === 'permission' && item.decision === null) ||
-        (item.kind === 'question' && !item.resolved) ||
-        (item.kind === 'plan' && item.decision === null) ||
-        (item.kind === 'elicit' && !item.resolved)
-      ) {
-        out.push(item);
-      }
-    }
+    const pending = turnPending(turn);
+    if (pending.length) out.push(...pending);
   }
   return out;
+}
+
+// 轮次是不可变的（没变的轮次是同一个引用）：按轮次记下它还挂着的交互，流式增量时
+// 只重扫在跑的那一轮，不用每个增量把整段历史的条目都过一遍。
+const pendingCache = new WeakMap<Turn, PendingItem[]>();
+const NONE: PendingItem[] = [];
+
+function turnPending(turn: Turn): PendingItem[] {
+  let hit = pendingCache.get(turn);
+  if (hit) return hit;
+  hit = NONE;
+  for (const item of turn.items) {
+    if (
+      (item.kind === 'permission' && item.decision === null) ||
+      (item.kind === 'question' && !item.resolved) ||
+      (item.kind === 'plan' && item.decision === null) ||
+      (item.kind === 'elicit' && !item.resolved)
+    ) {
+      hit = hit === NONE ? [item] : [...hit, item];
+    }
+  }
+  pendingCache.set(turn, hit);
+  return hit;
 }
 
 /** 一轮结束后，还挂着的交互不会再有 resolved（网关换页 / 取消时直接丢了）。 */
@@ -404,7 +419,9 @@ function settle(turn: Turn): Turn {
 // ---- 内部 ----
 
 function withTurn(state: ThreadState, event: DockEvent, f: (turn: Turn) => Turn): ThreadState {
-  let index = state.turns.findIndex((t) => t.id === event.turnId);
+  // 事件几乎都落在最后一轮：从后往前找。
+  let index = state.turns.length - 1;
+  while (index >= 0 && state.turns[index].id !== event.turnId) index--;
   let turns = state.turns;
   if (index < 0) {
     // 订阅晚了、没见过这一轮的 turn/started：补一轮。

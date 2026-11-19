@@ -33,8 +33,12 @@ cp -R examples/plugins/trajectory ~/.dock/plugins/trajectory
 
 ## 改它
 
-`panel.html` 是纯 HTML / JS（无构建）：`build()` 把事件流折成轮次和记录，`drawOverview()` /
-`drawLedger()` / `drawInspector()` 各画一块。改完在 GUI 里关掉面板再开就是新的。
+`panel.html` 是纯 HTML / JS（无构建）：`createBuilder()` 把事件流增量折成轮次和记录（推来一条喂一条），
+`drawOverview()` / `drawLedger()` / `drawInspector()` 各画一块。改完在 GUI 里关掉面板再开就是新的。
+
+实时更新不能每条都重画（面板和 GUI 同一条主线程，长会话里会把 GUI 拖卡）：
+- 记录表最多 200ms 画一次，只换变了的轮次（`patchLedger`）；计时总览 1 秒一次。
+- 一行摘要只放开头 240 字；看不见的轮次不排版（`content-visibility`）。
 回归：`cargo test -p cordis-spine --test dynamic -- example_trajectory_plugin`。
 
 ## 还没有的（相对 DSH）
