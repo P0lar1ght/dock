@@ -11,7 +11,7 @@
 // 网关有 `desktopControl` 时：可以钉住一个窗口（空闲不再跟着前台截），并在画面上点击、滚动、打字。
 // agent 正在跑时先点「接手」，避免和它抢同一个桌面。
 
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent, type ReactNode, type WheelEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type PointerEvent, type ReactNode, type WheelEvent } from "react";
 import {
   AppWindow,
   Camera,
@@ -33,10 +33,10 @@ import {
   X,
   type LucideIcon,
 } from "lucide-react";
-import type { ThreadState } from "dock-core";
+import type { ThreadState, Turn, TurnItem } from "dock-core";
 import { currentClient, dock, RpcError } from "../dock/client";
 import { matches, SHORTCUTS } from "../dock/shortcuts";
-import { store, useApp, useThread, type McpServerInfo } from "../dock/store";
+import { sameItems, store, useApp, useThreadSelector, type McpServerInfo } from "../dock/store";
 import { usePrefs } from "../dock/prefs";
 import { AgentCursor, type CursorEvent } from "./AgentCursor";
 import { IconButton } from "./chrome";
@@ -99,14 +99,14 @@ export function DesktopPanel({
   controls?: ReactNode;
 }) {
   const app = useApp();
-  const thread = useThread(sessionId);
+  // 只订阅桌面那几步：流式增量不让面板（实时画面、步骤列表）跟着重画。
+  const steps = useThreadSelector(sessionId, desktopSteps, sameItems);
   const running = !!sessionId && app.running.has(sessionId);
   const connected = app.connection === "open";
   const [driver, setDriver] = useState<Driver>({ kind: "loading" });
   const [busy, setBusy] = useState(false);
   const [picked, setPicked] = useState<string | null>(null);
 
-  const steps = useMemo(() => desktopSteps(thread), [thread]);
   const shots = steps.filter((s) => s.image !== null);
   // 有实时画面时默认看实时，点某一步回看；没有就看最新一张截图。有新截图都回到默认。
   const latest = shots[shots.length - 1] ?? null;
@@ -482,35 +482,60 @@ function DarkButton({ icon: Icon, label, busy, onClick }: { icon: LucideIcon; la
   );
 }
 
-/** 对话流里 agent 经 cua-driver 做的每一步（全部轮次，按时间）。 */
+/**
+ * 对话流里 agent 经 cua-driver 做的每一步（全部轮次，按时间）。按轮次、按工具项缓存：
+ * 没变的步还是原来那个对象，面板按引用比较（`sameItems`）。
+ */
 function desktopSteps(thread: ThreadState): Step[] {
   const out: Step[] = [];
   for (const turn of thread.turns) {
-    for (const item of turn.items) {
-      if (item.kind !== "tool") continue;
-      const call = calledTool(item);
-      if (!call.name.startsWith(PREFIX)) continue;
-      const tool = call.name.slice(PREFIX.length);
-      const { icon, verb, detail } = describe(tool, call.args, item.images.length > 0);
-      const window = /AXWindow "([^"]+)"/.exec(item.output)?.[1] ?? null;
-      const size = /size=(\d+)x(\d+)/.exec(item.output);
-      out.push({
-        id: item.id,
-        icon,
-        verb,
-        // 截图 / 读界面那一步：有窗口标题就显示标题，比「窗口 7」好认。
-        detail: tool === "get_window_state" && window ? window : detail,
-        at: item.startedAt,
-        status: item.status,
-        image: item.images[0]?.index ?? null,
-        window,
-        point: num(call.args.x) !== null && num(call.args.y) !== null ? { x: num(call.args.x)!, y: num(call.args.y)! } : null,
-        windowId: num(call.args.window_id),
-        shotSize: size ? { width: Number(size[1]), height: Number(size[2]) } : null,
-      });
+    let steps = turnSteps.get(turn);
+    if (!steps) {
+      steps = [];
+      for (const item of turn.items) {
+        const step = stepOf(item);
+        if (step) steps.push(step);
+      }
+      turnSteps.set(turn, steps);
     }
+    out.push(...steps);
   }
   return out;
+}
+
+const turnSteps = new WeakMap<Turn, Step[]>();
+const itemSteps = new WeakMap<TurnItem, Step | null>();
+
+function stepOf(item: TurnItem): Step | null {
+  if (item.kind !== "tool") return null;
+  const hit = itemSteps.get(item);
+  if (hit !== undefined) return hit;
+  const step = toStep(item);
+  itemSteps.set(item, step);
+  return step;
+}
+
+function toStep(item: Extract<TurnItem, { kind: "tool" }>): Step | null {
+  const call = calledTool(item);
+  if (!call.name.startsWith(PREFIX)) return null;
+  const tool = call.name.slice(PREFIX.length);
+  const { icon, verb, detail } = describe(tool, call.args, item.images.length > 0);
+  const window = /AXWindow "([^"]+)"/.exec(item.output)?.[1] ?? null;
+  const size = /size=(\d+)x(\d+)/.exec(item.output);
+  return {
+    id: item.id,
+    icon,
+    verb,
+    // 截图 / 读界面那一步：有窗口标题就显示标题，比「窗口 7」好认。
+    detail: tool === "get_window_state" && window ? window : detail,
+    at: item.startedAt,
+    status: item.status,
+    image: item.images[0]?.index ?? null,
+    window,
+    point: num(call.args.x) !== null && num(call.args.y) !== null ? { x: num(call.args.x)!, y: num(call.args.y)! } : null,
+    windowId: num(call.args.window_id),
+    shotSize: size ? { width: Number(size[1]), height: Number(size[2]) } : null,
+  };
 }
 
 function describe(tool: string, a: Record<string, unknown>, shot: boolean): { icon: LucideIcon; verb: string; detail: string } {

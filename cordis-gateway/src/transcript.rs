@@ -68,6 +68,59 @@ impl ProjectedEvent {
     }
 }
 
+/// 流式增量：一个 token 一条，长会话里开着的页能攒上几十万条。
+const STREAM_DELTAS: [&str; 2] = ["item/message_delta", "item/reasoning_delta"];
+
+/// 整份历史交给客户端时（`thread/history` / `subagent/history`），把同一轮里连着的流式
+/// 增量并起来：连着的 N 条（N ≥ 3）留两条——前 N-1 条并成一条（正文接起来，时间用第一条的、
+/// `seq` 用第 N-1 条的），最后一条原样。
+///
+/// - 客户端按 `seq` 去重：并起来那条的 `seq` 盖住它带的全部正文，拉历史期间攒下的推送
+///   照样按 `seq` 接得上，不重复也不漏。
+/// - 起止时间都在（第一条的时间是开始、最后一条是结束），按事件时间算用时的界面照算。
+/// - 只在给整份历史时并：内存里的投影原样留着，之后的推送照常一条条来。
+pub fn compact_stream_deltas(events: Vec<ProjectedEvent>) -> Vec<ProjectedEvent> {
+    let mut out = Vec::with_capacity(events.len());
+    let mut run: Vec<ProjectedEvent> = Vec::new();
+    for event in events {
+        let joins = run.first().is_some_and(|head| {
+            head.method == event.method && head.turn_id == event.turn_id && head.page == event.page
+        });
+        if !joins {
+            flush_stream_run(&mut run, &mut out);
+        }
+        if STREAM_DELTAS.contains(&event.method.as_str()) {
+            run.push(event);
+        } else {
+            out.push(event);
+        }
+    }
+    flush_stream_run(&mut run, &mut out);
+    out
+}
+
+fn flush_stream_run(run: &mut Vec<ProjectedEvent>, out: &mut Vec<ProjectedEvent>) {
+    if run.len() < 3 {
+        out.append(run);
+        return;
+    }
+    let last = run.pop().expect("至少三条");
+    let seq = run.last().map_or(0, |e| e.seq);
+    let mut text = String::new();
+    for e in run.iter() {
+        if let Some(delta) = e.payload.get("delta").and_then(Value::as_str) {
+            text.push_str(delta);
+        }
+    }
+    let mut head = run.drain(..).next().expect("至少两条");
+    head.seq = seq;
+    if let Some(obj) = head.payload.as_object_mut() {
+        obj.insert("delta".into(), Value::String(text));
+    }
+    out.push(head);
+    out.push(last);
+}
+
 fn flatten_payload(payload: &Value) -> serde_json::Map<String, Value> {
     match payload {
         Value::Object(map) => map.clone(),
@@ -1943,6 +1996,114 @@ mod tests {
             Some(current)
         );
         assert_eq!(stream_text_delta(&previous, "").as_deref(), None);
+    }
+
+    /// 回归：开着的页一个 token 一条增量，`thread/history` 以前原样整份给（一轮几千条、
+    /// 长会话几十 MB）。连着的并成两条：前面的并一条（第一条的时间、倒数第二条的 seq），
+    /// 最后一条原样；思考 / 正文、不同的轮各算各的，别的事件原样、顺序不变。
+    #[test]
+    fn compact_stream_deltas_keeps_text_seq_and_time_span() {
+        let mut t = Transcript::new();
+        t.ingest_log(LogEvent::User("hi".into()));
+        let mut think = String::new();
+        for (i, piece) in ["先", "看", "看", "文件"].into_iter().enumerate() {
+            think.push_str(piece);
+            t.clock = Some(1000 + i as u128);
+            t.ingest_log(LogEvent::LlmStream(LlmOutput {
+                reasoning: think.clone(),
+                ..Default::default()
+            }));
+        }
+        let mut text = String::new();
+        for (i, piece) in ["好", "的"].into_iter().enumerate() {
+            text.push_str(piece);
+            t.clock = Some(2000 + i as u128);
+            t.ingest_log(LogEvent::LlmStream(LlmOutput {
+                reasoning: think.clone(),
+                text: text.clone(),
+                ..Default::default()
+            }));
+        }
+        t.clock = None;
+        t.ingest_log(LogEvent::User("again".into()));
+        let mut again = String::new();
+        for piece in ["一", "二", "三"] {
+            again.push_str(piece);
+            t.ingest_log(LogEvent::LlmStream(LlmOutput {
+                text: again.clone(),
+                ..Default::default()
+            }));
+        }
+
+        let raw = t.history_since(0);
+        let compact = compact_stream_deltas(raw.clone());
+        let deltas = |events: &[ProjectedEvent]| -> Vec<(String, String, u64, String)> {
+            events
+                .iter()
+                .filter(|e| e.method.ends_with("_delta"))
+                .map(|e| {
+                    let d = e.payload["delta"].as_str().unwrap_or_default().to_string();
+                    (e.method.clone(), d, e.seq, e.timestamp.clone())
+                })
+                .collect()
+        };
+        let before = deltas(&raw);
+        assert_eq!(before.len(), 4 + 2 + 3, "{before:?}");
+        let after = deltas(&compact);
+        let seq = |i: usize| before[i].2;
+        assert_eq!(
+            after,
+            vec![
+                (
+                    "item/reasoning_delta".into(),
+                    "先看看".into(),
+                    seq(2),
+                    "1000".into()
+                ),
+                (
+                    "item/reasoning_delta".into(),
+                    "文件".into(),
+                    seq(3),
+                    "1003".into()
+                ),
+                // 只有两条的不并。
+                (
+                    "item/message_delta".into(),
+                    "好".into(),
+                    seq(4),
+                    "2000".into()
+                ),
+                (
+                    "item/message_delta".into(),
+                    "的".into(),
+                    seq(5),
+                    "2001".into()
+                ),
+                // 下一轮另起一段。
+                (
+                    "item/message_delta".into(),
+                    "一二".into(),
+                    seq(7),
+                    before[6].3.clone()
+                ),
+                (
+                    "item/message_delta".into(),
+                    "三".into(),
+                    seq(8),
+                    before[8].3.clone()
+                ),
+            ]
+        );
+        let others = |events: &[ProjectedEvent]| -> Vec<(String, u64)> {
+            events
+                .iter()
+                .filter(|e| !e.method.ends_with("_delta"))
+                .map(|e| (e.method.clone(), e.seq))
+                .collect()
+        };
+        assert_eq!(others(&raw), others(&compact));
+        let order: Vec<u64> = compact.iter().map(|e| e.seq).collect();
+        assert!(order.windows(2).all(|w| w[0] < w[1]), "{order:?}");
     }
 
     /// 模型的思考过程按增量推 `item/reasoning_delta`，排在同一次采样的正文前面；

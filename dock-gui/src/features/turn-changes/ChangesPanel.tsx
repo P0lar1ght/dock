@@ -5,8 +5,8 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { ChevronDown, GitCompareArrows, RefreshCw, Sparkles, X } from "lucide-react";
-import { codeReviewOf, turnChangesOf, type ReviewFinding } from "dock-core";
-import { store, useThread, useTurnChanges, useWorkflows } from "../../dock/store";
+import { codeReviewOf, turnChangesOf, type ReviewFinding, type ThreadState, type Turn } from "dock-core";
+import { store, useThreadSelector, useTurnChanges, useWorkflows } from "../../dock/store";
 import { IconButton } from "../../components/chrome";
 import { MenuButton } from "../../components/Popover";
 import { ReviewDiff, type DiffFocus } from "../../components/review/ReviewDiff";
@@ -29,7 +29,8 @@ export function ChangesPanel({ kind, sessionId, onClose, lead, controls }: Panel
   const [diff, setDiff] = useState<Diff>({ kind: "loading" });
   const [nonce, setNonce] = useState(0);
   const [asking, setAsking] = useState(false);
-  const thread = useThread(sessionId);
+  // 只订阅每轮的 id 和第一句话：流式增量不让 diff 面板跟着重画。
+  const heads = useThreadSelector(sessionId, turnHeads, sameHeads);
   const turnChanges = useTurnChanges(sessionId);
   const workflows = useWorkflows(sessionId);
   const changes = turnId ? turnChangesOf(turnChanges, turnId) : null;
@@ -47,14 +48,13 @@ export function ChangesPanel({ kind, sessionId, onClose, lead, controls }: Panel
   // 有改动的轮次，按对话里的先后；标签用那一轮的第一句话。
   const turns = useMemo(
     () =>
-      thread.turns.flatMap((t, i) => {
+      heads.flatMap((t, i) => {
         const c = turnChangesOf(turnChanges, t.id);
         if (!c) return [];
-        const user = t.items.find((x) => x.kind === "user");
-        const text = user && user.kind === "user" ? user.text.trim().replace(/\s+/g, " ") : "";
+        const text = t.text;
         return [{ id: `turn:${t.id}`, label: `第 ${i + 1} 轮${text ? `：${text.slice(0, 18)}${text.length > 18 ? "…" : ""}` : ""}`, hint: `${c.files.length} 个文件` }];
       }),
-    [thread.turns, turnChanges],
+    [heads, turnChanges],
   );
   const options = [{ id: WORKTREE, label: "工作区改动", hint: "git，相对 HEAD" }, ...turns];
   const current = options.find((o) => o.id === source) ?? { id: source, label: "这一轮的改动", hint: "" };
@@ -173,3 +173,27 @@ export function ChangesPanel({ kind, sessionId, onClose, lead, controls }: Panel
     </aside>
   );
 }
+
+/** 一轮的 id 和第一句话（下拉里的标签用）。 */
+interface TurnHead {
+  id: string;
+  text: string;
+}
+
+// 没变的轮次是同一个引用：流式时只重算在跑的那一轮。
+const headCache = new WeakMap<Turn, TurnHead>();
+
+function turnHeads(thread: ThreadState): TurnHead[] {
+  return thread.turns.map((t) => {
+    let head = headCache.get(t);
+    if (!head) {
+      const user = t.items.find((x) => x.kind === "user");
+      head = { id: t.id, text: user && user.kind === "user" ? user.text.trim().replace(/\s+/g, " ") : "" };
+      headCache.set(t, head);
+    }
+    return head;
+  });
+}
+
+const sameHeads = (a: TurnHead[], b: TurnHead[]) =>
+  a.length === b.length && a.every((h, i) => h.id === b[i].id && h.text === b[i].text);

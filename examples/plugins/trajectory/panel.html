@@ -37,8 +37,9 @@
   .filter-note a { color: var(--dock-accent); cursor: pointer; }
 
   .main { flex: 1; min-height: 0; display: flex; }
-  .ledger { flex: 1; min-width: 0; overflow: auto; padding: 6px 0 24px; }
-  .turn { border-left: 2px solid var(--dock-line); margin: 6px 12px 0; }
+  .ledger { flex: 1; min-width: 0; overflow: auto; padding: 6px 0 24px; overflow-anchor: none; }
+  /* 看不见的轮次不排版（长会话上千行）：滚到了才画，高度先按上次量的估。 */
+  .turn { border-left: 2px solid var(--dock-line); margin: 6px 12px 0; content-visibility: auto; contain-intrinsic-size: auto 320px; }
   .turn.running { border-left-color: var(--dock-accent); }
   .turn.failed { border-left-color: var(--dock-danger); }
   .turn-head { display: flex; align-items: center; gap: 8px; padding: 4px 8px; cursor: pointer; font-size: 12px; }
@@ -116,11 +117,21 @@
   const fmt = (ms) => (ms == null || !isFinite(ms) ? "—" : ms < 1000 ? `${Math.round(ms)}ms` : ms < 60000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.floor(ms / 60000)}m${Math.round((ms % 60000) / 1000)}s`);
   const clock = (ms) => (ms ? new Date(ms).toLocaleTimeString("zh-CN", { hour12: false }) + "." + String(ms % 1000).padStart(3, "0") : "—");
   const MAX_TURNS = 40;
+  // 实时推送很密（流式每个增量一条）：面板和 GUI 同一条主线程，不能每条都重画。
+  // 记录表只重画变了的轮次、最多每 LEDGER_MS 一次；计时总览要扫全部记录，更慢一档。
+  const LEDGER_MS = 200;
+  const OVERVIEW_MS = 1000;
 
   const state = {
-    threadId: null, follow: true, events: [], seen: new Set(), live: false,
-    turns: [], closed: new Set(), allClosed: false, selected: null, tab: null,
+    threadId: null, follow: true, maxSeq: 0, live: false,
+    // builder：事件流增量折成轮次（见 createBuilder）；loading：拉历史期间推来的事件。
+    builder: null, turns: [], loading: null,
+    closed: new Set(), allClosed: false, selected: null, tab: null,
     query: "", range: null, showAll: false, poll: null,
+    // 记录表上现在画着哪几轮（按顺序）：轮次集合没变时只换变了的那几块。
+    rendered: [],
+    // 记录表贴着底部（跟着新记录走）。
+    pinned: true,
   };
 
   // ---- 事件 → 轨迹（轮次 → 记录） ----
@@ -158,8 +169,14 @@
     return line.length > 80 ? line.slice(0, 80) + "…" : line;
   };
 
-  function build(events) {
+  // 事件流 → 轨迹（轮次 → 记录），增量地折：推来一条喂一条，不从头重算。
+  // 改过的轮次记进 dirty（画的时候只重画它们）、rev 加一（按模型顺序排的缓存跟着失效）。
+  let uidSeq = 0;
+  function createBuilder() {
     const turns = [];
+    const byId = new Map();
+    const records = new Map();
+    const dirty = new Set();
     let turn = null, step = 0, cur = null, boundary = null;
     const tools = new Map();
     const asks = new Map();
@@ -168,30 +185,44 @@
     // 「只推不记」的事件（压缩进展 / 子代理 / 工作流 / 文件改动）没有序号，同一条会
     // 反复推：按 id 覆盖同一条记录，不追加。
     const keyed = new Map();
+    const touch = (t) => { t.rev += 1; dirty.add(t.id); };
     const ensureTurn = (e) => {
       if (turn && turn.id === e.turnId) return turn;
-      turn = { id: e.turnId || `t${turns.length + 1}`, start: e.at, end: null, status: "running", error: "", records: [], steps: 0, tools: 0 };
-      turns.push(turn); step = 0; cur = null; boundary = e.at;
+      turn = { id: e.turnId || `t${turns.length + 1}`, start: e.at, end: null, status: "running", error: "", records: [], steps: 0, tools: 0, rev: 0 };
+      turns.push(turn); byId.set(turn.id, turn); step = 0; cur = null; boundary = e.at;
       return turn;
     };
-    const push = (r) => { turn.records.push(r); return r; };
+    const pushTo = (t, r) => { r.uid = ++uidSeq; r.tid = t.id; t.records.push(r); records.set(r.uid, r); return r; };
+    const push = (r) => pushTo(turn, r);
     // 同 id 覆盖：已有的只改内容（起止时间保留第一次的），没有的才新开一条。
-    const upsert = (key, make) => {
+    // 新开的挂在它自己那一轮上：别的轮次的推送晚到时不另起一轮、不打断当前这轮的步数。
+    const upsert = (key, make, e) => {
       const hit = keyed.get(key);
       if (hit) {
         const patch = make();
         delete patch.start;
         Object.assign(hit, patch);
+        touch(byId.get(hit.tid));
         return hit;
       }
-      const r = push(make());
+      const owner = byId.get(e.turnId);
+      const r = owner && owner !== turn ? pushTo(owner, make()) : push(make());
+      if (owner && owner !== turn) touch(owner);
       keyed.set(key, r);
       return r;
     };
-    for (const e of events) {
+    const VOLATILE_KEY = {
+      "context/compacted": (e) => `compact|${e.turnId}`,
+      "subagent/updated": (e) => `subagent|${(e.params.agent || {}).agentId || ""}`,
+      "workflow/updated": (e) => `workflow|${(e.params.run || {}).runId || ""}`,
+      "turn/changes/updated": (e) => `changes|${e.params.turnId || e.turnId}`,
+    };
+    function feed(e) {
       const p = e.params;
-      if (!e.turnId && e.method !== "turn/started") continue;
-      const t = ensureTurn(e);
+      if (!e.turnId && e.method !== "turn/started") return;
+      // 已经有那一轮的「只推不记」事件：覆盖原记录，不切换当前轮。
+      const vk = VOLATILE_KEY[e.method];
+      const t = vk && byId.has(e.turnId) && byId.get(e.turnId) !== turn ? byId.get(e.turnId) : ensureTurn(e);
       switch (e.method) {
         case "turn/started": t.start = e.at; boundary = e.at; break;
         case "item/user_message": push({ kind: "user", text: p.content || "", start: e.at, end: e.at }); boundary = e.at; break;
@@ -278,31 +309,41 @@
         }
         // 压缩进展：只推不记，同一轮覆盖同一条。
         case "context/compacted":
-          upsert(`compact|${e.turnId}`, () => ({ kind: "compaction", text: compactText(p), data: p, start: e.at, end: e.at }));
+          upsert(`compact|${e.turnId}`, () => ({ kind: "compaction", text: compactText(p), data: p, start: e.at, end: e.at }), e);
           break;
         // 子代理状态：只推不记，同一个 agent 覆盖同一条。
         case "subagent/updated": {
           const a = p.agent || {};
-          upsert(`subagent|${a.agentId || ""}`, () => ({ kind: "subagent", text: subagentText(a), data: a, start: e.at, end: e.at }));
+          upsert(`subagent|${a.agentId || ""}`, () => ({ kind: "subagent", text: subagentText(a), data: a, start: e.at, end: e.at }), e);
           break;
         }
         // 工作流 run：只推不记，同一个 run 覆盖同一条。
         case "workflow/updated": {
           const run = p.run || {};
-          upsert(`workflow|${run.runId || ""}`, () => ({ kind: "workflow", text: workflowText(run), data: run, start: e.at, end: e.at }));
+          upsert(`workflow|${run.runId || ""}`, () => ({ kind: "workflow", text: workflowText(run), data: run, start: e.at, end: e.at }), e);
           break;
         }
         // 一轮改了哪些文件：只推不记，同一轮覆盖同一条。
         case "turn/changes/updated": {
           const ch = p.changes || {};
-          upsert(`changes|${p.turnId || e.turnId}`, () => ({ kind: "changes", text: changesText(ch), data: ch, start: e.at, end: e.at }));
+          upsert(`changes|${p.turnId || e.turnId}`, () => ({ kind: "changes", text: changesText(ch), data: ch, start: e.at, end: e.at }), e);
           break;
         }
         case "turn/completed": t.end = e.at; t.status = p.status || "completed"; t.error = p.error || ""; cur = null; break;
       }
+      if (t === turn) touch(t);
     }
-    for (const t of turns) t.records = contextFirst(t.records);
-    return turns;
+    return { turns, byId, records, dirty, feed };
+  }
+
+  // 一轮按模型顺序排好的记录：轮次没变（rev 一样）就用上次排的。
+  const orderCache = new WeakMap();
+  function ordered(t) {
+    const hit = orderCache.get(t);
+    if (hit && hit.rev === t.rev) return hit.records;
+    const records = contextFirst(t.records);
+    orderCache.set(t, { rev: t.rev, records });
+    return records;
   }
 
   // 按模型实际看到的顺序排一轮：第一次采样用的系统提示最前，再是插在用户消息之前的
@@ -334,75 +375,127 @@
     return list;
   }
 
+  // 历史里的一条 → 推送的形状（params 带 seq / timestamp）。
+  const historyParams = (it) => ({ ...(it.payload || {}), seq: it.seq, timestamp: it.timestamp ?? (it.payload || {}).timestamp });
+  let openSeq = 0;
+
   async function open(threadId) {
     if (!threadId) return;
+    const token = ++openSeq;
     state.threadId = threadId; state.selected = null; state.range = null; state.showAll = false;
+    // 拉历史期间推来的先攒着，拉完按序号去重接上。
+    state.loading = [];
     $("thread").value = threadId;
+    clearTimeout(state.poll);
     const h = await dock.call("threads.history", { threadId });
-    state.events = []; state.seen = new Set();
-    for (const it of h.events || []) addEvent(it.method, { ...(it.payload || {}), seq: it.seq, timestamp: it.timestamp ?? (it.payload || {}).timestamp });
+    if (token !== openSeq) return;
+    state.builder = createBuilder(); state.turns = state.builder.turns; state.maxSeq = 0;
+    const early = state.loading; state.loading = null;
+    for (const it of h.events || []) addEvent(it.method, historyParams(it));
+    for (const e of early) addEvent(e.method, e.params);
     const w = await dock.call("threads.watch", { threadId });
+    if (token !== openSeq) return;
     state.live = !!(w && w.live);
     $("live").className = "live" + (state.live ? " on" : "");
-    $("live").title = state.live ? "实时" : "没有实时推送：每 3 秒重拉一次";
-    clearInterval(state.poll);
-    if (!state.live) state.poll = setInterval(() => refresh(), 3000);
-    rebuild(true);
+    $("live").title = state.live ? "实时" : "没有实时推送：隔几秒重拉一次";
+    schedulePoll();
+    state.builder.dirty.clear();
+    drawAll(true);
+  }
+
+  // 收不到推送时重拉历史：间隔跟着拉一次的耗时变长（长会话的历史很大），面板看不见时不拉。
+  function schedulePoll(cost = 0) {
+    clearTimeout(state.poll);
+    if (state.live || !state.threadId) return;
+    state.poll = setTimeout(() => (document.hidden ? schedulePoll(cost) : refresh()), Math.max(3000, cost * 10));
   }
 
   async function refresh() {
-    if (!state.threadId) return;
-    const h = await dock.call("threads.history", { threadId: state.threadId }).catch(() => null);
-    if (!h) return;
-    // 「只推不记」的事件覆盖同一条：长度不变，但内容变了，所以看返回值而不是长度。
-    let changed = false;
-    for (const it of h.events || []) changed = addEvent(it.method, { ...(it.payload || {}), seq: it.seq, timestamp: it.timestamp ?? (it.payload || {}).timestamp }) || changed;
-    if (changed) rebuild(false);
+    const id = state.threadId;
+    if (!id || !state.builder) return;
+    const t0 = performance.now();
+    const h = await dock.call("threads.history", { threadId: id }).catch(() => null);
+    if (h && id === state.threadId) {
+      let changed = false;
+      for (const it of h.events || []) changed = addEvent(it.method, historyParams(it)) || changed;
+      if (changed) scheduleLive();
+    }
+    if (id === state.threadId) schedulePoll(performance.now() - t0);
   }
 
-  // 「只推不记」的事件（压缩进展 / 子代理 / 工作流 / 文件改动）没有序号：不进历史，
-  // 状态一变就推一次。同一条按 id 覆盖，别把事件流撑爆。
-  const VOLATILE = {
-    "context/compacted": (p) => `compact|${p.turnId || ""}`,
-    "subagent/updated": (p) => `subagent|${(p.agent || {}).agentId || ""}`,
-    "workflow/updated": (p) => `workflow|${(p.run || {}).runId || ""}`,
-    "turn/changes/updated": (p) => `changes|${p.turnId || ""}`,
-  };
-
+  // 喂一条事件；按序号去重（历史和推送会重叠）：不大于见过的最大序号就是见过的。
+  // 历史里连着的增量是并过的（一条带着好几个序号的正文），只能这么比，不能按序号查集合。
+  // 「只推不记」的事件没有序号，由 builder 按 id 覆盖同一条。返回有没有喂进去。
   function addEvent(method, params) {
-    const volatile = VOLATILE[method];
-    if (volatile) {
-      const key = volatile(params);
-      const at = Number(params.timestamp) || Date.now();
-      const hit = state.events.find((e) => e.volatileKey === key);
-      if (hit) { hit.params = params; hit.at = at; return true; }
-      state.events.push({ method, params, turnId: params.turnId || "", at, volatileKey: key });
-      return true;
-    }
+    if (state.loading) { state.loading.push({ method, params }); return false; }
+    if (!state.builder) return false;
     const seq = Number(params.seq ?? params.transcriptSeq ?? 0);
-    const key = seq ? `${params.turnId}|${seq}` : null;
-    if (key) { if (state.seen.has(key)) return false; state.seen.add(key); }
-    state.events.push({ method, params, turnId: params.turnId || "", at: Number(params.timestamp) || Date.now() });
+    if (seq && seq <= state.maxSeq) {
+      // 没见过的一轮、序号却不大：页被重开过（序号从头编），整份重拉。
+      if (method === "turn/started" && !state.builder.byId.has(params.turnId)) open(state.threadId);
+      return false;
+    }
+    if (seq) state.maxSeq = seq;
+    state.builder.feed({ method, params, turnId: params.turnId || "", at: Number(params.timestamp) || Date.now() });
     return true;
   }
 
-  let frame = 0;
   dock.on("event", (e) => {
     if (e.threadId !== state.threadId) return;
-    addEvent(e.method, e.params);
-    if (!frame) frame = requestAnimationFrame(() => { frame = 0; rebuild(false); });
+    if (addEvent(e.method, e.params)) scheduleLive();
   });
   dock.on("activeThread", (id) => { if (state.follow && id && id !== state.threadId) open(id); });
 
   // ---- 画 ----
-  function rebuild(scrollToEnd) {
+  // 记录表贴着底部时跟着新记录走；往上翻了就不打扰。看不见的轮次不排版（content-visibility），
+  // 滚到底时高度先按估的算、画出来才是真的：滚完下一帧再补一次。
+  // 只有用户自己往上翻才放手（滚轮、按着拖滚动条、键盘）：换内容、补高度引起的滚动不算——
+  // 滚动事件是异步派发的，派到时内容可能又变了，按当时的距离算会误判成「用户离开了底部」。
+  let lastTop = 0, userUntil = 0;
+  const intent = () => { userUntil = performance.now() + 600; };
+  $("ledger").addEventListener("wheel", (ev) => { if (ev.deltaY < 0) state.pinned = false; }, { passive: true });
+  $("ledger").addEventListener("pointerdown", intent);
+  $("ledger").addEventListener("keydown", intent);
+  $("ledger").addEventListener("scroll", () => {
     const ledger = $("ledger");
-    const atEnd = ledger.scrollHeight - ledger.scrollTop - ledger.clientHeight < 24;
-    state.turns = build(state.events);
+    const gap = ledger.scrollHeight - ledger.scrollTop - ledger.clientHeight;
+    const up = ledger.scrollTop < lastTop;
+    lastTop = ledger.scrollTop;
+    if (up && gap > 24 && performance.now() < userUntil) state.pinned = false;
+    else if (gap < 24) state.pinned = true;
+  });
+  function toEnd() {
+    const ledger = $("ledger");
+    ledger.scrollTop = ledger.scrollHeight;
+    requestAnimationFrame(() => { if (state.pinned) ledger.scrollTop = ledger.scrollHeight; });
+  }
+
+  function drawAll(scrollToEnd) {
+    if (scrollToEnd) state.pinned = true;
+    if (state.builder) state.builder.dirty.clear();
     drawOverview();
     drawLedger();
-    if (scrollToEnd || atEnd) ledger.scrollTop = ledger.scrollHeight;
+    if (state.pinned) toEnd();
     if (state.selected) drawInspector();
+  }
+
+  // 实时推送：攒一会儿再画，只换变了的轮次；总览更慢一档。
+  let ledgerTimer = 0, overviewTimer = 0, lastOverview = 0;
+  function scheduleLive() {
+    if (!ledgerTimer) ledgerTimer = setTimeout(flushLive, LEDGER_MS);
+  }
+  function flushLive() {
+    ledgerTimer = 0;
+    const b = state.builder;
+    if (!b || !b.dirty.size) return;
+    const dirty = new Set(b.dirty);
+    b.dirty.clear();
+    patchLedger(dirty);
+    const sel = state.selected && b.records.get(Number(state.selected));
+    if (sel && dirty.has(sel.tid)) drawInspector();
+    const wait = OVERVIEW_MS - (performance.now() - lastOverview);
+    if (wait <= 0) drawOverview();
+    else if (!overviewTimer) overviewTimer = setTimeout(() => { overviewTimer = 0; drawOverview(); }, wait);
   }
 
   function span() {
@@ -412,6 +505,7 @@
   }
 
   function drawOverview() {
+    lastOverview = performance.now();
     const ov = $("overview");
     const s = span();
     if (!s) { ov.innerHTML = '<div class="lane-label" style="top:22px">还没有可计时的记录</div>'; return; }
@@ -442,7 +536,20 @@
     note.hidden = !state.range;
     if (state.range) note.innerHTML = `只看 ${clock(state.range[0])} – ${clock(state.range[1])} 之间有活动的记录 · <a id="clearRange">清除</a>`;
     const clear = $("clearRange");
-    if (clear) clear.onclick = () => { state.range = null; rebuild(false); };
+    if (clear) clear.onclick = () => { state.range = null; drawAll(false); };
+  }
+
+  function drawSelection() {
+    const ov = $("overview");
+    const track = ov.querySelector(".track");
+    if (!track) return;
+    let sel = track.querySelector(".sel");
+    if (!state.range) { if (sel) sel.remove(); return; }
+    const lo = Number(ov.dataset.lo), hi = Number(ov.dataset.hi);
+    const x = (t) => ((t - lo) / (hi - lo)) * 100;
+    if (!sel) { sel = document.createElement("div"); sel.className = "sel"; track.appendChild(sel); }
+    sel.style.left = `${x(state.range[0])}%`;
+    sel.style.width = `${x(state.range[1]) - x(state.range[0])}%`;
   }
 
   // 拖动选时间段（同 DevTools Network）：和区间有交集的记录留下。
@@ -455,12 +562,13 @@
       return lo + (Math.min(Math.max(ev.clientX - r.left, 0), r.width) / r.width) * (hi - lo);
     };
     ov.addEventListener("pointerdown", (ev) => { if (!ov.dataset.lo) return; from = at(ev); ov.setPointerCapture(ev.pointerId); });
-    ov.addEventListener("pointermove", (ev) => { if (from == null) return; const to = at(ev); state.range = [Math.min(from, to), Math.max(from, to)]; drawOverview(); });
+    // 拖动中只挪选区那一块：重画整条总览要扫全部记录。
+    ov.addEventListener("pointermove", (ev) => { if (from == null) return; const to = at(ev); state.range = [Math.min(from, to), Math.max(from, to)]; drawSelection(); });
     ov.addEventListener("pointerup", (ev) => {
       if (from == null) return;
       const to = at(ev);
       state.range = Math.abs(to - from) < (Number(ov.dataset.hi) - Number(ov.dataset.lo)) / 200 ? null : [Math.min(from, to), Math.max(from, to)];
-      from = null; rebuild(false);
+      from = null; drawAll(false);
     });
   })();
 
@@ -472,22 +580,40 @@
       if (a == null || b < state.range[0] || a > state.range[1]) return false;
     }
     if (!state.query) return true;
-    const q = state.query.toLowerCase();
-    return [r.text, r.name, r.output, r.args && JSON.stringify(r.args), r.data && JSON.stringify(r.data)].some((s) => s && String(s).toLowerCase().includes(q));
+    return haystack(r).includes(state.query.toLowerCase());
   }
+
+  // 搜索用的全文（小写）：记录没变就用上次拼的，别每次按键都把参数 / 结果再 JSON 一遍。
+  function haystack(r) {
+    const sig = `${r.text ? r.text.length : 0}|${r.output ? r.output.length : 0}|${r.status || ""}|${r.end ?? ""}`;
+    if (r._hay !== undefined && r._haySig === sig) return r._hay;
+    r._haySig = sig;
+    r._hay = [r.text, r.name, r.output, r.args && JSON.stringify(r.args), r.data && JSON.stringify(r.data)]
+      .filter(Boolean).map(String).join("\n").toLowerCase();
+    return r._hay;
+  }
+
+  // 一行摘要只露开头：整段几千字塞进 nowrap 的行里，排版要把全文都量一遍（长会话上千行时
+  // 打开面板要卡几百毫秒）。先截再压空白，别对全文跑正则。
+  const ROW_CHARS = 240;
+  const oneLine = (text) => {
+    const s = String(text || "");
+    const head = (s.length > ROW_CHARS * 2 ? s.slice(0, ROW_CHARS * 2) : s).replace(/\s+/g, " ").trim();
+    return head.length > ROW_CHARS ? head.slice(0, ROW_CHARS) + "…" : head;
+  };
 
   function rowText(r) {
     if (r.kind === "tool") return `<span class="tool-name">${esc(r.name)}</span> <span class="muted">${esc((r.name === "todo_write" && todoSummary(r.args)) || argSummary(r.args))}</span>`;
-    if (r.kind === "permission") return `${esc(r.text)} <span class="muted">${r.decision ? (r.decision === "approve" ? "· 允许" : "· 拒绝") : "· 等待"}</span>`;
+    if (r.kind === "permission") return `${esc(oneLine(r.text))} <span class="muted">${r.decision ? (r.decision === "approve" ? "· 允许" : "· 拒绝") : "· 等待"}</span>`;
     if (r.kind === "ask" || r.kind === "plan" || r.kind === "elicit") {
       const tail = r.decision ? `· ${r.decision}` : r.end != null ? `· 等 ${fmt(r.end - r.start)}` : "· 等待";
-      return `${esc((r.text || "").replace(/\s+/g, " ").trim() || "（空）")} <span class="muted">${esc(tail)}</span>`;
+      return `${esc(oneLine(r.text) || "（空）")} <span class="muted">${esc(tail)}</span>`;
     }
     if (r.kind === "system" || r.kind === "reminder") {
       const n = sizeText(r);
       return `<span class="muted">${esc(n)}</span> ${esc(firstLine(r.text))}`;
     }
-    return esc((r.text || "").replace(/\s+/g, " ").trim() || "（空）");
+    return esc(oneLine(r.text) || "（空）");
   }
 
   // todo_write 这次写了哪些状态：「✓2 ▶1 □1 等用户1」。awaiting_user = 在等用户回答，
@@ -519,42 +645,93 @@
     return r.end != null && r.start != null ? r.end - r.start : null;
   }
 
+  // 记录表画哪几轮：默认最近 MAX_TURNS 轮。
+  const shownTurns = () => (state.showAll ? state.turns : state.turns.slice(-MAX_TURNS));
+  const filtering = () => !!(state.query || state.range);
+
+  // 一轮的根节点 class 和里面的 HTML（根节点带 data-tid）。实时更新只换里面、不换节点：
+  // 新节点还没量过高度，content-visibility 会先按估的高度排一帧，滚动位置跟着跳。
+  const turnClass = (t) => {
+    const closed = state.closed.has(t.id) !== state.allClosed;
+    return `turn ${t.status === "running" ? "running" : t.status === "failed" ? "failed" : ""} ${closed ? "closed" : ""}`;
+  };
+  const turnHtml = (t, rows) => `<div class="${turnClass(t)}" data-tid="${esc(t.id)}">${turnInner(t, rows)}</div>`;
+  function turnInner(t, rows) {
+    const closed = state.closed.has(t.id) !== state.allClosed;
+    const dur = t.end ? fmt(t.end - t.start) : "进行中";
+    let html = `<div class="turn-head" data-turn="${esc(t.id)}"><span class="chev">▾</span><span class="tid">${esc(t.id)}</span>`;
+    html += `<span class="muted">${t.steps} 步 · ${t.tools} 次工具${t.status === "cancelled" ? " · 已停止" : ""}${t.error ? ` · <span class="err">${esc(t.error)}</span>` : ""}</span><span class="stat">${dur}</span></div>`;
+    const shown = closed ? rows.slice(0, 1) : rows;
+    for (const r of shown) {
+      const key = String(r.uid);
+      const err = r.kind === "tool" && r.status && r.status !== "completed";
+      html += `<div class="row ${r.nested ? "nested" : ""} ${state.selected === key ? "sel-row" : ""}" data-rec="${key}">`;
+      html += `<span class="kind ${err ? "error" : r.kind}">${LABEL[r.kind] || r.kind}</span><span class="text">${rowText(r)}</span>`;
+      html += `<span class="dur">${r.wait != null ? `<span title="等第一个 token">⏳${fmt(r.wait)}</span> ` : ""}${fmt(recDuration(r))}</span></div>`;
+    }
+    if (closed && rows.length > 1) html += `<div class="row muted" data-turn="${esc(t.id)}"><span></span><span>… 还有 ${rows.length - 1} 条</span><span></span></div>`;
+    return html;
+  }
+
   function drawLedger() {
     const ledger = $("ledger");
+    state.rendered = [];
     if (!state.threadId) { ledger.innerHTML = '<div class="empty">选一个会话</div>'; return; }
     if (state.turns.length === 0) { ledger.innerHTML = '<div class="empty">这个会话还没有记录</div>'; return; }
-    const turns = state.showAll ? state.turns : state.turns.slice(-MAX_TURNS);
+    const turns = shownTurns();
     let html = "";
     if (turns.length < state.turns.length) html += `<button class="btn more" id="showAll">显示更早的 ${state.turns.length - turns.length} 轮</button>`;
     for (const t of turns) {
-      const rows = t.records.filter(visible);
-      if ((state.query || state.range) && rows.length === 0) continue;
-      const closed = state.closed.has(t.id) !== state.allClosed;
-      const dur = t.end ? fmt(t.end - t.start) : "进行中";
-      html += `<div class="turn ${t.status === "running" ? "running" : t.status === "failed" ? "failed" : ""} ${closed ? "closed" : ""}">`;
-      html += `<div class="turn-head" data-turn="${esc(t.id)}"><span class="chev">▾</span><span class="tid">${esc(t.id)}</span>`;
-      html += `<span class="muted">${t.steps} 步 · ${t.tools} 次工具${t.status === "cancelled" ? " · 已停止" : ""}${t.error ? ` · <span class="err">${esc(t.error)}</span>` : ""}</span><span class="stat">${dur}</span></div>`;
-      const shown = closed ? rows.slice(0, 1) : rows;
-      for (const r of shown) {
-        const i = t.records.indexOf(r);
-        const key = `${t.id}:${i}`;
-        const err = r.kind === "tool" && r.status && r.status !== "completed";
-        html += `<div class="row ${r.nested ? "nested" : ""} ${state.selected === key ? "sel-row" : ""}" data-rec="${esc(key)}">`;
-        html += `<span class="kind ${err ? "error" : r.kind}">${LABEL[r.kind] || r.kind}</span><span class="text">${rowText(r)}</span>`;
-        html += `<span class="dur">${r.wait != null ? `<span title="等第一个 token">⏳${fmt(r.wait)}</span> ` : ""}${fmt(recDuration(r))}</span></div>`;
-      }
-      if (closed && rows.length > 1) html += `<div class="row muted" data-turn="${esc(t.id)}"><span></span><span>… 还有 ${rows.length - 1} 条</span><span></span></div>`;
-      html += "</div>";
+      const rows = ordered(t).filter(visible);
+      if (filtering() && rows.length === 0) continue;
+      html += turnHtml(t, rows);
+      state.rendered.push(t.id);
     }
     ledger.innerHTML = html || '<div class="empty">没有符合条件的记录</div>';
     const all = $("showAll");
     if (all) all.onclick = () => { state.showAll = true; drawLedger(); };
   }
 
+  // 实时更新：只换变了的那几轮。画着的轮次集合变了（新开一轮、筛选结果变了）才整块重画。
+  function patchLedger(dirty) {
+    const ledger = $("ledger");
+    const rendered = new Set(state.rendered);
+    const ids = [];
+    const rowsOf = new Map();
+    for (const t of shownTurns()) {
+      if (!dirty.has(t.id)) {
+        if (rendered.has(t.id)) ids.push(t.id);
+        continue;
+      }
+      const rows = ordered(t).filter(visible);
+      if (filtering() && rows.length === 0) continue;
+      rowsOf.set(t.id, [t, rows]);
+      ids.push(t.id);
+    }
+    if (ids.join("\n") !== state.rendered.join("\n") || !ids.length) {
+      drawLedger();
+    } else {
+      for (const [id, [t, rows]] of rowsOf) {
+        const el = ledger.querySelector(`.turn[data-tid="${CSS.escape(id)}"]`);
+        if (!el) continue;
+        const cls = turnClass(t);
+        if (el.className !== cls) el.className = cls;
+        el.innerHTML = turnInner(t, rows);
+      }
+    }
+    if (state.pinned) toEnd();
+  }
+
   $("ledger").addEventListener("click", (ev) => {
     const rec = ev.target.closest("[data-rec]");
     const head = ev.target.closest("[data-turn]");
-    if (rec) { state.selected = rec.dataset.rec; state.tab = null; drawLedger(); drawInspector(); }
+    if (rec) {
+      // 换选中只挪高亮，不重画整张表。
+      state.selected = rec.dataset.rec; state.tab = null;
+      $("ledger").querySelectorAll(".row.sel-row").forEach((el) => el.classList.remove("sel-row"));
+      rec.classList.add("sel-row");
+      drawInspector();
+    }
     else if (head) {
       const id = head.dataset.turn;
       state.closed.has(id) ? state.closed.delete(id) : state.closed.add(id);
@@ -563,9 +740,9 @@
   });
 
   function record(key) {
-    const [tid, i] = key.split(":");
-    const t = state.turns.find((x) => x.id === tid);
-    return t ? [t, t.records[Number(i)]] : [null, null];
+    const b = state.builder;
+    const r = b && b.records.get(Number(key));
+    return r ? [b.byId.get(r.tid), r] : [null, null];
   }
 
   const askDetail = (p) => {
@@ -673,14 +850,22 @@
   }
 
   $("tabs").addEventListener("click", (ev) => { const b = ev.target.closest("[data-tab]"); if (b) { state.tab = b.dataset.tab; drawInspector(); } });
-  $("insClose").onclick = () => { state.selected = null; $("inspector").hidden = true; drawLedger(); };
+  $("insClose").onclick = () => {
+    state.selected = null; $("inspector").hidden = true;
+    $("ledger").querySelectorAll(".row.sel-row").forEach((el) => el.classList.remove("sel-row"));
+  };
   $("thread").onchange = (ev) => { state.follow = false; $("follow").classList.remove("on"); open(ev.target.value); };
   $("follow").onclick = () => {
     state.follow = !state.follow;
     $("follow").classList.toggle("on", state.follow);
     if (state.follow && dock.activeThread) open(dock.activeThread);
   };
-  $("search").oninput = (ev) => { state.query = ev.target.value.trim(); drawLedger(); };
+  let searchTimer = 0;
+  $("search").oninput = (ev) => {
+    state.query = ev.target.value.trim();
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(drawLedger, 120);
+  };
   $("fold").onclick = () => {
     state.allClosed = !state.allClosed; state.closed.clear();
     $("fold").textContent = state.allClosed ? "全部展开" : "全部折叠";

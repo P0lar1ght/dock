@@ -49,7 +49,9 @@ pub const PER_TAB_SERVICES: &[&str] = &[
     AGENT_PRESETS,
 ];
 
-/// `Alt+1..9` 能直达的上限，也是总页数上限（旁问页不占名额）。
+/// 终端自己开页（`Ctrl+N`、分叉、`/btw`、恢复到新页）的上限：`Alt+1..9` 直达得了、
+/// 标签栏一行放得下。网关 / 桌面端开的页（[`Tabs::open_at`]）和侧边聊天
+/// （[`Tabs::open_aside_for`]）不受它限：桌面端会话多少都能同时开着。
 pub const MAX_TABS: usize = 9;
 
 /// 一页是常驻分页，还是 `/btw` 的旁问页。
@@ -190,7 +192,7 @@ impl Tabs {
         self.inner.tabs.lock().unwrap().len()
     }
 
-    /// 某一种页开着几张。页数上限只数常驻页：旁问页不占名额（另有同样的上限）。
+    /// 某一种页开着几张。终端自己开页的上限（[`MAX_TABS`]）按种类各数各的。
     fn count(&self, kind: TabKind) -> usize {
         self.inner
             .tabs
@@ -489,9 +491,7 @@ impl Tabs {
         if let Some(index) = archived.and_then(|id| self.index_of_session(id)) {
             return Ok(self.inner.tabs.lock().unwrap()[index].ctx.clone());
         }
-        if self.count(TabKind::Normal) >= MAX_TABS {
-            return Err(format!("最多 {MAX_TABS} 页"));
-        }
+        // 不设上限（见 MAX_TABS）：页号是稳定编号，过了 9 照样往上数。
         let (id, child, fiber) = self
             .mount_page(TabKind::Normal, None, self.active_ctx())
             .await?;
@@ -576,9 +576,7 @@ impl Tabs {
             .get::<Sessions>(SESSIONS)
             .map(|s| s.model_history())
             .unwrap_or_default();
-        if self.count(TabKind::Aside) >= MAX_TABS {
-            return Err(format!("最多 {MAX_TABS} 个侧边聊天"));
-        }
+        // 每个主会话最多一张，主会话不设上限，侧边聊天也就不设（见 MAX_TABS）。
         let (id, child, fiber) = self
             .mount_page(TabKind::Aside, Some(snapshot), parent_ctx)
             .await?;
@@ -1312,5 +1310,35 @@ mod tests {
         }
         assert_eq!(tabs.len(), MAX_TABS);
         assert!(tabs.open().await.is_err(), "第 10 页该被挡住");
+    }
+
+    /// 回归：网关 / 桌面端开页（`open_at`）以前也受 9 页的限，桌面端第 10 个会话打不开。
+    /// 现在不限；终端自己的 `Ctrl+N` 仍是 9 页（`Alt+1..9`、标签栏一行）。侧边聊天跟着
+    /// 主会话走，同样不限。
+    #[tokio::test]
+    async fn gateway_pages_and_asides_are_not_capped() {
+        let home = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        let _env = cordis_base::test_env::scoped().set("DOCK_HOME", home.path());
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let root = Context::new();
+        root.plugin(tabs(), TabsConfig::headless(session_mount(seen)))
+            .unwrap()
+            .wait()
+            .await
+            .unwrap();
+        let tabs = (*root.get::<Tabs>(TABS).unwrap()).clone();
+
+        let mut pages = Vec::new();
+        for _ in 0..MAX_TABS + 3 {
+            let page = tabs.open_at(work.path(), None).await.unwrap();
+            pages.push(session_id_of(&page));
+        }
+        assert_eq!(tabs.count(TabKind::Normal), MAX_TABS + 4, "含第 1 页");
+        for id in &pages {
+            tabs.open_aside_for(id).await.unwrap();
+        }
+        assert_eq!(tabs.count(TabKind::Aside), MAX_TABS + 3);
+        assert!(tabs.open().await.is_err(), "终端的 Ctrl+N 仍按 9 页挡");
     }
 }

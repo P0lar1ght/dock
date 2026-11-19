@@ -169,11 +169,12 @@ pub fn history(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError
     };
     let sub = service(gateway)?;
     let thread_id = threads::thread_param(&params);
-    let events: Vec<Value> = gateway
-        .child_history(&snap.id)
-        .into_iter()
-        .map(|e| e.as_history_item_as(&thread_id))
-        .collect();
+    // 子代理的投影同样一个 token 一条增量：并起来再给（见 `compact_stream_deltas`）。
+    let events: Vec<Value> =
+        crate::transcript::compact_stream_deltas(gateway.child_history(&snap.id))
+            .into_iter()
+            .map(|e| e.as_history_item_as(&thread_id))
+            .collect();
     let role = subagents::role_label(&page.ctx, &snap.subagent_type);
     Ok(json!({
         "agent": subagents::with_approval(

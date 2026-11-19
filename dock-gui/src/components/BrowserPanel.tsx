@@ -30,7 +30,7 @@ import {
 } from "lucide-react";
 import type { ThreadState } from "dock-core";
 import { currentClient, dock, RpcError, type Notification } from "../dock/client";
-import { store, useApp, useThread } from "../dock/store";
+import { store, useApp, useThreadSelector } from "../dock/store";
 import { BrowserTabs, type BrowserTab } from "./BrowserTabs";
 import { BrowserMenu } from "./BrowserMenu";
 import { Popover } from "./Popover";
@@ -114,7 +114,8 @@ export function BrowserPanel({
   controls?: ReactNode;
 }) {
   const app = useApp();
-  const thread = useThread(sessionId);
+  // 只订阅「agent 最近一次浏览器动作」这一句：流式增量不让整个浏览器面板跟着重画。
+  const lastAction = useThreadSelector(sessionId, lastBrowserAction);
   const running = !!sessionId && app.running.has(sessionId);
   /** Agent 请你接手（handoff_to_user 的提问还没答）：这一轮虽然在跑，但它在等你，不在动页面。 */
   const waitingForUser = !!sessionId && running && store.pendingHandoff(sessionId);
@@ -480,7 +481,7 @@ export function BrowserPanel({
   /** 画面在面板里的缩放比：铺满面板是 1（再乘用户选的缩放）。 */
   const scale = useMemo(() => fitScale(want, areaSize, zoom), [want, areaSize, zoom]);
 
-  const agentAction = agentBusy && !control ? lastBrowserAction(thread) : null;
+  const agentAction = agentBusy && !control ? lastAction : null;
   const title = page.title || hostOf(page.url) || "浏览器";
   const live = phase.kind === "live";
   /** 鼠标键盘发给页面：agent 没在跑，或者你接手了。 */

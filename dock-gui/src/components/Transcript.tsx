@@ -33,7 +33,7 @@ import {
 import type { ThreadState, Turn, TurnItem } from "dock-core";
 import { turnHasActivity } from "dock-core";
 import { prefs, usePrefs } from "../dock/prefs";
-import { store } from "../dock/store";
+import { sameItems, store } from "../dock/store";
 import { stripImageChips } from "../dock/chips";
 import { fetchUserImage } from "../dock/userImages";
 import { formatElapsed, formatTokens } from "./chrome";
@@ -47,7 +47,7 @@ import { toolCardFeatures, useToolCardRevision, useTurnFooters } from "../featur
 import { CanvasChip, CanvasIndexContext } from "./CanvasChip";
 import { CompactionCard } from "./CompactionCard";
 import { SideNoteCard } from "./SideNoteCard";
-import { canvasEvent, canvasEvents, canvasIndex } from "./canvasDoc";
+import { canvasEventOf, canvasEvents, canvasIndex } from "./canvasDoc";
 import { isSubagentCall, SubagentCard, SubagentGroup } from "./SubagentCard";
 import { RewindConfirm } from "./SessionMenu";
 import { PathLinkContext } from "./markdown/pathLink";
@@ -68,6 +68,13 @@ const GLIDE_MS = 280;
 const JUMP_GAP = 16;
 /** 两轮用户消息隔这么久，中间插一行日期。 */
 const DATE_GAP_MS = 30 * 60 * 1000;
+/** 打开会话先画最近这么多轮（长会话几百轮全画要卡好几百毫秒）；往上翻快到顶再一批批补。 */
+const INITIAL_TURNS = 12;
+const MORE_TURNS = 12;
+/** 离顶部这么近就补更早的轮次（不等真碰到顶，补的时候看不出停顿）。 */
+const MORE_MARGIN_PX = 800;
+/** 点了展开 / 收起之后这么久按点的那个按钮对齐（盖过折叠动画 --dur-base）。 */
+const ANCHOR_MS = 500;
 
 type UserItem = Extract<TurnItem, { kind: "user" }>;
 
@@ -110,12 +117,25 @@ export function Transcript({
   onRetry?: (text: string) => void;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const moreRef = useRef<HTMLButtonElement>(null);
   const stick = useRef(true);
   /** 上一次滚动位置：分得清是往上翻（不再跟随）还是往下回（近底部重新跟随）。 */
   const lastTop = useRef(0);
-  const follow = useRef(0);
   /** 「回到底部」的滚动动画；在滚的时候 onScroll 不判跟随（中途离底部远，会被当成用户往上翻）。 */
   const glide = useRef(0);
+  /** 用户刚按过键 / 正按着指针：这时的往上滚才算用户在翻（翻页键、拖滚动条、选字拖出上沿）。 */
+  const userUntil = useRef(0);
+  const pointerHeld = useRef(false);
+  useEffect(() => {
+    const release = () => (pointerHeld.current = false);
+    window.addEventListener("pointerup", release);
+    window.addEventListener("pointercancel", release);
+    return () => {
+      window.removeEventListener("pointerup", release);
+      window.removeEventListener("pointercancel", release);
+    };
+  }, []);
   const [atBottom, setAtBottom] = useState(true);
   const options = useContext(TranscriptOptionsContext);
   const linker = usePathLinker(options.filesThreadId ?? sessionKey);
@@ -127,45 +147,106 @@ export function Transcript({
     setAtBottom(false);
   };
 
-  // 换会话：直接到底，不做平滑滚动。
+  // 只画最近的几轮：`from` 是画出来的第一轮的下标（`null` = 还没定，取最近 INITIAL_TURNS 轮）。
+  // 定下来以后新来的轮次接在后面，不把上面正在看的挤掉；换会话从头来。
+  const [win, setWin] = useState<{ key: string; from: number | null }>({ key: sessionKey, from: null });
+  const total = thread.turns.length;
+  const from = win.key === sessionKey ? win.from : null;
+  const start = Math.max(0, Math.min(from ?? Infinity, total - INITIAL_TURNS));
+  const setFrom = (n: number) => setWin({ key: sessionKey, from: n });
+  /** 往前补轮次时记下的滚动位置：补完按高度差挪回去，看着的内容不跳。 */
+  const restore = useRef<{ height: number; top: number } | null>(null);
+  /** 消息导航跳到还没画出来的轮次：先补到那一轮，画好了再滚过去。 */
+  const pendingJump = useRef<string | null>(null);
+  /**
+   * 刚点的展开 / 收起按钮（「用时」、工具卡、思考）：动画那一会儿按它对齐，点的东西不挪位置；
+   * 贴着底部时也不为了追底部把它顶出视口——展开后不在底部了就不再跟。
+   */
+  const anchor = useRef<{ node: HTMLElement; top: number; until: number } | null>(null);
+  const hasTurns = total > 0;
+
+  // 换会话 / 记录第一次到：直接到底，不做平滑滚动。滚动区在记录到之前是骨架，不在 DOM 里。
   useLayoutEffect(() => {
     stick.current = true;
     setAtBottom(true);
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [sessionKey]);
+  }, [sessionKey, hasTurns]);
 
-  // 新内容（含流式增量）：贴着底部时跟随。`thread` 每个增量都是新引用，一帧最多跟一次，
-  // 直接定位不做平滑滚动：每个增量起一段平滑动画会和用户的滚动抢位置，往上翻不动。
-  useEffect(() => {
-    if (!stick.current || follow.current) return;
-    follow.current = requestAnimationFrame(() => {
-      follow.current = 0;
-      const el = scrollRef.current;
-      if (el && stick.current) el.scrollTop = el.scrollHeight;
+  // 贴着底部时，内容怎么长（流式增量、代码高亮 / 图表异步画好、改动卡拉到、折叠动画）都跟到底；
+  // 输入框变高、窗口变矮同理。ResizeObserver 在排版之后、绘制之前回调：不会先画一帧没到底的。
+  // 直接定位不做平滑滚动：每次长一点就起一段动画会和用户的滚动抢位置，往上翻不动。
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    const content = contentRef.current;
+    if (!el || !content) return;
+    const ro = new ResizeObserver(() => {
+      const a = anchor.current;
+      if (a && a.node.isConnected && performance.now() < a.until) {
+        const delta = a.node.getBoundingClientRect().top - a.top;
+        if (Math.abs(delta) >= 1) el.scrollTop += delta;
+        stick.current = el.scrollHeight - el.scrollTop - el.clientHeight <= 1;
+        setAtBottom(stick.current);
+        return;
+      }
+      if (stick.current && !glide.current) el.scrollTop = el.scrollHeight;
     });
-  }, [thread]);
-  useEffect(
-    () => () => {
-      cancelAnimationFrame(follow.current);
-      cancelAnimationFrame(glide.current);
-    },
-    [],
-  );
+    ro.observe(content);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [sessionKey, hasTurns]);
+  useEffect(() => () => cancelAnimationFrame(glide.current), []);
+
+  // 往前补了轮次：先按补之前的位置挪回去（WebKit 没有滚动锚定），有待跳的再跳。
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    const r = restore.current;
+    restore.current = null;
+    if (el && r && !stick.current) el.scrollTop = r.top + (el.scrollHeight - r.height);
+    const jump = pendingJump.current;
+    pendingJump.current = null;
+    if (jump) toTurn(jump);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [start]);
+
+  // 定下第一次画的范围：之后新来的轮次接在后面，不挤掉上面的。
+  useLayoutEffect(() => {
+    if (from === null && hasTurns) setFrom(start);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [from, hasTurns, start]);
+
+  const showEarlier = (to: number) => {
+    const el = scrollRef.current;
+    if (!el || to >= start) return;
+    restore.current = { height: el.scrollHeight, top: el.scrollTop };
+    setFrom(Math.max(0, to));
+  };
+
+  // 翻到快到顶：补一批更早的。补完重新观察——还在范围里（内容不够高）就接着补。
+  useEffect(() => {
+    const el = scrollRef.current;
+    const sentinel = moreRef.current;
+    if (!el || !sentinel || start === 0) return;
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) showEarlier(start - MORE_TURNS);
+      },
+      { root: el, rootMargin: `${MORE_MARGIN_PX}px 0px 0px 0px` },
+    );
+    io.observe(sentinel);
+    return () => io.disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionKey, hasTurns, start]);
 
   // 画布卡要知道每块画布的标题（edit / data 的参数里没有）和谁是最新一条。
-  const canvases = useMemo(() => canvasIndex(canvasEvents(thread)), [thread]);
-  const nav = useMemo(() => navEntries(thread.turns), [thread.turns]);
-
-  if (thread.turns.length === 0 && loading) return <LoadingSkeleton key={sessionKey} />;
-  if (thread.turns.length === 0) {
-    return (
-      <div key={sessionKey} className="enter-fade flex flex-1 flex-col items-center justify-center gap-2 text-ink-4">
-        <div className="text-[15px] font-semibold text-ink-2">新对话</div>
-        <div className="text-xs">在下面输入任务，Dock 会在这个项目的目录里开始工作。</div>
-      </div>
-    );
+  // canvasEvents 按条目缓存：画布事件没变就沿用上一次的索引，卡片不跟着流式增量重画。
+  const canvasList = canvasEvents(thread);
+  const canvasMemo = useRef<{ events: ReturnType<typeof canvasEvents>; index: ReturnType<typeof canvasIndex> } | null>(null);
+  if (!canvasMemo.current || !sameItems(canvasMemo.current.events, canvasList)) {
+    canvasMemo.current = { events: canvasList, index: canvasIndex(canvasList) };
   }
+  const canvases = canvasMemo.current.index;
+  const nav = useMemo(() => navEntries(thread.turns), [thread.turns]);
 
   /**
    * 逐帧滚到 `target()`（每帧重算：内容还在长也能追上）。不用 scrollTo smooth：实测 WKWebView 里
@@ -197,8 +278,16 @@ export function Transcript({
     glideTo((el) => el.scrollHeight - el.clientHeight);
   };
 
-  // 消息导航：滚到那一轮的顶上，不再跟随底部。
-  const toTurn = (turnId: string) => {
+  // 消息导航：滚到那一轮的顶上，不再跟随底部。还没画出来的（在补的范围外）先补到它再跳。
+  function toTurn(turnId: string) {
+    const index = thread.turns.findIndex((t) => t.id === turnId);
+    if (index >= 0 && index < start) {
+      stick.current = false;
+      setAtBottom(false);
+      pendingJump.current = turnId;
+      showEarlier(index);
+      return;
+    }
     const node = scrollRef.current?.querySelector<HTMLElement>(`[${NAV_ATTR}="${CSS.escape(turnId)}"]`);
     if (!node) return;
     stick.current = false;
@@ -207,7 +296,17 @@ export function Transcript({
       const top = el.scrollTop + node.getBoundingClientRect().top - el.getBoundingClientRect().top - JUMP_GAP;
       return Math.max(0, Math.min(top, el.scrollHeight - el.clientHeight));
     });
-  };
+  }
+
+  if (thread.turns.length === 0 && loading) return <LoadingSkeleton key={sessionKey} />;
+  if (thread.turns.length === 0) {
+    return (
+      <div key={sessionKey} className="enter-fade flex flex-1 flex-col items-center justify-center gap-2 text-ink-4">
+        <div className="text-[15px] font-semibold text-ink-2">新对话</div>
+        <div className="text-xs">在下面输入任务，Dock 会在这个项目的目录里开始工作。</div>
+      </div>
+    );
+  }
 
   let prevAt: number | undefined;
   return (
@@ -225,25 +324,50 @@ export function Transcript({
         onWheel={(e) => {
           if (e.deltaY < 0 && e.currentTarget.scrollTop > 0) unstick();
         }}
+        // 只有用户自己往上翻才放手（滚轮见上；拖滚动条、选字拖出上沿看 pointerHeld，翻页键看 userUntil）。
+        // 内容变化引起的滚动不算：滚动事件是异步派发的，跟到底那一下派到这里时内容可能又长了 /
+        // 折叠动画正收着，按当时的距离算会误判成「用户离开了底部」，之后就不再跟了。
+        onPointerDown={() => (pointerHeld.current = true)}
+        onClickCapture={(e) => {
+          // 只认展开 / 收起的按钮（带旋转箭头 rotate-open：用时、工具卡、思考…）；复制这类按钮
+          // 不改高度，照常跟到底。
+          const button = (e.target as HTMLElement).closest("button");
+          if (!button?.querySelector(".rotate-open")) return;
+          anchor.current = { node: button, top: button.getBoundingClientRect().top, until: performance.now() + ANCHOR_MS };
+        }}
+        onKeyDown={() => (userUntil.current = performance.now() + 600)}
         onScroll={(e) => {
           const el = e.currentTarget;
           const gap = el.scrollHeight - el.scrollTop - el.clientHeight;
           const up = el.scrollTop < lastTop.current;
           lastTop.current = el.scrollTop;
           if (glide.current) return;
-          stick.current = gap <= 1 || (!up && gap < STICK_PX);
+          if (up && gap > 1 && (pointerHeld.current || performance.now() < userUntil.current)) stick.current = false;
+          else if (gap <= 1 || (!up && gap < STICK_PX)) stick.current = true;
           setAtBottom(stick.current);
         }}
         // 底边渐隐：内容滚到输入框边上时淡出，「回到底部」不压在字上（贴底时那一截是 pb-6 的留白）。
-        className={`thin-scroll enter-fade flex min-h-0 shrink flex-col overflow-y-auto pb-6 pt-4 select-text [mask-image:linear-gradient(to_bottom,black_calc(100%-24px),transparent)] ${
+        className={`thin-scroll enter-fade flex min-h-0 shrink flex-col overflow-y-auto pb-6 pt-4 select-text [overflow-anchor:none] [mask-image:linear-gradient(to_bottom,black_calc(100%-24px),transparent)] ${
           options.compact ? "px-4 [--chat-text:14px]" : "px-8"
         }`}
       >
-        <div className={`mx-auto flex w-full flex-col gap-8 ${READING_WIDTH}`}>
+        <div ref={contentRef} className={`mx-auto flex w-full flex-col gap-8 ${READING_WIDTH}`}>
+          {start > 0 && (
+            // 更早的轮次：翻到附近自动补（IntersectionObserver 看的就是这一行），也能点。
+            <button
+              ref={moreRef}
+              type="button"
+              onClick={() => showEarlier(start - MORE_TURNS)}
+              className="motion-colors self-center rounded-full px-3 py-1 text-[12.5px] text-ink-4 hover:bg-hover hover:text-ink-2"
+            >
+              更早的 {start} 轮对话
+            </button>
+          )}
           <ThreadIdContext.Provider value={sessionKey}>
             <PathLinkContext.Provider value={linker}>
               <CanvasIndexContext.Provider value={canvases}>
-                {thread.turns.map((turn, i) => {
+                {thread.turns.slice(start).map((turn, k) => {
+                  const i = start + k;
                   const at = firstUser(turn)?.at;
                   const showDate = !!at && (prevAt === undefined || at - prevAt > DATE_GAP_MS);
                   if (at) prevAt = at;
@@ -318,6 +442,10 @@ const TurnView = memo(function TurnView({
   // 功能认领产物（isArtifact）要等它的数据到：数据变了重算哪些不折进过程。
   useToolCardRevision();
   const done = turn.status !== "running";
+  // 折起来的过程没看过就不挂：长会话每轮几十张工具卡、思考块，打开会话时全挂上要卡好一会儿。
+  // 看着它跑过（跑完收起有动画）或点开过一次就一直挂着，收起时才有折叠动画。
+  const [processMounted, setProcessMounted] = useState(!done);
+  if (!processMounted && (!done || open)) setProcessMounted(true);
   const users = turn.items.filter((i): i is UserItem => i.kind === "user");
   // 侧边聊天写进来的笔记不是这一轮的工作：单独排在回复后面，不参与「哪段是回复」的判断
   // （一轮结束后才写进来的笔记落在末尾，算进去会把回复整段折进过程里）。
@@ -338,7 +466,7 @@ const TurnView = memo(function TurnView({
   const isPinned = (i: TurnItem) =>
     i.kind === "tool" && toolCardFeatures().some((f) => f.keepMounted && f.isArtifact?.(i.name, i.arguments));
   const isCanvas = (i: TurnItem) =>
-    (i.kind === "tool" && canvasEvent(i) !== null) || isFeatureArtifact(i) || i.kind === "compaction" || isSubagentCall(i);
+    (i.kind === "tool" && canvasEventOf(i) !== null) || isFeatureArtifact(i) || i.kind === "compaction" || isSubagentCall(i);
   const process = work.slice(0, cut).filter((i) => !isPinned(i) && (!done || !isCanvas(i)));
   const artifacts = work.slice(0, cut).filter((i) => (done ? isCanvas(i) : isPinned(i)));
   // 空闲时手动压缩单独成一轮，里面只有压缩标记（或一张侧边聊天笔记）：不配「用时」行。
@@ -384,7 +512,7 @@ const TurnView = memo(function TurnView({
           <div className="fold" data-open={!done || open} aria-hidden={done && !open}>
             <div>
               <div className="flex flex-col gap-2 pb-1">
-                <Items items={process} />
+                {processMounted && <Items items={process} />}
               </div>
             </div>
           </div>
@@ -694,7 +822,11 @@ function Items({ items }: { items: TurnItem[] }) {
   return <>{out}</>;
 }
 
-function Item({ item }: { item: TurnItem }) {
+/**
+ * 一条。按条目引用 memo：dock-core 没变的条目是同一个对象，流式时在跑的那一轮只重画
+ * 在变的那一条（长的一轮几十上百张工具卡，每个增量全重画会占满主线程）。
+ */
+const Item = memo(function Item({ item }: { item: TurnItem }) {
   const threadId = useContext(ThreadIdContext);
   const liveText = useContext(LiveTextContext);
   switch (item.kind) {
@@ -709,7 +841,7 @@ function Item({ item }: { item: TurnItem }) {
     case "reasoning":
       return <Reasoning item={item} />;
     case "tool": {
-      const ev = canvasEvent(item);
+      const ev = canvasEventOf(item);
       if (ev) return <CanvasItem ev={ev} />;
       return (
         <ToolCard
@@ -761,9 +893,9 @@ function Item({ item }: { item: TurnItem }) {
         </div>
       );
   }
-}
+});
 
-function CanvasItem({ ev }: { ev: NonNullable<ReturnType<typeof canvasEvent>> }) {
+function CanvasItem({ ev }: { ev: NonNullable<ReturnType<typeof canvasEventOf>> }) {
   const threadId = useContext(ThreadIdContext);
   return <CanvasChip ev={ev} threadId={threadId} />;
 }

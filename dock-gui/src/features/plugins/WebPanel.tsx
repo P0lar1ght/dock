@@ -17,6 +17,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { dock } from "../../dock/client";
 import { surfaceAction, surfaceWeb } from "./api";
 
+/** 实时事件攒多久发一次给插件页面（约两帧）。 */
+const BATCH_MS = 32;
+
 /** 注入进插件文档的 CSP：不许联网，只许内联脚本 / 样式。 */
 const CSP =
   "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; media-src data: blob:";
@@ -61,6 +64,8 @@ const BRIDGE_JS = `
       m.error ? p.reject(new Error(m.error)) : p.resolve(m.result);
     } else if (m.push === "event") {
       listeners.event.forEach((fn) => fn(m.payload));
+    } else if (m.push === "events") {
+      for (const ev of m.payload) listeners.event.forEach((fn) => fn(ev));
     } else if (m.push === "activeThread") {
       dock.activeThread = m.payload;
       listeners.activeThread.forEach((fn) => fn(m.payload));
@@ -163,12 +168,26 @@ export function WebPanel({
       }
     };
     window.addEventListener("message", onMessage);
+    // 流式时一个增量一条推送：攒 BATCH_MS 一起发（一次 postMessage），页面里的桥再逐条派给
+    // `dock.on("event")`。iframe 和 GUI 同一条主线程，逐条发就是逐条一个任务。
+    // 用计时器不用 requestAnimationFrame：窗口藏起来时 rAF 停摆，攒的会一直涨。
+    let batch: unknown[] = [];
+    let timer = 0;
+    const flush = () => {
+      timer = 0;
+      const payload = batch;
+      batch = [];
+      if (payload.length) post({ push: "events", payload });
+    };
     const off = dock.onNotification((n) => {
       const id = typeof n.params.threadId === "string" ? n.params.threadId : "";
-      if (id && watched.current.has(id)) post({ push: "event", payload: { threadId: id, method: n.method, params: n.params } });
+      if (!id || !watched.current.has(id)) return;
+      batch.push({ threadId: id, method: n.method, params: n.params });
+      if (!timer) timer = window.setTimeout(flush, BATCH_MS);
     });
     return () => {
       window.removeEventListener("message", onMessage);
+      window.clearTimeout(timer);
       off();
     };
   }, [surfaceId, detached]);

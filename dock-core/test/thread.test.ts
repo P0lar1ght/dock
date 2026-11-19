@@ -109,6 +109,24 @@ test('交互：权限、提问、计划在等用户时进 pendingItems，resolve
   assert.equal(isRunning(s), false, '这一轮只有交互、没有任务在跑：不算运行中');
 });
 
+test('pendingItems：别的事（流式增量、旧轮次）不换在等的那条的引用，处理后马上移出', () => {
+  seq = 0;
+  let s = run(
+    note('turn/started', {}, 't1'),
+    note('permission/requested', { requestId: 'p0', toolName: 'bash', summary: 'ls' }, 't1'),
+    note('turn/completed', { status: 'completed' }, 't1'),
+    note('turn/started', {}, 't2'),
+    note('permission/requested', { requestId: 'p1', toolName: 'bash', summary: 'ls' }, 't2'),
+  );
+  const first = pendingItems(s)[0];
+  assert.equal(first.id, 'p1', '结束了的轮次里没答的已作废，不再算在等');
+  // GUI 按引用比较（useThreadSelector）：增量把在跑的那一轮换成新对象，在等的条目还是同一个。
+  s = reduceThread(s, note('item/message_delta', { delta: '等你批准' }, 't2'));
+  assert.equal(pendingItems(s)[0], first);
+  s = reduceThread(s, note('permission/resolved', { requestId: 'p1', decision: 'deny', always: false }, 't2'));
+  assert.deepEqual(pendingItems(s), []);
+});
+
 test('提问：多选题带 multiSelect，旧网关没这个字段时算单选', () => {
   seq = 0;
   const s = run(

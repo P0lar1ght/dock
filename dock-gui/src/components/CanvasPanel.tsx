@@ -6,7 +6,7 @@
 // 一条跑完就重新拉；只改数据（同一版、HTML 没变）不重载页面，经桥推给 `dock.onData`。
 // iframe 只开 allow-scripts（不同源）：页面碰不到 Dock、Tauri 和用户文件，联网照常。
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
@@ -28,7 +28,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { dock } from "../dock/client";
-import { currentStore, store, useApp, useCanvas, useThread } from "../dock/store";
+import { currentStore, sameItems, store, useApp, useCanvas, useThreadSelector } from "../dock/store";
 import type { SessionSummary } from "../model";
 import { IconButton } from "./chrome";
 import { Popover } from "./Popover";
@@ -79,7 +79,8 @@ export function CanvasPanel({
   controls?: ReactNode;
 }) {
   const app = useApp();
-  const thread = useThread(sessionId);
+  // 只订阅画布工具项：流式增量不让面板（含 iframe 外壳）跟着重画。
+  const events = useThreadSelector(sessionId, canvasEvents, sameItems);
   const canvas = useCanvas();
   const connected = app.connection === "open";
   const [list, setList] = useState<Meta[] | null>(null);
@@ -92,7 +93,6 @@ export function CanvasPanel({
   const [reloads, setReloads] = useState(0);
   const [busy, setBusy] = useState(false);
 
-  const events = useMemo(() => canvasEvents(thread), [thread]);
   const doneSig = events
     .filter((e) => e.status === "completed")
     .map((e) => e.itemId)

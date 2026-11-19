@@ -2,6 +2,8 @@
 // - `useApp()`：连接、预设、会话树、谁在跑、谁在等用户。只在这些变了时重渲染。
 // - `useThread(id)`：一个会话的对话状态（dock-core 的 `ThreadState`）。流式增量
 //   只让正在看它的组件重渲染。
+// - `useThreadSelector(id, select, equal)`：只要对话里派生出的一小块（面板用）：
+//   结果没变就不重渲染，流式增量牵动不到。
 // - `useEnv(id)`：这个会话的审批 / 模型 / 推理。
 // - `useSubagents(id)`：这个会话派出的子代理（状态 + 各自的对话）。
 // - `useWorkflows(id)`：这个会话起的工作流 run（阶段、子代理行、结果）。
@@ -31,6 +33,7 @@ import {
   EMPTY_TURN_CHANGES,
   withHistory,
   type DockEvent,
+  type PendingItem,
   type SubagentApproval,
   type SubagentsState,
   type ThreadState,
@@ -259,8 +262,11 @@ export interface ProjectPrefs {
   removed: ReadonlySet<string>;
 }
 
-/** Dock 一个进程最多开几页（cordis-tui `MAX_TABS`，含 `dock serve` 起步的第 1 页）。 */
-const MAX_PAGES = 9;
+/**
+ * 闲着的后台页留几张。Dock 不限开着的页数（会话多少都能同时开着、同时跑），但每页常驻
+ * 内存（实测调试版约 26MB）：点开看过的旧会话都留着页会一直涨，超过这么多张就关掉最久没看的。
+ */
+const IDLE_PAGES_KEPT = 16;
 
 export const NO_ENV: ComposerSettings = {
   approval: "ask",
@@ -364,7 +370,7 @@ export class DockStore {
   private asideParent = new Map<string, string>();
   /** 正在看的会话（`focus`，分屏时两个）；它们跑完不算通知。 */
   private viewing = new Set<string>();
-  /** 每个会话最后一次在看的时间：页数满了先关最久没看的（`makeRoom`）。 */
+  /** 每个会话最后一次在看的时间：闲着的后台页太多时先关最久没看的（`trimIdlePages`）。 */
   private seenAt = new Map<string, number>();
   /** 每个会话开始等用户的时间（通知菜单写「N 分钟前」）。 */
   private waitingAt = new Map<string, number>();
@@ -677,7 +683,14 @@ export class DockStore {
     }
     const before = this.threads.get(id) ?? EMPTY_THREAD;
     const after = reduceThread(before, event);
-    if (after === before) return;
+    if (after === before) {
+      // 没见过的一轮、序号却不比已有的大：页在别处被关掉又重开过（投影重建、seq 从头编），
+      // 之后的推送都会被当成重复丢掉。整份重拉。
+      if (event.method === "turn/started" && event.seq && event.seq <= before.seq && !before.turns.some((t) => t.id === event.turnId)) {
+        void this.load(id).catch(this.fail);
+      }
+      return;
+    }
     this.threads.set(id, after);
     if (event.method === "turn/completed" && !event.steered && this.app.stopping.has(id)) {
       const stopping = new Set(this.app.stopping);
@@ -869,7 +882,14 @@ export class DockStore {
    * 点开一个会话。关着的直接开页：Dock 按会话记下的模型 / 推理强度恢复，
    * 一打开输入框就有真实设置可看可切（不开页拿不到 environment）。
    */
-  select = (id: string) => (this.isOpen(id) ? this.load(id) : this.ensureOpen(id)).catch(this.fail);
+  select = (id: string) => {
+    if (!this.isOpen(id)) return this.ensureOpen(id).catch(this.fail);
+    // 开着、订阅着、拉过了：推送一直在合进来，状态就是新的——不再整份重拉（长会话来回切
+    // 每次都要重拉几 MB 历史、整段对话重画）。只补一下环境（模型 / 审批可能在别处改过）。
+    // 页被别的窗口关了又重开（seq 重编）由 apply 认出来再整份重拉。
+    if (this.subscribed.has(id) && this.threads.has(id) && !this.loading.has(id)) return this.loadEnv(id).catch(this.fail);
+    return this.load(id).catch(this.fail);
+  };
 
   /** 正在看哪些会话（主面板 + 分屏；`null` = 新对话页）。看了就从「刚完成」里移出。 */
   focus = (ids: (string | null)[]) => {
@@ -899,6 +919,7 @@ export class DockStore {
       if (this.removed.delete(projectId(presetId, cwd))) localStorage.setItem(this.scoped(REMOVED_KEY), JSON.stringify([...this.removed]));
       await this.refreshThreads();
       await this.load(r.thread.id);
+      void this.trimIdlePages();
       return r.thread.id;
     } catch (e) {
       this.fail(e);
@@ -916,7 +937,6 @@ export class DockStore {
     let p = this.opening.get(id);
     if (!p) {
       p = (async () => {
-        await this.makeRoom();
         await this.client.call("thread/open", { threadId: id });
         await this.refreshThreads();
         // 开页后网关按落盘重建投影，seq 重新编号：旧状态作废，整份重拉。
@@ -925,6 +945,7 @@ export class DockStore {
         this.subagents.delete(id);
         this.workflows.delete(id);
         await this.load(id);
+        void this.trimIdlePages();
       })().finally(() => this.opening.delete(id));
       this.opening.set(id, p);
     }
@@ -932,33 +953,68 @@ export class DockStore {
   }
 
   /**
-   * Dock 一个进程最多开 {@link MAX_PAGES} 页。满了就关掉最久没看的一页腾位置：
-   * 只挑有对话（关掉不丢，下次点开再连）、没在跑、没在等你、没在看的；
-   * 从没看过的（别处开的、GUI 重载前开的）排最前。
-   * 挑不出来就照开，让 Dock 报「最多 9 页」。
+   * 闲着的后台页超过 {@link IDLE_PAGES_KEPT} 张时，关掉最久没看的（开页之后在后台做，不挡开页；
+   * 开页本身不设上限）。关掉不丢：记录在盘上，下次点开再连。只挑有对话、没在跑、没在等你、
+   * 没在看、没有子代理在跑、没开侧边聊天、目标没在进行的；从没看过的（别处开的、GUI 重载前
+   * 开的）排最前。收的时候又开了页，收完再收一轮。
    */
-  private async makeRoom() {
-    const open = this.wire.filter((t) => t.open);
-    if (open.length < MAX_PAGES) return;
-    const candidates = open
+  private trimming = false;
+  private trimAgain = false;
+  private async trimIdlePages() {
+    if (this.trimming) {
+      this.trimAgain = true;
+      return;
+    }
+    this.trimming = true;
+    try {
+      do {
+        this.trimAgain = false;
+        await this.trimOnce();
+      } while (this.trimAgain);
+    } catch {
+      // 只是收内存：失败了下次开页再试。
+    } finally {
+      this.trimming = false;
+    }
+  }
+
+  /** 在跑、在等你、目标在进行、正在看的页都不算闲。 */
+  private busyPage(id: string) {
+    return (
+      this.viewing.has(id) ||
+      isRunning(this.getThread(id)) ||
+      this.app.waiting.has(id) ||
+      this.getEnv(id).goal?.status === "active"
+    );
+  }
+
+  private async trimOnce() {
+    const idle = this.wire
       .filter(
         (t) =>
+          t.open &&
           t.alias !== "live" &&
-          !this.viewing.has(t.id) &&
           !this.opening.has(t.id) &&
+          // 拉过记录的已经知道忙不忙；没拉过的（GUI 重载前开的、别处开的）下面拉了再判断。
+          !(this.threads.has(t.id) && this.busyPage(t.id)) &&
           // 关主会话会连它的侧边聊天一起关掉。
           !this.app.asides.has(t.id) &&
-          // 网关给还没说过话的页标题「当前会话」；GUI 重载后没拉过记录也认得出。
+          // 子代理只活在这一页的内存里：关页会把它们停掉。
+          !t.subagentsRunning &&
+          // 网关给还没说过话的页标题「当前会话」：空会话关掉不落盘，等于删了。
           t.title !== "当前会话",
       )
       .sort((a, b) => (this.seenAt.get(a.id) ?? 0) - (this.seenAt.get(b.id) ?? 0));
-    for (const t of candidates) {
-      // 没拉过记录的（GUI 重载前开的、别处开的）不知道在不在跑：先拉一次再判断，
-      // 关掉正在跑的页会把那一轮停掉。
+    let extra = idle.length - IDLE_PAGES_KEPT;
+    for (const t of idle) {
+      if (extra <= 0) break;
+      // 关掉正在跑的页会把那一轮停掉：没拉过记录的先拉一次再判断。
       if (!this.threads.has(t.id)) await this.load(t.id);
-      if (isRunning(this.getThread(t.id)) || this.app.waiting.has(t.id)) continue;
+      // 这一张已经算进 extra：拉完发现在忙，它本来就不是闲页，也得从多出来的里扣掉，
+      // 不然会多关一张真闲的。
+      extra -= 1;
+      if (this.busyPage(t.id)) continue;
       await this.closePage(t.id);
-      return;
     }
   }
 
@@ -1658,6 +1714,8 @@ export {
   useCanvas,
   useApp,
   useThread,
+  useThreadSelector,
+  sameItems,
   useSubagents,
   useTurnChanges,
   useWorkflows,
@@ -1675,6 +1733,12 @@ export {
   lastSessionKey,
 } from "./gateways";
 export type { GatewayAttention, GatewayHost, GatewayView } from "./gateways";
+
+/** `useThreadSelector` 用：队首那条在等用户的交互（条目对象不变时是同一个引用）。 */
+export const firstPending = (thread: ThreadState): PendingItem | null => pendingItems(thread)[0] ?? null;
+/** `useThreadSelector` 用：最后一轮在跑时它从什么时候开始；不在跑是 `null`。 */
+export const runningSince = (thread: ThreadState): number | null =>
+  isRunning(thread) ? thread.turns[thread.turns.length - 1].startedAt : null;
 
 /** 预设 → 项目（cwd）→ 会话，会话按更新时间新到旧；预设顺序跟 `preset/list`。 */
 export function groupSessions(

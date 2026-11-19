@@ -6,7 +6,7 @@
 // 桥脚本塞在第一行、不带换行，库走 src 不内联：页面报错的行号就是 vN.html 的行号。
 // 沙箱不同源，localStorage 一碰就抛错：桥换成内存版，页面照常跑（刷新即丢）。
 
-import type { ThreadState } from "dock-core";
+import type { ThreadState, Turn, TurnItem } from "dock-core";
 import { calledTool } from "./toolCall";
 
 /** 随包带的库。键是 `dock:lib/` 后面的名字。 */
@@ -135,17 +135,45 @@ export function canvasEvent(item: ToolLike): CanvasEvent | null {
   };
 }
 
-/** 线程里所有画布工具项，按出现顺序。 */
+/**
+ * 线程里所有画布工具项，按出现顺序。
+ *
+ * 按轮次、按工具项缓存（dock-core 的轮次 / 条目没变就是同一个引用）：流式时只重扫在跑的
+ * 那一轮，没变的画布事件还是原来那个对象——调用方按引用比较（`sameItems`）就知道没变。
+ */
 export function canvasEvents(thread: ThreadState): CanvasEvent[] {
   const out: CanvasEvent[] = [];
   for (const turn of thread.turns) {
-    for (const item of turn.items) {
-      if (item.kind !== "tool") continue;
-      const ev = canvasEvent(item as ToolLike);
-      if (ev) out.push(ev);
+    let events = turnEvents.get(turn);
+    if (!events) {
+      events = [];
+      for (const item of turn.items) {
+        const ev = itemEvent(item);
+        if (ev) events.push(ev);
+      }
+      turnEvents.set(turn, events);
     }
+    out.push(...events);
   }
   return out;
+}
+
+const turnEvents = new WeakMap<Turn, CanvasEvent[]>();
+const itemEvents = new WeakMap<TurnItem, CanvasEvent | null>();
+
+/** 对话流里一条（dock-core 的条目，不可变）的画布事件，按条目缓存：流式时别每个增量都重新解析。 */
+export function canvasEventOf(item: TurnItem): CanvasEvent | null {
+  return itemEvent(item);
+}
+
+function itemEvent(item: TurnItem): CanvasEvent | null {
+  if (item.kind !== "tool") return null;
+  let ev = itemEvents.get(item);
+  if (ev === undefined) {
+    ev = canvasEvent(item as ToolLike);
+    itemEvents.set(item, ev);
+  }
+  return ev;
 }
 
 // ---- 交回 agent 的话（填进输入框，不自动发） ----

@@ -96,6 +96,9 @@ export function TurnNav({
   const frame = useRef(0);
   const railRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  // 对话流只画最近的轮次（更早的翻上去才补）：页面上的轮次节点按 id 对回导航里的下标。
+  const indexOf = useRef(new Map<string, number>());
+  indexOf.current = new Map(entries.map((e, i) => [e.turnId, i]));
 
   // 跟着滚动算当前那条；内容长高（流式、展开）也要重算，一帧最多一次。
   useEffect(() => {
@@ -108,14 +111,15 @@ export function TurnNav({
       const nodes = el.querySelectorAll<HTMLElement>(`[${NAV_ATTR}]`);
       // 到底了就是最后一条：最后几轮很短时顶边够不到判定线。
       if (el.scrollHeight - el.scrollTop - el.clientHeight <= 1) {
-        setActive(nodes.length - 1);
+        setActive(indexOf.current.size - 1);
         return;
       }
-      let idx = 0;
-      nodes.forEach((n, i) => {
-        if (n.getBoundingClientRect().top - top <= el.clientHeight * ACTIVE_LINE) idx = i;
-      });
-      setActive(idx);
+      let hit: HTMLElement | undefined = nodes[0];
+      for (const n of nodes) {
+        if (n.getBoundingClientRect().top - top > el.clientHeight * ACTIVE_LINE) break;
+        hit = n;
+      }
+      setActive(hit ? (indexOf.current.get(hit.getAttribute(NAV_ATTR) ?? "") ?? -1) : -1);
     };
     const schedule = () => {
       if (!frame.current) frame.current = requestAnimationFrame(measure);

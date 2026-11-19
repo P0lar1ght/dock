@@ -35,6 +35,13 @@
 - 排队、Pending 卡、目标条和输入框在同一个容器里，合计最多占会话区 75%（SessionPane）：会变高的卡要 min-h-0 + 卡内滚动，头和提交钉住（Pending.tsx 的问答卡）；别把输入框拆出这个容器。
 - 输入框固定在会话区底部：Transcript 根节点是 flex-1（basis 0）。别改回按内容高度的 basis——flex 按「shrink × basis」分摊超出的高度，对话越长，可压矮的输入区被挤得越多，最后掉出窗口。
 - 左边消息导航在 TurnNav.tsx：按轮次根节点的 data-nav-turn 找位置，别删这个属性。
+- 对话流只画最近 INITIAL_TURNS 轮（Transcript.tsx）：翻到顶附近自动补；别改回整段全画。
+- 导航跳到没画出来的轮次：先补到它再滚（toTurn）；TurnNav 按 data-nav-turn 的值对回下标。
+- 折起来的过程（「用时 ›」）没点开过不挂（TurnView 的 processMounted）。
+- 贴底跟随靠 ResizeObserver：内容怎么长都跟到底。
+- 只有用户往上翻（滚轮、按住指针、按键）才放手：别按 scroll 事件里的距离判（事件异步，会误判）。
+- 点了带 rotate-open 的展开按钮：动画期间按它对齐，不为追底部把它顶出视口。
+- 滚动区 overflow-anchor: none：WebKit 没有滚动锚定，往前补轮次自己按高度差挪回去。
 - 回复渲染在 Markdown.tsx + components/markdown/（Shiki 高亮、Mermaid、KaTeX）。
 - Shiki / Mermaid 第一次用到才 import：别在启动路径上静态引入。
 - 对话字体 / 代码字体 / 高亮配色是 GUI 偏好（prefs.ts），走 CSS 变量 --font-chat / --font-mono。
@@ -78,6 +85,11 @@
 - 本机加每台打开的远程各一份 `DockClient` / `DockStore`（`src/dock/gateways.ts`）。`store` / `dock` 是前台代理。切走不关套接字、不拆别的隧道、不重载页面；本机 Dock 跟 GUI 同寿命。
 - 组件用 `useApp` / `useThread(id)` / `useEnv(id)` 订阅。
 - 流式增量只重渲染订阅那个会话的组件。
+- 只有对话流订阅整个会话（SessionPane 的 SessionTranscript）；头栏、输入框只订派生值。
+- 面板别用 useThread：用 useThreadSelector 只订派生的那一块，结果没变就不重渲染。
+- 派生按轮次 / 条目缓存（WeakMap），没变的条目是同一个对象，比较用 sameItems。
+- 点开已开着、已订阅的会话不重拉历史（store.select）；页被别处重开（seq 重编）由 apply 认出来重拉。
+- web 面板的实时事件攒 BATCH_MS 一批发（WebPanel.tsx），页面里再逐条派给 dock.on("event")。
 - 会话级集合（running / waiting）只在翻转时换新。
 - 开页后网关 seq 重编：旧状态丢掉整份重拉。
 - 断线重连：已加载的会话整份重拉。
@@ -85,7 +97,9 @@
 - 「刚完成」只记实时推来的结束；`store.focus` 标记正在看的会话。
 - 排队消息没有推送：一轮开始 / 结束时重拉 turn/queue/list。
 - 删会话：开着的先 thread/close；空会话关掉即删（不落盘），不再调 delete。
-- 点开会话即开页；Dock 最多 9 页，满了 store.makeRoom 关最久没看的（别关在跑的）。
+- 点开会话即开页；开页不设上限（Dock 只限终端自己的 Ctrl+N）。
+- 闲着的后台页超过 IDLE_PAGES_KEPT 张，开页后在后台关最久没看的（store.trimIdlePages）。
+- 别关在跑 / 在等 / 在看 / 有子代理在跑 / 开着侧边聊天 / 目标进行中 / 空会话的页。
 - 项目在 Dock 里不是实体：侧栏 + 建的空项目只存 GUI 的 localStorage。
 - 原生选文件夹面板是系统进程画的：cua 拿不到树，后台发不进键。
 - 拖到窗口外别靠 WebView 的 pointer 事件：交给 Rust pop_out_drag 问系统鼠标状态。

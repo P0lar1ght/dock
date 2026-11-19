@@ -45,9 +45,9 @@ import {
   X,
 } from "lucide-react";
 import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
-import type { ThreadState, TurnChangesState } from "dock-core";
+import type { ThreadState, Turn, TurnChangesState, TurnItem } from "dock-core";
 import { dock } from "../dock/client";
-import { store, useApp, useThread, useTurnChanges } from "../dock/store";
+import { sameItems, store, useApp, useThreadSelector, useTurnChanges } from "../dock/store";
 import { IconButton } from "./chrome";
 import { Markdown } from "./Markdown";
 import { imeComposing } from "../dock/ime";
@@ -138,7 +138,8 @@ export function FilesPanel({
   controls?: ReactNode;
 }) {
   const app = useApp();
-  const thread = useThread(sessionId);
+  // 只订阅「agent 写过哪些文件」：流式增量不让整个文件面板（树 + 预览）跟着重画。
+  const writes = useThreadSelector(sessionId, agentWrites, sameItems);
   const connected = app.connection === "open";
   const [root, setRoot] = useState<string | null>(null);
   const [dirs, setDirs] = useState<Map<string, Dir>>(new Map());
@@ -162,12 +163,12 @@ export function FilesPanel({
   /** 正在编辑的文件有没保存的修改：先问，再做 `run`。 */
   const guarded = (run: () => void) => (dirty.current ? setConfirm({ run }) : run());
 
-  const { paths: changed, writes } = useMemo(() => agentChanges(thread, root), [thread, root]);
+  const changed = useMemo(() => changedPaths(writes, root), [writes, root]);
   // 这个会话里 agent 改过的工作区外文件（每轮改动里路径是绝对的那些）：树里没有，单列一组只读看。
   const turnChanges = useTurnChanges(sessionId);
   const outside = useMemo(() => (dock.capabilities.workspaceFilesOutside ? outsideEdits(turnChanges) : []), [turnChanges]);
   // 按写的次数而不是按路径集合触发重读：同一个文件再改一次，集合不变，内容变了。
-  const changedKey = writes.join("\n");
+  const changedKey = writes.map((w) => w.id).join("\n");
 
   // 换会话：从头来。
   useEffect(() => {
@@ -1387,29 +1388,56 @@ function Empty({
   );
 }
 
-/** 这个会话里 agent 用写文件工具改过（且成功）的文件，换算成相对工作区根的路径；
- * `writes` 是这些写的工具项 id（每写一次多一条）。 */
-function agentChanges(thread: ThreadState, root: string | null): { paths: Set<string>; writes: string[] } {
-  const out = new Set<string>();
-  const writes: string[] = [];
+/** agent 一次成功的写文件：工具项 id + 写的路径（原样，可能是绝对路径）。 */
+interface AgentWrite {
+  id: string;
+  path: string;
+}
+
+// 工具项是不可变的（状态变了是新对象）：按工具项记住它算出来的那次写，没变的还是同一个对象，
+// 面板按引用比较就知道「写过的文件」没变。
+const writeCache = new WeakMap<TurnItem, AgentWrite | null>();
+
+function writeOf(item: TurnItem): AgentWrite | null {
+  if (item.kind !== "tool" || item.status !== "completed") return null;
+  let hit = writeCache.get(item);
+  if (hit !== undefined) return hit;
+  const keys = WRITE_TOOLS[item.name];
+  const raw = keys?.map((k) => item.arguments[k]).find((v): v is string => typeof v === "string" && !!v.trim());
+  hit = raw ? { id: item.id, path: raw.trim().replace(/^\.\//, "") } : null;
+  writeCache.set(item, hit);
+  return hit;
+}
+
+/** 这个会话里 agent 用写文件工具改过（且成功）的每一次写（每写一次多一条，工作区外的也算）。 */
+function agentWrites(thread: ThreadState): AgentWrite[] {
+  const out: AgentWrite[] = [];
   for (const turn of thread.turns) {
-    for (const item of turn.items) {
-      if (item.kind !== "tool" || item.status !== "completed") continue;
-      const keys = WRITE_TOOLS[item.name];
-      if (!keys) continue;
-      const raw = keys.map((k) => item.arguments[k]).find((v): v is string => typeof v === "string" && !!v.trim());
-      if (!raw) continue;
-      let path = raw.trim().replace(/^\.\//, "");
-      // 工作区外的也算一次写：正在看的那个（「工作区外」那组）要跟着重读。
-      writes.push(item.id);
-      if (path.startsWith("/")) {
-        if (!root || !path.startsWith(`${root}/`)) continue;
-        path = path.slice(root.length + 1);
+    let writes = turnWrites.get(turn);
+    if (!writes) {
+      writes = [];
+      for (const item of turn.items) {
+        const w = writeOf(item);
+        if (w) writes.push(w);
       }
-      out.add(path);
+      turnWrites.set(turn, writes);
     }
+    out.push(...writes);
   }
-  return { paths: out, writes };
+  return out;
+}
+
+/** 没变的轮次是同一个引用：流式时只重扫在跑的那一轮。 */
+const turnWrites = new WeakMap<Turn, AgentWrite[]>();
+
+/** 写过的文件换算成相对工作区根的路径；工作区外的不算（树里没有）。 */
+function changedPaths(writes: AgentWrite[], root: string | null): Set<string> {
+  const out = new Set<string>();
+  for (const { path } of writes) {
+    if (!path.startsWith("/")) out.add(path);
+    else if (root && path.startsWith(`${root}/`)) out.add(path.slice(root.length + 1));
+  }
+  return out;
 }
 
 /** 工作区外的文件：路径是绝对的（树里的都是相对工作区根的）。 */

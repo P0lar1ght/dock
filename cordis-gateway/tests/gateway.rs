@@ -2222,6 +2222,53 @@ async fn live_thread_ignores_other_pages() {
     assert!(history.to_string().contains("主会话的话"), "{history}");
 }
 
+/// 回归：开着的页一个 token 一条增量，`thread/history` 以前原样整份给（一轮几千条，长期
+/// 开着的页几十 MB，GUI 和插件每次拉都要整份解析）。连着的增量并成两条再给，正文不变。
+#[tokio::test]
+async fn history_compacts_streamed_deltas_of_an_open_page() {
+    let h = Harness::boot().await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let _ = rpc.call("initialize", json!({})).await;
+
+    let sessions = h.ctx.get::<Sessions>(SESSIONS).unwrap();
+    sessions.append(LogEvent::User("讲个故事".into()));
+    let mut text = String::new();
+    for piece in ["从前", "有座", "山，", "山里", "有座庙"] {
+        text.push_str(piece);
+        sessions.append(LogEvent::LlmStream(LlmOutput {
+            text: text.clone(),
+            ..LlmOutput::default()
+        }));
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let history = rpc
+        .call("thread/history", json!({ "threadId": "live" }))
+        .await;
+    let deltas: Vec<(String, u64)> = history["result"]["events"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{history}"))
+        .iter()
+        .filter(|e| e["method"] == "item/message_delta")
+        .map(|e| {
+            let delta = e["payload"]["delta"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            (delta, e["seq"].as_u64().unwrap_or_default())
+        })
+        .collect();
+    assert_eq!(deltas.len(), 2, "五条增量应并成两条：{deltas:?}");
+    assert_eq!(deltas[0].0, "从前有座山，山里");
+    assert_eq!(deltas[1].0, "有座庙");
+    assert_eq!(
+        deltas[1].1,
+        deltas[0].1 + 1,
+        "并起来那条的 seq 是倒数第二条的"
+    );
+}
+
 const GUI_ORIGIN: &str = "tauri://localhost";
 
 /// `dock serve`：父进程从 stdout 拿到的 ticket 直接能连 WS，不走配对；ticket
