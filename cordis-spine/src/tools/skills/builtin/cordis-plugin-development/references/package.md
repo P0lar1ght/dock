@@ -63,7 +63,8 @@ http = ["api.github.com"]
 | 别的包 `host.provide` 的名字 | `host.get` 拿到一份拷贝 |
 
 `inject: ["sessions"]` 能启动，但 `host.get("sessions")` 回 `()`，没有方法可调。
-要用某个内置能力，就 `host.call_tool` 调它的模型工具（权限门照走）。
+要用某个内置能力，就 `host.call_tool` 调它的模型工具（权限门照走）；要成败和解析好的 JSON
+用 `host.call_tool_result`（`host-api.md`）。MCP 服务器的工具一样能调。
 `cordis_inspect what: "services"` 把「够得着」和「只是挂着」分两段列。
 
 ## 状态放哪

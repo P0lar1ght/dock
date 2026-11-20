@@ -801,6 +801,10 @@ async fn rhai_run_registers_tool_provide_and_slot_then_stop_unregisters() {
         "{builtins}"
     );
     assert!(builtins.contains("/agents"), "{builtins}");
+    // 新加的：结构化的 call_tool 和只做计算的生态包，模型查 builtins 能看到。
+    assert!(builtins.contains("host.call_tool_result"), "{builtins}");
+    assert!(builtins.contains("Url (rhai-url)"), "{builtins}");
+    assert!(builtins.contains("rand_alpha_numeric"), "{builtins}");
     let slots = exec(&root, "cordis_inspect", r#"{"what":"slots"}"#).await;
     assert!(slots.contains("memo"), "{slots}");
     assert!(slots.contains("便签"), "{slots}");
@@ -1040,6 +1044,58 @@ async fn host_call_tool_asks_on_the_calling_page() {
     perms.resolve(PermissionOptionKind::RejectOnce);
     let out = call.await.unwrap();
     assert!(!out.contains("relayed"), "拒了就不该跑：{out}");
+}
+
+/// `host.call_tool_result`：除了文本，还交回成败（注册表给的 `is_error`）和文本恰好是
+/// JSON 时解析好的值。`call_tool` 只给文本，脚本只能按开头猜成败。`call_tool` 本身不变。
+#[tokio::test(flavor = "multi_thread")]
+async fn call_tool_result_reports_failure_and_parses_json() {
+    let root = boot().await;
+    load_plugin(
+        &root,
+        "prober",
+        r#"#{ inject: ["tools"], apply: |host| {
+            host.register_tool(#{ name: "probe", parameters: #{ type: "object", properties: #{} },
+                execute: |a| {
+                    let ok = host.call_tool_result("echo_any", #{ count: 3, tags: ["x"] });
+                    let bad = host.call_tool_result("echo_any", "Error: boom");
+                    let plain = host.call_tool_result("echo_any", "just text");
+                    let parts = [ok.is_error, ok.json.count, ok.json.tags[0], ok.name, ok.images,
+                        bad.is_error, bad.text, type_of(plain.json), plain.text,
+                        host.call_tool("echo_any", "same")];
+                    parts.reduce(|s, v| if s == () { `${v}` } else { s + "|" + v })
+                } });
+        } }"#,
+    )
+    .await;
+    assert_eq!(
+        exec(&root, "probe", "{}").await,
+        "false|3|x|echo_any|0|true|Error: boom|()|just text|same"
+    );
+}
+
+/// 生态里只做计算的包（rhai-url、rhai-rand）在运行期的插件里用得上。
+#[tokio::test]
+async fn pure_rhai_packages_are_available_to_running_plugins() {
+    let root = boot().await;
+    load_plugin(
+        &root,
+        "urlrand",
+        r#"#{ inject: ["tools"], apply: |host| {
+            host.register_tool(#{ name: "urlrand", parameters: #{ type: "object", properties: #{} },
+                execute: |a| {
+                    let u = Url("https://api.example.com/v1/items?page=1");
+                    u.query_set("page", "2");
+                    let picked = [7].sample();
+                    `${u.href}|${rand(1..=1)}|${picked}|${rand_alpha_numeric(8).len()}`
+                } });
+        } }"#,
+    )
+    .await;
+    assert_eq!(
+        exec(&root, "urlrand", "{}").await,
+        "https://api.example.com/v1/items?page=2|1|7|8"
+    );
 }
 
 /// 同一个缺陷的 HTTP 那一半：没声明的 host 要在发起调用的那一页确认；

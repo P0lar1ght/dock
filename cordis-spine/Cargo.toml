@@ -36,6 +36,11 @@ url = "2"
 percent-encoding = "2.3"
 indexmap = { version = "2", features = ["serde"] }
 rhai = { version = "1.25", features = ["serde", "sync"] }
+# Rhai 生态里只做计算的包（tools/dynamic_runner/rhai_packages.rs）。别加 rhai-fs / rhai-http /
+# rhai-dylib：它们绕开权限门，要这些能力走 host.call_tool。rand 与 rhai-rand 同版本。
+rhai-url = "0.0.6"
+rhai-rand = { version = "0.2", default-features = false, features = ["float", "array"] }
+rand = "0.9"
 async-lsp = { version = "=0.2.3", features = ["tokio", "tracing"] }
 async-trait = "0.1"
 tracing = "0.1"
