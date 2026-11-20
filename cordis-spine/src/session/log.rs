@@ -1692,15 +1692,19 @@ impl Sessions {
         let mut events = self.events.lock().unwrap();
         let mut times = self.times.lock().unwrap();
         let mut changed = false;
-        loop {
-            match events.last() {
-                Some(LogEvent::LlmStream(out))
+        // 空着的那一格弹掉。尾巴上可能还压着流式途中到达的 Notice（见
+        // [`inflight_llm_index`]）：卡片留下，只拿掉空格。
+        while let Some(at) = inflight_llm_index(&events) {
+            match &events[at] {
+                LogEvent::LlmStream(out)
                     if out.text.is_empty()
                         && out.reasoning.is_empty()
                         && out.tool_calls.is_empty() =>
                 {
-                    events.pop();
-                    times.pop();
+                    events.remove(at);
+                    if at < times.len() {
+                        times.remove(at);
+                    }
                     changed = true;
                 }
                 _ => break,
@@ -2543,6 +2547,34 @@ mod tests {
                 .any(|e| matches!(e, LogEvent::LlmStream(out) if out.tool_calls.len() == 1)),
             "{history:?}"
         );
+    }
+
+    /// 流式途中来了张卡、随后这一步什么都没产出就被停下：空着的那一格照样弹掉，
+    /// 卡片留着。以前只看最后一条，卡片压在上面时空格留在记录里。
+    #[tokio::test]
+    async fn sealing_drops_an_empty_slot_under_a_notice() {
+        use cordis_base::types::NoticeKind;
+        let ctx = Context::new();
+        let sessions = Sessions::new(ctx);
+        sessions.append(LogEvent::User("review".into()));
+        sessions.begin_llm();
+        sessions.append(LogEvent::Notice {
+            kind: NoticeKind::WorkflowReport,
+            title: "code-review · reviewer 上报".into(),
+            body: "findings: 0".into(),
+        });
+        sessions.seal_incomplete_tool_calls();
+
+        let events = sessions.events();
+        assert!(
+            !events.iter().any(|e| matches!(e, LogEvent::LlmStream(_))),
+            "空格该弹掉：{events:?}"
+        );
+        assert!(
+            matches!(events.last(), Some(LogEvent::Notice { .. })),
+            "卡片留着：{events:?}"
+        );
+        assert_eq!(sessions.times().len(), events.len(), "时刻跟着事件对齐");
     }
 
     /// 工具参数的片段按调用编号推给界面，不进日志；同一个调用按间隔节流（攒着的拼进
