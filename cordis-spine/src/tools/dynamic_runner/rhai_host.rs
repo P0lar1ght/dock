@@ -963,6 +963,20 @@ impl Host {
                 if repeat { "every" } else { "after" }
             ));
         }
+        // Timers may span days (unlike blocking hooks), but not more than a month.
+        // Convert before taking a timer slot or spawning: a rejected value has no side effects.
+        const MAX_TIMER_SECONDS: f64 = 30.0 * 24.0 * 60.0 * 60.0;
+        let invalid_period = || {
+            eval_err(format!(
+                "host.{} 的间隔不能超过 2592000 秒（30 天）",
+                if repeat { "every" } else { "after" }
+            ))
+        };
+        let period =
+            std::time::Duration::try_from_secs_f64(seconds).map_err(|_| invalid_period())?;
+        if seconds > MAX_TIMER_SECONDS {
+            return Err(invalid_period());
+        }
         if self
             .inner
             .timers
@@ -975,7 +989,6 @@ impl Host {
         let engine = self.inner.engine.clone();
         let ast = self.inner.ast.clone();
         let plugin_id = self.inner.plugin_id.clone();
-        let period = std::time::Duration::from_secs_f64(seconds);
         let task = handle.spawn(async move {
             let mut next = tokio::time::Instant::now() + period;
             loop {
@@ -2231,6 +2244,88 @@ mod tests {
     fn map_of(src: &str) -> Map {
         let engine = Engine::new();
         engine.eval::<Map>(src).unwrap()
+    }
+
+    fn timer_host() -> Host {
+        Host {
+            inner: Arc::new(HostInner {
+                ctx: Context::new(),
+                plugin_id: "timer-test".into(),
+                plugin_dir: None,
+                disk_backed: false,
+                surface: Default::default(),
+                last_page: Arc::default(),
+                cards_owned: Default::default(),
+                last_wake: Default::default(),
+                timers: Default::default(),
+                store_path: None,
+                store: Default::default(),
+                engine: Arc::new(Engine::new()),
+                ast: AST::empty(),
+                disposers: Default::default(),
+                statuses: Default::default(),
+            }),
+        }
+    }
+
+    /// 调真正的宿主入口；旧版在超大 float 上 panic，integer 大值也会排一个无意义的任务。
+    #[tokio::test]
+    async fn timers_reject_huge_intervals_without_panicking_or_taking_slots() {
+        let mut host = timer_host();
+        let callback = FnPtr::new("unused").unwrap();
+        for repeat in [false, true] {
+            let name = if repeat { "every" } else { "after" };
+            let expected = format!("host.{name} 的间隔不能超过 2592000 秒（30 天）");
+            for seconds in [1e20, 1e308, 2592000.001] {
+                let error = if repeat {
+                    host.every_float(seconds, callback.clone())
+                } else {
+                    host.after_float(seconds, callback.clone())
+                }
+                .unwrap_err();
+                match *error {
+                    rhai::EvalAltResult::ErrorRuntime(value, _) => {
+                        assert_eq!(value.into_string().unwrap(), expected);
+                    }
+                    other => panic!("expected a script error, got {other:?}"),
+                }
+            }
+            let error = if repeat {
+                host.every_int(rhai::INT::MAX, callback.clone())
+            } else {
+                host.after_int(rhai::INT::MAX, callback.clone())
+            }
+            .unwrap_err();
+            match *error {
+                rhai::EvalAltResult::ErrorRuntime(value, _) => {
+                    assert_eq!(value.into_string().unwrap(), expected);
+                }
+                other => panic!("expected a script error, got {other:?}"),
+            }
+        }
+        assert_eq!(
+            host.inner.timers.load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        assert_eq!(host.inner.disposers.lock().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn timers_accept_minimum_fractional_and_maximum_intervals() {
+        let mut host = timer_host();
+        let callback = FnPtr::new("unused").unwrap();
+        for seconds in [5.0, 5.25, 2592000.0] {
+            host.every_float(seconds, callback.clone()).unwrap();
+        }
+        for seconds in [1.0, 1.25, 2592000.0] {
+            host.after_float(seconds, callback.clone()).unwrap();
+        }
+        assert_eq!(
+            host.inner.timers.load(std::sync::atomic::Ordering::Relaxed),
+            6
+        );
+        assert_eq!(host.inner.disposers.lock().unwrap().len(), 0);
+        host.inner.ctx.fiber().dispose().await.unwrap();
     }
 
     #[test]
