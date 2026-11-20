@@ -90,9 +90,20 @@ pub struct WirePolicy {
     pub include_fields: &'static [&'static str],
     /// 这条通道准用的托管工具。
     pub hosted_tools: &'static [&'static str],
-    /// 带 `prompt_cache_key`（取会话 id）：上游按它把同一会话的请求路由到同一批
-    /// 机器，前缀缓存才有机会命中。只对认这个字段的通道开，别家多一个字段可能 400。
+    /// 带 `prompt_cache_key`（取会话 id）。只对认这个字段的通道开，别家多一个
+    /// 字段可能 400。光有它不保证同一会话落到同一台机器，见 [`Self::session_headers`]。
     pub prompt_cache_key: bool,
+    /// 值取会话 id 的请求头（`session-id` 之类）。
+    ///
+    /// 有的通道按**请求头**而不是按 `prompt_cache_key` 把同一会话的请求路由到
+    /// 同一批机器；不带的话每次请求都随机落到别的机器上，前缀缓存几乎不中。
+    /// 还没落盘的会话（id 是空串）不带。
+    pub session_headers: &'static [&'static str],
+    /// 粘性路由令牌的请求 / 响应头名（`x-codex-turn-state` 之类）。
+    ///
+    /// 一轮里第一个成功的响应带回来的值，这一轮后面的请求原样带回去；**不跨轮**
+    /// ——新一轮从空开始，等上游给新的。值是不透明的，只回传不解析。
+    pub turn_state_header: Option<&'static str>,
 }
 
 /// 把某一家订阅通道整个关掉的环境变量：`DOCK_<PROVIDER>_SUBSCRIPTION`

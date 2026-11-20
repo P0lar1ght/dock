@@ -82,10 +82,13 @@ fn stamp() -> String {
 }
 
 /// 取请求体里参与前缀的三块。三条 wire 的键名不同，但都是这三样。
+///
+/// 订阅通道把 system 挪到了顶层 `instructions`：不读它的话，system 变了日志
+/// 也照样报 `same`。
 fn parts(body: &Value) -> (String, String, Vec<String>) {
-    let system = match &body["system"] {
-        Value::Null => String::new(),
-        v => v.to_string(),
+    let system = match body.get("system").or_else(|| body.get("instructions")) {
+        None | Some(Value::Null) => String::new(),
+        Some(v) => v.to_string(),
     };
     let tools = match &body["tools"] {
         Value::Null => String::new(),
@@ -231,6 +234,17 @@ pub(crate) fn record_request(identity: &str, wire: &str, model: &str, body: &Val
     append(&out);
 }
 
+/// 这次请求带了哪些会话路由头（订阅通道）。没带就不写：别的模型日志照旧。
+///
+/// 前缀一字节没变、`read` 却是 0 时先看这一行：这条通道不带会话头、不回传
+/// 路由令牌，请求就随机落到别的机器上。
+pub(crate) fn note_routing(note: &str) {
+    if note.is_empty() || log_path().is_none() {
+        return;
+    }
+    append(&format!("  路由 {note}\n"));
+}
+
 /// 把上游报回来的用量贴在刚才那条记录下面。非官方（本地估算）的忽略。
 pub(crate) fn note_usage(delta: &StreamDelta) {
     if log_path().is_none() {
@@ -298,6 +312,19 @@ mod tests {
             "{}",
             excerpt(&rewritten[1], at)
         );
+    }
+
+    /// 订阅通道的 system 在顶层 `instructions` 里：变了也要比得出来。
+    #[test]
+    fn instructions_count_as_the_system_prompt() {
+        let (system, _, messages) = parts(&json!({
+            "instructions": "you are dock",
+            "input": [{"role": "user", "content": "hi"}],
+        }));
+        assert_eq!(system, "\"you are dock\"");
+        assert_eq!(messages.len(), 1);
+        let (changed, _, _) = parts(&json!({ "instructions": "you are dock v2" }));
+        assert_ne!(blob_note(&system, &changed), "same");
     }
 
     /// 多字节字符被切一半会让日志自己 panic —— 诊断工具不许把会话搞崩。

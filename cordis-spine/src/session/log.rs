@@ -2076,6 +2076,21 @@ impl Sessions {
         self.live_id.lock().unwrap().clone()
     }
 
+    /// 给上游当会话 id 用的（`prompt_cache_key`、订阅通道的会话路由头）：这一页的
+    /// 会话 id；子代理（工作流里的也是）没有落盘 id，用它自己的身份——那就是它的
+    /// agent id，唯一、resume 之后也不变。
+    ///
+    /// 主会话还没有 id 时是空串：`main` 这种身份每个进程都一样，拿它当键等于把
+    /// 不相干的会话捆在一起。以前子代理一律是空串，它们的请求不带键也不带路由头，
+    /// 在订阅通道上前缀缓存几乎不中。
+    pub fn upstream_session_id(&self) -> String {
+        let live = self.live_session_id();
+        if live.is_empty() && !self.is_main() {
+            return self.identity.to_string();
+        }
+        live
+    }
+
     /// 不落盘的页（侧边聊天的旁问页）也要一个 id，网关按它把这一页当线程寻址。
     /// 只在还没有 id 时给，不挂盘、不建目录。
     pub fn assign_ephemeral_id(&self) {

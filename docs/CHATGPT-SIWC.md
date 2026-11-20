@@ -115,23 +115,53 @@ SIWC 那条通道比普通 OpenAI 兼容端点严，多一个字段就是 400：
 **没写 `auth` 的模型请求体与以前逐字节相同。**
 
 另外带 `prompt_cache_key`，取会话 id（同一会话同一个键，还没落盘的会话不带）。
-它不在禁发名单里，实测上游收。
+它不在禁发名单里，实测上游收。会话路由另有两样，见下一节。
 
 ## 前缀缓存
 
-这条通道的缓存命中率远低于别的模型，**是上游的问题，不是 Dock 的**
-（2026-11-15 实测，gpt-6-luna 与 gpt-5.6-luna）：
+这条通道按**请求头**做会话路由，跟官方客户端 Codex 一样
+（`WirePolicy::session_headers` / `turn_state_header`）：
 
-- 字节完全相同的请求 3 秒、15 秒、30 秒后重发，`cached_tokens` 都是 0；
-- 带不带 `prompt_cache_key` 都一样，17 次里只中过 1 次；
-- 照 Dock 的形状发三步（真工具表 + 工具调用 + 回传），每一步都是 0。
+- `session-id`、`thread-id`、`x-client-request-id` 都取会话 id（还没落盘的
+  主会话不带）；子代理（含工作流里的）没有落盘 id，取它自己的 agent id
+  （`Sessions::upstream_session_id`）。`prompt_cache_key` 同一个值；
+- 上游在响应头里给 `x-codex-turn-state`（不透明的粘性路由令牌）。一轮里
+  第一个成功的响应给的那个，这一轮后面的请求原样带回去；新一轮不带旧的，
+  等上游给新的。令牌记在这一页的 `"turn"` 服务里，换 provider / 账号 / 模型
+  就不回传。
 
-Dock 这边的前缀是纯追加的：`instructions` 各轮一致，推理项带加密内容原样
-回传，工具表与别的模型同一份。官方文档说 gpt-5.6 起自动缓存、默认 30 分钟，
-这条通道的实际表现与文档不符。
+**只带 `prompt_cache_key` 时基本不中**：请求随机落到别的机器上。
+2026-11-21 用 gpt-6-luna 实测（约 3.6k token 的前缀，每组连发 3–5 步，
+后一步在前一步后面追加它的输出与一条新消息；表里不算每组的冷启动）：
 
-所以在这条通道上，留在上下文里的每个 token 之后每轮都按全价计入额度。
-控制上下文长度（少塞大工具输出）比别的模型更要紧。
+| 发法 | 后续步骤命中 |
+|---|---|
+| 只带 `prompt_cache_key`（修之前的 Dock） | 0 / 10 |
+| 同上，system 改成 developer 消息 | 0 / 10 |
+| 只回传 turn-state / 只回传 `__oailb` `__cflb` cookie | 0 / 4 |
+| 只带会话头 | 7 / 10 |
+| 会话头 + 回传 turn-state（现在的 Dock） | 51 / 60，每次约占输入的 95% |
+| 同上但不带 `prompt_cache_key` | 2 / 4 |
+
+用真 Dock（隔离的 `dock serve`，真系统提示与工具表）跑两轮共 6 次请求：
+除冷启动那一次，后续 5 次都中（每次 88–97%），整段会话 79%。另外两次重跑
+各有一次请求整段不中、下一次又中：前缀是纯追加的（`DOCK_CACHE_DEBUG` 里
+「同前 N/N」），是上游中途换了机器，客户端带什么都管不了。
+
+几件**不是**原因的事（同一批实测排除了）：
+
+- system 放顶层 `instructions` 没关系：命中的 token 数里包括它（文档说
+  GPT-6.2 起 `instructions` 排到 `input` 后面、不进缓存；gpt-6-luna 不是）；
+- `session_id`（下划线，旧版 Codex 与 sub2api 用）和 `session-id` 一样，
+  两个都带也一样；
+- `api.openai.com` 也种 `__oailb` / `__cflb` 路由 cookie，但单独回传不起作用
+  （Codex 也只在 `chatgpt.com` 上回传它们）。
+
+还能更高的路子是 WebSocket（官方 preview 页说这条通道支持，连接内续接；
+Codex 默认走它）：一条连接钉在一台机器上。Dock 现在只有 HTTP/SSE，没做。
+
+命中的部分按缓存价计入额度，没命中的按全价。冷启动、换模型、压缩之后的
+第一次请求照样全价，控制上下文长度（少塞大工具输出）仍然要紧。
 
 ## 错误分类
 
@@ -235,7 +265,8 @@ PKCE 只支持 S256 / ID token 只用 RS256 / 支持 refresh_token / 公开客�
 | 订阅那条带 lease 的 bearer 并按策略改请求体 | `Authorization: Bearer <lease 的 token>`；`store:false`；`stream:true`；system 走 `instructions`；`input` 里不留 system 消息；官方不收的 15 个字段一个都不发 |
 | 遇到 unsupported_capability 去掉字段再发 | 第二次请求体里没有 `error.param` 那一项、与第一次不同；下一轮一开始就不发 |
 | 去不掉的字段不重发 | 请求体里本来就没有 → 只发一次，直接报 |
-| 密钥那条带自己的 key 且请求体不动 | `Authorization: Bearer <配置里的 key>`；请求体**不**多出 `store` / `instructions`，system 消息原样留在 `input` 里 |
+| 订阅那条带会话头并在一轮内回传 turn-state | `session-id` / `thread-id` / `x-client-request-id` 取会话 id；一轮里只回传上游第一次给的 `x-codex-turn-state`；新一轮不带旧的 |
+| 密钥那条带自己的 key 且请求体不动 | `Authorization: Bearer <配置里的 key>`；请求体**不**多出 `store` / `instructions`，system 消息原样留在 `input` 里；也不带会话头 |
 | 两个模型并存时各自带各自的鉴权 | 同一进程里两个模型各带各的，不串 |
 | 订阅和密钥同时写是配置错误 | 同一模型同时写 `auth` 与 `api_key` → 配置错误，不静默挑一个 |
 | 只有身份 scope 的凭据不给 lease | 没套餐额度 → `missing_plan_usage_scope`，不许推理 |

@@ -7,7 +7,8 @@
 //!   （`store:false`、system 走 `instructions`、官方不收的字段一个都不许发）；
 //! - 密钥那条：必须带自己的 key，请求体跟以前逐字节一样；
 //! - 两个模型同进程并存：各自带各自的，互不串；
-//! - 订阅那条按会话带 `prompt_cache_key`，同一会话同一个键。
+//! - 订阅那条按会话带 `prompt_cache_key`，同一会话同一个键；
+//! - 订阅那条带会话路由头，并在一轮内回传上游给的 `x-codex-turn-state`。
 //!
 //! 另外用**真的** `ChatGptProvider` 验两条凭据规则：只有身份 scope 的凭据
 //! 不给 lease（没套餐额度就不许推理），带套餐 scope 的才给。
@@ -24,11 +25,12 @@ use cordis_base::auth::{
 use cordis_base::types::{LlmOutput, LogEvent, PromptRequest};
 use serde_json::json;
 
+use crate::agent::turn::TurnControl;
 use crate::auth::{chatgpt_policy, AuthManager, ChatGptProvider, Credential, CredentialStore};
 use crate::host::settings::AppSettings;
 use crate::llm::http::HttpSampler;
 use crate::llm::sampler::Llm;
-use crate::names::{AUTH, SESSIONS, SETTINGS};
+use crate::names::{AUTH, SESSIONS, SETTINGS, TURN};
 use crate::session::log::Sessions;
 
 /// 官方给套餐额度用的那条 scope（provider 内部常量没导出，这里按官方名字写）。
@@ -50,7 +52,18 @@ fn isolated_env() -> (cordis_base::test_env::EnvScope, tempfile::TempDir) {
 struct Captured {
     path: String,
     authorization: Option<String>,
+    /// 全部请求头，名字小写。
+    headers: Vec<(String, String)>,
     body: String,
+}
+
+impl Captured {
+    fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.as_str())
+    }
 }
 
 /// 本地假上游：收请求、记下来、回一段最小的 SSE。
@@ -72,6 +85,17 @@ impl FakeUpstream {
 
     /// 按顺序回：第 n 个请求回第 n 条，超出的回最后一条。
     async fn start_seq(replies: Vec<(u16, String)>) -> Self {
+        Self::start_full(
+            replies
+                .into_iter()
+                .map(|(status, body)| (status, body, String::new()))
+                .collect(),
+        )
+        .await
+    }
+
+    /// 同上，每条再带几行响应头（原样接在固定的头后面，每行以 `\r\n` 结尾）。
+    async fn start_full(replies: Vec<(u16, String, String)>) -> Self {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -97,18 +121,27 @@ impl FakeUpstream {
                         .and_then(|l| l.split_whitespace().nth(1))
                         .unwrap_or("")
                         .to_string();
-                    let (status, body) = {
+                    let headers = head
+                        .lines()
+                        .skip(1)
+                        .filter_map(|line| {
+                            let (k, v) = line.split_once(':')?;
+                            Some((k.trim().to_ascii_lowercase(), v.trim().to_string()))
+                        })
+                        .collect();
+                    let (status, body, extra) = {
                         let mut seen = sink.lock().unwrap();
                         seen.push(Captured {
                             path,
                             authorization,
+                            headers,
                             body: req_body,
                         });
                         replies[(seen.len() - 1).min(replies.len() - 1)].clone()
                     };
                     let len = body.len();
                     let resp = format!(
-                        "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {len}\r\n\r\n{body}"
+                        "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {len}\r\n{extra}\r\n{body}"
                     );
                     use tokio::io::AsyncWriteExt;
                     let _ = socket.write_all(resp.as_bytes()).await;
@@ -454,6 +487,77 @@ async fn 订阅那条按会话带_prompt_cache_key() {
     assert_ne!(first_id, other.live_session_id());
 }
 
+/// 订阅那条按请求头做会话路由：会话头取会话 id；上游在一轮里第一次给的
+/// `x-codex-turn-state` 之后每个请求原样带回去，新一轮不带旧的。
+///
+/// 这条通道只认 `prompt_cache_key` 时请求随机落到别的机器上（2026-11-21 实测
+/// 后续 20 步 0 次命中），缺了这两样前缀缓存就基本不中。
+#[tokio::test(flavor = "multi_thread")]
+async fn 订阅那条带会话头并在一轮内回传_turn_state() {
+    let (_env, _cwd) = isolated_env();
+    let replies = (1..=5)
+        .map(|n| (200, sse_body(), format!("x-codex-turn-state: ts-{n}\r\n")))
+        .collect();
+    let upstream = FakeUpstream::start_full(replies).await;
+    write_catalog(&upstream.base());
+    let (ctx, _hold_settings, _hold_auth) = ctx_for("wire-oauth");
+    let sessions = Sessions::new(ctx.clone());
+    sessions.assign_ephemeral_id();
+    let sid = sessions.live_session_id();
+    let _hold_sessions = ctx.provide(SESSIONS, sessions).expect("挂 sessions");
+    let _hold_turn = ctx.provide(TURN, TurnControl::new()).expect("挂 turn");
+
+    // 第一轮三步，第二轮两步。
+    for _ in 0..3 {
+        assert!(ask(&ctx, "wire-oauth").await.error.is_none());
+    }
+    ctx.require::<TurnControl>(TURN).unwrap().reset();
+    for _ in 0..2 {
+        assert!(ask(&ctx, "wire-oauth").await.error.is_none());
+    }
+
+    let seen = upstream.captured();
+    assert_eq!(seen.len(), 5, "{seen:?}");
+    for req in &seen {
+        for name in ["session-id", "thread-id", "x-client-request-id"] {
+            assert_eq!(req.header(name), Some(sid.as_str()), "{name} 取会话 id");
+        }
+    }
+    let replayed: Vec<Option<&str>> = seen
+        .iter()
+        .map(|req| req.header("x-codex-turn-state"))
+        .collect();
+    assert_eq!(
+        replayed,
+        vec![None, Some("ts-1"), Some("ts-1"), None, Some("ts-4")],
+        "一轮里只回传第一次给的；新一轮从空开始，等上游给新的"
+    );
+}
+
+/// 子代理（工作流里的审查员也是）没有落盘的会话 id：用它自己的 agent id 当键和
+/// 路由头。以前它们一律不带，`/code-review` 这种大头全在子代理里的会话缓存几乎
+/// 不中（实测一次审查：审查员 22 次请求，按字节估算约占整段会话重发量的六成多）。
+#[tokio::test(flavor = "multi_thread")]
+async fn 子代理用自己的_agent_id_当会话键和路由头() {
+    let (_env, _cwd) = isolated_env();
+    let upstream = FakeUpstream::start().await;
+    write_catalog(&upstream.base());
+    let (ctx, _hold_settings, _hold_auth) = ctx_for("wire-oauth");
+    let child = Sessions::isolated_as(ctx.clone(), "agent-7f3a");
+    assert!(child.live_session_id().is_empty(), "子代理没有落盘 id");
+    let _hold_sessions = ctx.provide(SESSIONS, child).expect("挂 sessions");
+
+    assert!(ask(&ctx, "wire-oauth").await.error.is_none());
+
+    let seen = upstream.captured();
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    let body: serde_json::Value = serde_json::from_str(&seen[0].body).unwrap();
+    assert_eq!(body["prompt_cache_key"], "agent-7f3a");
+    for name in ["session-id", "thread-id", "x-client-request-id"] {
+        assert_eq!(seen[0].header(name), Some("agent-7f3a"), "{name}");
+    }
+}
+
 /// 密钥那条：带自己的 key，请求体一个字节都不动。
 #[tokio::test(flavor = "multi_thread")]
 async fn 密钥那条带自己的_key_且请求体不动() {
@@ -491,6 +595,14 @@ async fn 密钥那条带自己的_key_且请求体不动() {
         body.get("prompt_cache_key").is_none(),
         "别家不一定认 prompt_cache_key，多一个字段可能 400：{body}"
     );
+    for name in [
+        "session-id",
+        "thread-id",
+        "x-client-request-id",
+        "x-codex-turn-state",
+    ] {
+        assert!(req.header(name).is_none(), "密钥那条不该多出 {name} 头");
+    }
     assert!(
         body["input"]
             .as_array()
