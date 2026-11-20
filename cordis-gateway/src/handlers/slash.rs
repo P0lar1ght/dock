@@ -4,7 +4,8 @@
 //! 这里只做投影：`slash/list` 列出表里的命令（`surface` 是 `gateway` / `terminal`）、
 //! 子命令提示与附加命令；`slash/execute` 在 `threadId` 那一页上跑一次，把
 //! [`SlashOutcome`] 投成 dock.1 的 `applied` / `notice` / `filled` / `submitted` /
-//! `menu`。截图命令（`/screenshot`）是宿主页自己的，像素留在 JS 里，这里只列出来。
+//! `menu` / `openSlot`。截图命令（`/screenshot`）是宿主页自己的，像素留在 JS 里，
+//! 这里只列出来。
 
 use serde_json::{json, Value};
 
@@ -107,14 +108,16 @@ pub async fn execute(gateway: GatewayHandle, params: Value) -> Result<Value, Rpc
     }
 }
 
-fn project(gateway: &GatewayHandle, name: &str, outcome: SlashOutcome) -> Result<Value, RpcError> {
+fn project(gateway: &GatewayHandle, _name: &str, outcome: SlashOutcome) -> Result<Value, RpcError> {
     Ok(match outcome {
         SlashOutcome::Applied(message) => applied(message),
         SlashOutcome::Notice { title, body } => notice(title, body),
         SlashOutcome::Fill(text) => filled(text),
         SlashOutcome::Submit { text, .. } => return submit_text(gateway, text),
         SlashOutcome::Menu(id) => menu(&id),
-        SlashOutcome::OpenSlot(_) => notice("终端插槽", format!("/{name} 请在 Dock 终端打开。")),
+        // 插件插槽（`kind: slot`）：终端开自己的插槽；GUI 收到 openSlot 后开右侧
+        // 的插件面板（`plugin:<id>`），不再回「请在 Dock 终端打开」。
+        SlashOutcome::OpenSlot(id) => open_slot(&id),
         SlashOutcome::TerminalOnly(name) => terminal_only(&name),
     })
 }
@@ -228,6 +231,10 @@ fn notice(title: impl Into<String>, body: impl Into<String>) -> Value {
 
 fn menu(id: &str) -> Value {
     json!({ "ok": true, "kind": "menu", "menu": id })
+}
+
+fn open_slot(id: &str) -> Value {
+    json!({ "ok": true, "kind": "openSlot", "slot": id })
 }
 
 fn applied(message: impl Into<String>) -> Value {
