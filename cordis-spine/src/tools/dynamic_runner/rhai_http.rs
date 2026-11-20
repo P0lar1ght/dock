@@ -94,12 +94,13 @@ pub(crate) fn register(
     ctx: Context,
     plugin_id: String,
     params: WebFetchParams,
+    http_allow: Vec<String>,
 ) {
     engine.register_fn(
         "http_request",
         move |spec: Map| -> Result<Map, Box<EvalAltResult>> {
             let spec = parse_spec(&spec).map_err(err)?;
-            run_blocking(&ctx, &plugin_id, &params, spec).map_err(err)
+            run_blocking(&ctx, &plugin_id, &http_allow, &params, spec).map_err(err)
         },
     );
 }
@@ -320,24 +321,43 @@ fn dynamic_text(value: &Dynamic) -> String {
 
 /// Rhai 是同步的，这里和 `host.call_tool` 用同一套桥：`block_in_place` +
 /// `block_on`，别把 runtime 的 worker 掐死。
+///
+/// 确认框弹在**发起这次调用的那一页**（脚本跑在工具体里时，那一页已经挂在
+/// 当前线程上）。插件 fiber 挂在根上，拿根的权限队列会把框弹到第 1 页——GUI
+/// 里那一页多半没人看，请求就一直挂着。不在任何一轮里（面板、斜杠）才退回根。
 fn run_blocking(
+    ctx: &Context,
+    plugin_id: &str,
+    http_allow: &[String],
+    params: &WebFetchParams,
+    spec: RequestSpec,
+) -> Result<Map, String> {
+    let handle = tokio::runtime::Handle::try_current().map_err(|e| e.to_string())?;
+    let page = crate::tools::registry::exec_ctx().unwrap_or_else(|| ctx.clone());
+    let plugin_id = plugin_id.to_string();
+    let http_allow = http_allow.to_vec();
+    let params = params.clone();
+    tokio::task::block_in_place(|| {
+        handle.block_on(async move {
+            send_allowing(&page, &plugin_id, &http_allow, &params, spec).await
+        })
+    })
+}
+
+#[cfg(test)]
+async fn send(
     ctx: &Context,
     plugin_id: &str,
     params: &WebFetchParams,
     spec: RequestSpec,
 ) -> Result<Map, String> {
-    let handle = tokio::runtime::Handle::try_current().map_err(|e| e.to_string())?;
-    let ctx = ctx.clone();
-    let plugin_id = plugin_id.to_string();
-    let params = params.clone();
-    tokio::task::block_in_place(|| {
-        handle.block_on(async move { send(&ctx, &plugin_id, &params, spec).await })
-    })
+    send_allowing(ctx, plugin_id, &[], params, spec).await
 }
 
-async fn send(
+async fn send_allowing(
     ctx: &Context,
     plugin_id: &str,
+    http_allow: &[String],
     params: &WebFetchParams,
     spec: RequestSpec,
 ) -> Result<Map, String> {
@@ -346,8 +366,10 @@ async fn send(
         .map_err(|e| e.to_string())?;
 
     let host = spec.url.host_str().unwrap_or_default().to_string();
+    // `plugin.toml` 声明过的 host：用户批准加载插件时已经看过这张单子，不再逐次问。
+    let declared = super::persist::http_host_allowed(http_allow, &host);
     // 权限按 host 记，不按 "http_request" 记：允许一个域不该等于放开全网。
-    if let Some(perms) = ctx.get::<Permissions>(PERMISSIONS) {
+    if let Some(perms) = ctx.get::<Permissions>(PERMISSIONS).filter(|_| !declared) {
         let gate = format!("http_request {host}");
         // TUI 摘要去掉 query/fragment，避免 token 落进权限确认文案。
         let mut summary_url = spec.url.clone();

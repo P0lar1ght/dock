@@ -853,6 +853,23 @@ impl Transcript {
         });
     }
 
+    /// 一轮的插件卡片变了（`turn/cards/updated`，载荷 `{ turnId, cards }`）。只推不记。
+    pub fn turn_cards_updated(&mut self, turn_id: &str, cards: Vec<Value>) {
+        let _ = self.tx.send(ProjectedEvent {
+            seq: 0,
+            method: "turn/cards/updated".into(),
+            page: self.page.clone(),
+            thread_id: self.thread_id.clone(),
+            turn_id: turn_id.to_string(),
+            timestamp: iso_now(),
+            payload: json!({
+                "cards": cards,
+                "threadId": self.thread_id,
+                "turnId": turn_id,
+            }),
+        });
+    }
+
     /// 一轮的文件改动变了（`turn/changes/updated`，载荷 `{ turnId, changes }`）。只推不记。
     pub fn turn_changes_updated(&mut self, turn_id: &str, changes: Value) {
         let _ = self.tx.send(ProjectedEvent {

@@ -918,12 +918,7 @@ fn plugin_dir(gateway: &GatewayHandle, params: &Value) -> Result<std::path::Path
     Ok(canon)
 }
 
-/// 定义动态插件的那个会话（按 `Sessions::identity` 找开着的页）。
-fn owner_page(gateway: &GatewayHandle, identity: &str) -> Option<crate::threads::Page> {
-    crate::threads::page_by_identity(gateway, identity)
-}
-
-/// `plugin/list`：永久插件（用户级 + 每个项目，按根分组）和动态插件（会话里定义的）。
+/// `plugin/list`：插件目录（用户级 + 每个已知项目，按根分组、按目录认）。
 pub fn plugin_list(gateway: &GatewayHandle) -> Result<Value, RpcError> {
     let runner = runner(gateway)?;
     let projects = known_projects(gateway);
@@ -954,27 +949,8 @@ pub fn plugin_list(gateway: &GatewayHandle) -> Result<Value, RpcError> {
             })
         })
         .collect();
-    let session: Vec<Value> = runner
-        .session_plugins()
-        .into_iter()
-        .map(|p| {
-            let page = owner_page(gateway, &p.session_id);
-            json!({
-                "id": p.plugin_id,
-                "name": p.name,
-                "purpose": p.purpose,
-                "factory": p.factory,
-                "running": p.running,
-                "error": p.error,
-                "threadId": page.as_ref().map(crate::threads::Page::session_id),
-                "threadTitle": page.as_ref().and_then(|pg| pg.sessions().ok()).map(|s| s.live_title()),
-                "cwd": page.as_ref().map(|pg| cordis_spine::session_cwd(&pg.ctx).display().to_string())
-            })
-        })
-        .collect();
     Ok(json!({
         "disk": disk,
-        "session": session,
         "userRoot": cordis_spine::persist_root(PersistScope::User).display().to_string(),
         "projects": projects.iter().map(|p| p.display().to_string()).collect::<Vec<_>>()
     }))
@@ -996,56 +972,6 @@ pub async fn plugin_delete(gateway: &GatewayHandle, params: Value) -> Result<Val
     let dir = plugin_dir(gateway, &params)?;
     runner(gateway)?
         .delete_disk_at(&dir)
-        .await
-        .map_err(|e| RpcError::app("plugin_failed", e))?;
-    plugin_list(gateway)
-}
-
-/// `plugin/promote { id, scope }`：把动态插件写成永久。`project` 写进定义它的那个
-/// 会话的项目（`<项目>/.dock/plugins`），`user` 写进 `~/.dock/plugins`。
-pub async fn plugin_promote(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
-    let id = text(&params, "id")?;
-    let runner = runner(gateway)?;
-    let (scope, root) = match params.get("scope").and_then(Value::as_str) {
-        None | Some("user") => (
-            PersistScope::User,
-            cordis_spine::persist_root(PersistScope::User),
-        ),
-        Some("project") => {
-            let owner = runner
-                .session_plugins()
-                .into_iter()
-                .find(|p| p.plugin_id == id)
-                .ok_or_else(|| RpcError::app("plugin_failed", format!("没有叫 {id} 的动态插件")))?;
-            let page = owner_page(gateway, &owner.session_id).ok_or_else(|| {
-                RpcError::app(
-                    "plugin_failed",
-                    "定义它的会话已经关了，不知道是哪个项目；存到用户级吧",
-                )
-            })?;
-            (
-                PersistScope::Project,
-                cordis_spine::project_root(&cordis_spine::session_cwd(&page.ctx)),
-            )
-        }
-        Some(other) => {
-            return Err(RpcError::invalid_params(format!(
-                "scope 只能是 user / project：{other}"
-            )))
-        }
-    };
-    runner
-        .promote_session(id, scope, root)
-        .await
-        .map_err(|e| RpcError::app("plugin_failed", e))?;
-    plugin_list(gateway)
-}
-
-/// `plugin/discard { id }`：丢掉一个动态插件（停掉，从内存里删掉）。
-pub async fn plugin_discard(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
-    let id = text(&params, "id")?;
-    runner(gateway)?
-        .discard_session(id)
         .await
         .map_err(|e| RpcError::app("plugin_failed", e))?;
     plugin_list(gateway)
@@ -1496,16 +1422,6 @@ pub fn gateway_settings() -> Plugin {
                         protocol::PLUGIN_ENABLE,
                         TRUSTED_DETACHED,
                         method(|gw, params| async move { plugin_enable(&gw, params).await }),
-                    ),
-                    (
-                        protocol::PLUGIN_PROMOTE,
-                        TRUSTED_DETACHED,
-                        method(|gw, params| async move { plugin_promote(&gw, params).await }),
-                    ),
-                    (
-                        protocol::PLUGIN_DISCARD,
-                        TRUSTED_DETACHED,
-                        method(|gw, params| async move { plugin_discard(&gw, params).await }),
                     ),
                 ],
             )?;

@@ -1,20 +1,30 @@
 use cordis::Context;
+use cordis_base::acp::PermissionOptionKind;
 use cordis_spine::{
     agent_loop, agent_presets, dynamic_runner, llm, permissions, settings, slash, tool_cordis,
     tool_todo, tools, tui_slots, AgentPresets, DynEcho, DynamicRunner, LlmConfig, LlmMode,
-    LogEvent, LoopHandle, PermissionMode, PersistScope, PluginOrigin, PreStep, RhaiBag, RunMode,
-    Sessions, Slash, ToolCall, Tools, TurnOutcome, AGENT_LOOP, AGENT_PRESETS, CORDIS_PRESET_ID,
-    DYNAMIC_CORDIS_RUNNER, DYN_ECHO, DYN_ECHO_TOOL, PRE_STEP, SESSIONS, SETTINGS, SLASH, TOOLS,
-    TUI_SLOTS,
+    LogEvent, LoopHandle, PermissionMode, Permissions, PersistScope, PluginOrigin, PluginSel,
+    PreStep, RhaiBag, RunMode, Sessions, Slash, SourceInput, ToolCall, Tools, TurnOutcome,
+    AGENT_LOOP, AGENT_PRESETS, CORDIS_PRESET_ID, DYNAMIC_CORDIS_RUNNER, DYN_ECHO, DYN_ECHO_TOOL,
+    PERMISSIONS, PRE_STEP, SESSIONS, SETTINGS, SLASH, TOOLS, TUI_SLOTS,
 };
 use serde_json::json;
 
 const MAIN: &str = "main";
 
 async fn boot() -> Context {
+    boot_with(tools()).await
+}
+
+/// 带真权限门的工具表（`workspace_tools`）：`boot()` 用的 echo 工具表不过门。
+async fn boot_gated() -> Context {
+    boot_with(cordis_spine::workspace_tools()).await
+}
+
+async fn boot_with(tool_table: cordis::Plugin) -> Context {
     let root = Context::new();
     cordis_spine::install_core(&root).await.unwrap();
-    root.plugin(tools(), ()).unwrap().wait().await.unwrap();
+    root.plugin(tool_table, ()).unwrap().wait().await.unwrap();
     root.plugin(settings(), ()).unwrap().wait().await.unwrap();
     root.plugin(permissions(), ())
         .unwrap()
@@ -52,7 +62,76 @@ async fn boot() -> Context {
     root.get::<cordis_spine::AppSettings>(SETTINGS)
         .unwrap()
         .set_permission_mode(PermissionMode::Allow);
+    // 根会话钉一个临时项目目录：`cordis_plugin` 在 `<它>/.dock/plugins/` 下找插件，
+    // 不碰进程 cwd，也不碰真实项目。TempDir 挂在树上，树在它就在。
+    let project = tempfile::tempdir().unwrap();
+    root.require::<Sessions>(SESSIONS)
+        .unwrap()
+        .pin_workspace_cwd(project.path());
+    let _ = root.provide("dynamicTestProject", project);
     root
+}
+
+fn runner(root: &Context) -> std::sync::Arc<DynamicRunner> {
+    root.require::<DynamicRunner>(DYNAMIC_CORDIS_RUNNER)
+        .unwrap()
+}
+
+/// 这棵树的项目级插件根：`<项目>/.dock/plugins`。
+fn plugins_root(root: &Context) -> std::path::PathBuf {
+    root.require::<Sessions>(SESSIONS)
+        .unwrap()
+        .workspace_cwd()
+        .expect("boot pins a project")
+        .join(".dock/plugins")
+}
+
+/// 往项目级插件目录里写文件（模型用 write_file 做的就是这一步）。
+fn write_plugin(root: &Context, id: &str, files: &[(&str, &str)]) -> std::path::PathBuf {
+    let dir = plugins_root(root).join(id);
+    std::fs::create_dir_all(&dir).unwrap();
+    for (name, text) in files {
+        std::fs::write(dir.join(name), text).unwrap();
+    }
+    dir
+}
+
+async fn reload(root: &Context, id: &str) -> String {
+    exec_json(root, "cordis_plugin", json!({"action": "reload", "id": id})).await
+}
+
+/// 模型的真实路径：写 `source.rhai`，`cordis_plugin reload`，要求跑起来。
+async fn load_plugin(root: &Context, id: &str, source: &str) -> String {
+    write_plugin(root, id, &[("source.rhai", source)]);
+    let out = reload(root, id).await;
+    assert!(out.contains("运行中"), "{out}");
+    out
+}
+
+/// 程序侧 define（runner API 还在，测试和设置页用）：返回 (pluginId, packageId)。
+fn define(
+    root: &Context,
+    plugin: PluginSel,
+    factory: &str,
+    source: Option<&str>,
+) -> Result<(String, String), String> {
+    runner(root)
+        .define(
+            MAIN,
+            plugin,
+            "Probe",
+            "probe",
+            factory,
+            None,
+            source.map(|s| SourceInput::Inline(s.to_string())),
+        )
+        .map(|r| (r.plugin_id, r.package_id))
+}
+
+fn new_plugin(prefix: &str) -> PluginSel {
+    PluginSel::New {
+        id_prefix: prefix.into(),
+    }
 }
 
 fn tools_of(root: &Context) -> std::sync::Arc<Tools> {
@@ -73,14 +152,8 @@ async fn exec(root: &Context, name: &str, args: &str) -> String {
 #[tokio::test]
 async fn define_does_not_mount() {
     let root = boot().await;
-    let out = exec(
-        &root,
-        "cordis_define",
-        r#"{"plugin":{"kind":"new","idPrefix":"echo"},"name":"Echo","purpose":"ping","factory":"echo"}"#,
-    )
-    .await;
-    assert!(out.contains("echo-1/pkg-1"), "{out}");
-    assert!(out.contains("not running"), "{out}");
+    let (plugin, package) = define(&root, new_plugin("echo"), "echo", None).unwrap();
+    assert_eq!((plugin.as_str(), package.as_str()), ("echo-1", "pkg-1"));
     assert!(root.get::<DynEcho>(DYN_ECHO).is_none());
     let names: Vec<_> = tools_of(&root)
         .specs()
@@ -90,29 +163,43 @@ async fn define_does_not_mount() {
     assert!(!names.iter().any(|n| n == DYN_ECHO_TOOL), "{names:?}");
 }
 
+/// 主路径：写目录 → reload → 工具在、inspect 看得到登记了什么 → disable 撤下、
+/// `plugin.toml` 写 `enabled = false`、文件还在。
 #[tokio::test]
-async fn run_stop_roundtrip_mounts_fiber_and_tool() {
+async fn reload_mounts_and_disable_unmounts_a_plugin_directory() {
     let root = boot().await;
-    exec(
+    let dir = write_plugin(
         &root,
-        "cordis_define",
-        r#"{"plugin":{"kind":"new","idPrefix":"echo"},"name":"Echo","purpose":"ping","factory":"echo"}"#,
-    )
-    .await;
-    let ran = exec(
-        &root,
-        "cordis_run",
-        r#"{"pluginId":"echo-1","packageId":"pkg-1","mode":"run"}"#,
-    )
-    .await;
-    assert!(ran.contains("\"status\":\"running\""), "{ran}");
+        "echo",
+        &[(
+            "plugin.toml",
+            "name = \"Echo\"\npurpose = \"ping\"\nfactory = \"echo\"\n",
+        )],
+    );
+    let ran = reload(&root, "echo").await;
+    assert!(ran.contains("已重载插件 echo"), "{ran}");
+    assert!(ran.contains("运行中"), "{ran}");
+    assert!(
+        ran.contains(&format!("登记：工具 {DYN_ECHO_TOOL}")),
+        "{ran}"
+    );
+    assert!(ran.contains("use_tool"), "下一步该是试调：{ran}");
     assert!(root.get::<DynEcho>(DYN_ECHO).is_some());
-    let ping = exec(&root, DYN_ECHO_TOOL, "{}").await;
-    assert_eq!(ping, "pong");
+    assert_eq!(exec(&root, DYN_ECHO_TOOL, "{}").await, "pong");
 
-    let fibers = exec(&root, "cordis_inspect", r#"{"what":"fibers"}"#).await;
-    assert!(fibers.contains("cordis-dynamic"), "{fibers}");
-    assert!(fibers.contains("echo-1"), "{fibers}");
+    let overview = exec(&root, "cordis_inspect", "{}").await;
+    assert!(overview.contains("- echo [project] running"), "{overview}");
+    assert!(
+        overview.contains("more: cordis_inspect plugin"),
+        "{overview}"
+    );
+    let detail = exec(&root, "cordis_inspect", r#"{"plugin":"echo"}"#).await;
+    assert!(detail.contains("status: running"), "{detail}");
+    assert!(
+        detail.contains(&format!("registered: 工具 {DYN_ECHO_TOOL}")),
+        "{detail}"
+    );
+    assert!(detail.contains("factory: echo"), "{detail}");
     let services = exec(&root, "cordis_inspect", r#"{"what":"services"}"#).await;
     assert!(services.contains("dynEcho"), "{services}");
     assert!(services.contains("dynamicCordisRunner"), "{services}");
@@ -122,7 +209,13 @@ async fn run_stop_roundtrip_mounts_fiber_and_tool() {
     let tools_only = exec(&root, "cordis_inspect", r#"{"what":"tools"}"#).await;
     assert!(!tools_only.contains("host.register_tool"), "{tools_only}");
 
-    exec(&root, "cordis_stop", r#"{"pluginId":"echo-1"}"#).await;
+    let off = exec_json(
+        &root,
+        "cordis_plugin",
+        json!({"action":"disable","id":"echo"}),
+    )
+    .await;
+    assert!(off.contains("已停用插件 echo"), "{off}");
     assert!(root.get::<DynEcho>(DYN_ECHO).is_none());
     let names: Vec<_> = tools_of(&root)
         .specs()
@@ -130,232 +223,186 @@ async fn run_stop_roundtrip_mounts_fiber_and_tool() {
         .map(|s| s.name)
         .collect();
     assert!(!names.iter().any(|n| n == DYN_ECHO_TOOL), "{names:?}");
-    let runner = root
-        .require::<DynamicRunner>(DYNAMIC_CORDIS_RUNNER)
-        .unwrap();
-    let row = runner.inspect_plugin(MAIN, "echo-1").unwrap();
-    assert_eq!(row.current_package_id.as_deref(), Some("pkg-1"));
-    assert!(row.active_run.is_none());
+    let manifest = std::fs::read_to_string(dir.join("plugin.toml")).unwrap();
+    assert!(manifest.contains("enabled = false"), "{manifest}");
+    let detail = exec(&root, "cordis_inspect", r#"{"plugin":"echo"}"#).await;
+    assert!(detail.contains("status: disabled"), "{detail}");
+
+    // reload 就是启用：开关改回 true，又跑起来。
+    let back = reload(&root, "echo").await;
+    assert!(back.contains("enabled = false，已改成 true"), "{back}");
+    assert!(root.get::<DynEcho>(DYN_ECHO).is_some());
 }
 
+/// 两个插件抢同一个名字：后来的那个 reload 失败、回执点名怎么解决，先来的照跑。
 #[tokio::test]
 async fn second_echo_fails_and_does_not_leave_a_fiber() {
     let root = boot().await;
-    exec(
-        &root,
-        "cordis_define",
-        r#"{"plugin":{"kind":"new","idPrefix":"echo"},"name":"A","purpose":"a","factory":"echo"}"#,
-    )
-    .await;
-    exec(
-        &root,
-        "cordis_define",
-        r#"{"plugin":{"kind":"new","idPrefix":"echo"},"name":"B","purpose":"b","factory":"echo"}"#,
-    )
-    .await;
-    exec(
-        &root,
-        "cordis_run",
-        r#"{"pluginId":"echo-1","packageId":"pkg-1","mode":"run"}"#,
-    )
-    .await;
-    let failed = exec(
-        &root,
-        "cordis_run",
-        r#"{"pluginId":"echo-2","packageId":"pkg-2","mode":"run"}"#,
-    )
-    .await;
+    let manifest = "factory = \"echo\"\n";
+    write_plugin(&root, "echo-a", &[("plugin.toml", manifest)]);
+    write_plugin(&root, "echo-b", &[("plugin.toml", manifest)]);
+    reload(&root, "echo-a").await;
+    let failed = reload(&root, "echo-b").await;
     assert!(
         failed.contains("has been registered") || failed.contains("already registered"),
         "{failed}"
     );
-    assert!(failed.contains("cordis_stop"), "{failed}");
+    assert!(failed.contains("cordis_plugin disable"), "{failed}");
+    assert!(failed.contains("现在没有在跑的版本"), "{failed}");
     assert!(root.get::<DynEcho>(DYN_ECHO).is_some());
-    let fibers = exec(&root, "cordis_inspect", r#"{"what":"fibers"}"#).await;
-    assert!(fibers.contains("echo-1"), "{fibers}");
-    assert!(!fibers.contains("echo-2"), "{fibers}");
-    let runner = root
-        .require::<DynamicRunner>(DYNAMIC_CORDIS_RUNNER)
-        .unwrap();
-    assert!(runner
-        .inspect_plugin(MAIN, "echo-2")
+    let overview = exec(&root, "cordis_inspect", "{}").await;
+    assert!(
+        overview.contains("- echo-a [project] running"),
+        "{overview}"
+    );
+    assert!(overview.contains("- echo-b [project] failed"), "{overview}");
+    assert!(runner(&root)
+        .inspect_plugin(MAIN, "echo-b")
         .unwrap()
         .active_run
         .is_none());
 }
 
-/// 两颗工具并成一颗之后，两个问题都还能问，而且问错了要报错而不是静默回目录。
+/// 不带参数是概览（插件在哪、各自什么状态），`plugin` 看一个，`what` 看参考段；
+/// 问错了要报错而不是静默回目录。
 #[tokio::test]
-async fn inspect_answers_both_questions_and_rejects_a_bare_package_id() {
+async fn inspect_overview_plugin_and_sections() {
     let root = boot().await;
-    exec(
+    write_plugin(
         &root,
-        "cordis_define",
-        r#"{"plugin":{"kind":"new","idPrefix":"both"},"name":"Both","purpose":"merge","factory":"note"}"#,
-    )
-    .await;
+        "both",
+        &[("plugin.toml", "name = \"Both\"\nfactory = \"note\"\n")],
+    );
 
-    let directory = exec(&root, "cordis_inspect", r#"{"what":"factories"}"#).await;
-    assert!(directory.contains("factories:"), "{directory}");
+    let overview = exec(&root, "cordis_inspect", "{}").await;
+    assert!(overview.contains("root project:"), "{overview}");
+    assert!(
+        overview.contains("- both [project] not loaded — Both"),
+        "{overview}"
+    );
+    assert!(
+        !overview.contains("host.register_tool"),
+        "概览不该塞整份参考：{overview}"
+    );
 
-    let plugin = exec(&root, "cordis_inspect", r#"{"pluginId":"both-1"}"#).await;
-    assert!(plugin.contains("mode: plugin"), "{plugin}");
-    assert!(plugin.contains("pkg-1"), "{plugin}");
+    let plugin = exec(&root, "cordis_inspect", r#"{"plugin":"both"}"#).await;
+    assert!(plugin.contains("plugin: both"), "{plugin}");
+    assert!(plugin.contains("factory: note"), "{plugin}");
+    assert!(plugin.contains("status: not loaded"), "{plugin}");
 
-    let package = exec(
-        &root,
-        "cordis_inspect",
-        r#"{"pluginId":"both-1","packageId":"pkg-1"}"#,
-    )
-    .await;
-    assert!(package.contains("mode: package"), "{package}");
-    assert!(package.contains("factory: note"), "{package}");
-
-    // pluginId 比 what 窄，窄的赢。
+    // plugin 比 what 窄，窄的赢。
     let both = exec(
         &root,
         "cordis_inspect",
-        r#"{"what":"factories","pluginId":"both-1"}"#,
+        r#"{"what":"builtins","plugin":"both"}"#,
     )
     .await;
-    assert!(both.contains("mode: plugin"), "{both}");
-    assert!(!both.contains("factories:"), "{both}");
+    assert!(both.contains("plugin: both"), "{both}");
+    assert!(!both.contains("builtins:"), "{both}");
 
-    let orphan = exec(&root, "cordis_inspect", r#"{"packageId":"pkg-1"}"#).await;
-    assert!(orphan.contains("requires pluginId"), "{orphan}");
+    let missing = exec(&root, "cordis_inspect", r#"{"plugin":"nope"}"#).await;
+    assert!(missing.contains("没找到插件目录 nope"), "{missing}");
+    let unknown = exec(&root, "cordis_inspect", r#"{"what":"fibers"}"#).await;
+    assert!(unknown.contains("不认得"), "{unknown}");
+    let events = exec(&root, "cordis_inspect", r#"{"what":"events"}"#).await;
+    for hook in [
+        "session/event",
+        "agent/step-start",
+        "agent/turn-end",
+        "agent/pre-step",
+        "system-prompt/assemble",
+        "tools/pre-execute",
+        "tools/execute",
+        "llm/stream",
+    ] {
+        assert!(events.contains(hook), "{hook}: {events}");
+    }
 }
 
-/// `drop` 是开关不是第二颗工具：停掉保留版本，drop 才丢定义；两者都不碰磁盘。
+/// 程序侧 API：stop 保留版本，undefine 才丢定义；两者都不碰磁盘。
 #[tokio::test]
-async fn stop_keeps_the_definition_unless_drop_is_set() {
+async fn stop_keeps_the_definition_and_undefine_drops_it() {
     let root = boot().await;
-    exec(
-        &root,
-        "cordis_define",
-        r#"{"plugin":{"kind":"new","idPrefix":"keep"},"name":"Keep","purpose":"stop vs drop","factory":"echo"}"#,
-    )
-    .await;
-    exec(
-        &root,
-        "cordis_run",
-        r#"{"pluginId":"keep-1","packageId":"pkg-1","mode":"run"}"#,
-    )
-    .await;
-
-    let stopped = exec(&root, "cordis_stop", r#"{"pluginId":"keep-1"}"#).await;
-    assert!(
-        stopped.contains("definition and versions remain"),
-        "{stopped}"
-    );
-    let still = exec(&root, "cordis_inspect", r#"{"pluginId":"keep-1"}"#).await;
-    assert!(still.contains("pkg-1"), "stop must keep Packages: {still}");
-    // 停下来的包可以再 run 起来，这正是不 drop 的理由。
-    let again = exec(
-        &root,
-        "cordis_run",
-        r#"{"pluginId":"keep-1","packageId":"pkg-1","mode":"run"}"#,
-    )
-    .await;
-    assert!(again.contains("\"status\":\"running\""), "{again}");
-
-    let dropped = exec(&root, "cordis_stop", r#"{"pluginId":"keep-1","drop":true}"#).await;
-    assert!(dropped.contains("Removed"), "{dropped}");
-    assert!(dropped.contains("wasRunning=true"), "{dropped}");
-    let gone = exec(&root, "cordis_inspect", r#"{"pluginId":"keep-1"}"#).await;
-    assert!(gone.contains("Error"), "{gone}");
+    let (id, pkg) = define(&root, new_plugin("keep"), "echo", None).unwrap();
+    let runner = runner(&root);
+    runner.run(MAIN, &id, &pkg, RunMode::Run).await.unwrap();
+    let stopped = runner.stop(MAIN, &id).await.unwrap();
+    assert!(stopped.was_running);
+    let row = runner.inspect_plugin(MAIN, &id).unwrap();
+    assert_eq!(row.current_package_id.as_deref(), Some(pkg.as_str()));
+    assert!(row.active_run.is_none());
+    // 停下来的包可以再 run 起来，这正是不 undefine 的理由。
+    runner.run(MAIN, &id, &pkg, RunMode::Run).await.unwrap();
+    let dropped = runner.undefine(MAIN, &id).await.unwrap();
+    assert!(dropped.was_running);
+    assert!(runner.inspect_plugin(MAIN, &id).is_err());
 }
 
+/// 依赖没挂上：回执说「在等依赖」，点名等谁，下一步教怎么排查。
 #[tokio::test]
 async fn hold_stays_pending() {
     let root = boot().await;
-    exec(
-        &root,
-        "cordis_define",
-        r#"{"plugin":{"kind":"new","idPrefix":"hold"},"name":"Hold","purpose":"wait","factory":"hold"}"#,
-    )
-    .await;
-    let ran = exec(
-        &root,
-        "cordis_run",
-        r#"{"pluginId":"hold-1","packageId":"pkg-1","mode":"run"}"#,
-    )
-    .await;
-    assert!(ran.contains("waiting") || ran.contains("pending"), "{ran}");
-    let runner = root
-        .require::<DynamicRunner>(DYNAMIC_CORDIS_RUNNER)
-        .unwrap();
-    let row = runner.inspect_plugin(MAIN, "hold-1").unwrap();
+    write_plugin(&root, "hold", &[("plugin.toml", "factory = \"hold\"\n")]);
+    let ran = reload(&root, "hold").await;
+    assert!(ran.contains("在等依赖"), "{ran}");
+    assert!(ran.contains("dynHoldGate"), "{ran}");
+    let runner = runner(&root);
+    let row = runner.inspect_plugin(MAIN, "hold").unwrap();
     let run = row.active_run.expect("hold should keep a fiber");
     assert_eq!(run.waiting_for, ["dynHoldGate"]);
     let fiber = runner
         .live_fibers(MAIN)
         .into_iter()
-        .find(|f| f.plugin_id.as_deref() == Some("hold-1"))
+        .find(|f| f.plugin_id.as_deref() == Some("hold"))
         .expect("hold fiber");
     assert_eq!(fiber.state, "pending");
+    let detail = exec(&root, "cordis_inspect", r#"{"plugin":"hold"}"#).await;
+    assert!(detail.contains("waiting for: dynHoldGate"), "{detail}");
 }
 
 #[tokio::test]
 async fn update_mode_and_drop() {
     let root = boot().await;
-    exec(
+    let (id, first) = define(&root, new_plugin("note"), "note", None).unwrap();
+    let (_, second) = define(
         &root,
-        "cordis_define",
-        r#"{"plugin":{"kind":"new","idPrefix":"note"},"name":"N1","purpose":"v1","factory":"note"}"#,
+        PluginSel::Existing {
+            plugin_id: id.clone(),
+        },
+        "note",
+        None,
     )
-    .await;
-    exec(
-        &root,
-        "cordis_define",
-        r#"{"plugin":{"kind":"existing","pluginId":"note-1"},"name":"N2","purpose":"v2","factory":"note"}"#,
-    )
-    .await;
-    exec(
-        &root,
-        "cordis_run",
-        r#"{"pluginId":"note-1","packageId":"pkg-1","mode":"run"}"#,
-    )
-    .await;
-    let bad = exec(
-        &root,
-        "cordis_run",
-        r#"{"pluginId":"note-1","packageId":"pkg-2","mode":"run"}"#,
-    )
-    .await;
+    .unwrap();
+    let runner = runner(&root);
+    runner.run(MAIN, &id, &first, RunMode::Run).await.unwrap();
+    let bad = runner
+        .run(MAIN, &id, &second, RunMode::Run)
+        .await
+        .unwrap_err();
     assert!(bad.contains("update"), "{bad}");
-    let updated = exec(
-        &root,
-        "cordis_run",
-        r#"{"pluginId":"note-1","packageId":"pkg-2","mode":"update"}"#,
-    )
-    .await;
-    assert!(updated.contains("pkg-2"), "{updated}");
-    let gone = exec(&root, "cordis_stop", r#"{"pluginId":"note-1","drop":true}"#).await;
-    assert!(gone.contains("Removed"), "{gone}");
-    let listed = exec(&root, "cordis_inspect", r#"{"what":"temporary"}"#).await;
-    assert!(
-        listed.contains("No session-local Plugins") || !listed.contains("note-1"),
-        "{listed}"
-    );
+    let updated = runner
+        .run(MAIN, &id, &second, RunMode::Update)
+        .await
+        .unwrap();
+    assert_eq!(updated.current_package_id.as_deref(), Some(second.as_str()));
+    runner.undefine(MAIN, &id).await.unwrap();
+    assert!(runner.snapshot(MAIN).iter().all(|r| r.plugin_id != id));
 }
 
 #[tokio::test]
 async fn slash_factory_adds_and_stop_removes() {
     let root = boot().await;
-    let defined = exec(
+    write_plugin(
         &root,
-        "cordis_define",
-        r#"{"plugin":{"kind":"new","idPrefix":"slsh"},"name":"Standup","purpose":"站会","factory":"slash","command":"standup","kind":"prompt","text":"写站会：{args}","send":true}"#,
-    )
-    .await;
-    assert!(defined.contains("slsh-1/pkg-1"), "{defined}");
-    let ran = exec(
-        &root,
-        "cordis_run",
-        r#"{"pluginId":"slsh-1","packageId":"pkg-1","mode":"run"}"#,
-    )
-    .await;
-    assert!(ran.contains("\"status\":\"running\""), "{ran}");
+        "standup",
+        &[(
+            "plugin.toml",
+            "name = \"Standup\"\npurpose = \"站会\"\nfactory = \"slash\"\ncommand = \"standup\"\nkind = \"prompt\"\ntext = \"写站会：{args}\"\nsend = true\n",
+        )],
+    );
+    let ran = reload(&root, "standup").await;
+    assert!(ran.contains("运行中"), "{ran}");
+    assert!(ran.contains("斜杠 /standup"), "{ran}");
     let slash = root.require::<Slash>(SLASH).unwrap();
     assert!(
         slash.list().iter().any(|e| e.command == "standup"),
@@ -369,47 +416,32 @@ async fn slash_factory_adds_and_stop_removes() {
     let inspect = exec(&root, "cordis_inspect", r#"{"what":"services"}"#).await;
     assert!(inspect.contains("/standup"), "{inspect}");
 
-    exec(&root, "cordis_stop", r#"{"pluginId":"slsh-1"}"#).await;
+    exec_json(
+        &root,
+        "cordis_plugin",
+        json!({"action":"disable","id":"standup"}),
+    )
+    .await;
     assert!(slash.list().is_empty());
 }
 
 #[tokio::test]
 async fn slash_tool_kind_binds_live_tool_name() {
     let root = boot().await;
-    exec(
+    write_plugin(&root, "echo", &[("plugin.toml", "factory = \"echo\"\n")]);
+    reload(&root, "echo").await;
+    write_plugin(
         &root,
-        "cordis_define",
-        r#"{"plugin":{"kind":"new","idPrefix":"echo"},"name":"Echo","purpose":"ping","factory":"echo"}"#,
-    )
-    .await;
-    exec(
-        &root,
-        "cordis_run",
-        r#"{"pluginId":"echo-1","packageId":"pkg-1","mode":"run"}"#,
-    )
-    .await;
-    let defined = exec(
-        &root,
-        "cordis_define",
-        &format!(
-            r#"{{"plugin":{{"kind":"new","idPrefix":"trig"}},"name":"Test","purpose":"probe","factory":"slash","command":"probe","kind":"tool","text":"{DYN_ECHO_TOOL}"}}"#
-        ),
-    )
-    .await;
-    assert!(defined.contains("factory slash"), "{defined}");
-    // "Defined trig-N/pkg-M (Test); ..." — counter is process-global across prefixes.
-    let ids = defined
-        .strip_prefix("Defined ")
-        .and_then(|s| s.split_whitespace().next())
-        .unwrap_or_else(|| panic!("{defined}"));
-    let (plugin_id, package_id) = ids.split_once('/').unwrap_or_else(|| panic!("{defined}"));
-    let ran = exec(
-        &root,
-        "cordis_run",
-        &format!(r#"{{"pluginId":"{plugin_id}","packageId":"{package_id}","mode":"run"}}"#),
-    )
-    .await;
-    assert!(ran.contains("\"status\":\"running\""), "{ran}");
+        "probe",
+        &[(
+            "plugin.toml",
+            &format!(
+                "name = \"Test\"\npurpose = \"probe\"\nfactory = \"slash\"\ncommand = \"probe\"\nkind = \"tool\"\ntext = \"{DYN_ECHO_TOOL}\"\n"
+            ),
+        )],
+    );
+    let ran = reload(&root, "probe").await;
+    assert!(ran.contains("运行中"), "{ran}");
     let slash = root.require::<Slash>(SLASH).unwrap();
     let entry = slash
         .list()
@@ -436,12 +468,15 @@ async fn slash_tool_kind_binds_live_tool_name() {
 #[tokio::test]
 async fn slash_cannot_shadow_help() {
     let root = boot().await;
-    let out = exec(
+    write_plugin(
         &root,
-        "cordis_define",
-        r#"{"plugin":{"kind":"new","idPrefix":"slsh"},"name":"Nope","purpose":"no","factory":"slash","command":"help","kind":"overlay","text":"x"}"#,
-    )
-    .await;
+        "nope",
+        &[(
+            "plugin.toml",
+            "factory = \"slash\"\ncommand = \"help\"\nkind = \"overlay\"\ntext = \"x\"\n",
+        )],
+    );
+    let out = reload(&root, "nope").await;
     assert!(out.contains("cannot shadow"), "{out}");
     assert!(root.require::<Slash>(SLASH).unwrap().list().is_empty());
 }
@@ -449,12 +484,12 @@ async fn slash_cannot_shadow_help() {
 #[tokio::test]
 async fn echo_rejects_slash_fields() {
     let root = boot().await;
-    let out = exec(
+    write_plugin(
         &root,
-        "cordis_define",
-        r#"{"plugin":{"kind":"new","idPrefix":"echo"},"name":"Echo","purpose":"ping","factory":"echo","command":"standup"}"#,
-    )
-    .await;
+        "echo",
+        &[("plugin.toml", "factory = \"echo\"\ncommand = \"standup\"\n")],
+    );
+    let out = reload(&root, "echo").await;
     assert!(out.contains("only for factory"), "{out}");
 }
 
@@ -506,30 +541,18 @@ const RHAI_MEMO: &str = r#"#{
     }
 }"#;
 
+/// 编译不过：回执带原因和「按行号改、再 reload」，什么都没装上。
 #[tokio::test]
 async fn rhai_compile_reject_does_not_mint() {
     let root = boot().await;
-    let out = exec_json(
-        &root,
-        "cordis_define",
-        json!({
-            "plugin": {"kind": "new", "idPrefix": "bad"},
-            "name": "Bad",
-            "purpose": "syntax",
-            "factory": "rhai",
-            "source": "this is not { rhai"
-        }),
-    )
-    .await;
-    assert!(out.contains("Error"), "{out}");
-    assert!(out.contains("rhai"), "{out}");
+    write_plugin(&root, "bad", &[("source.rhai", "this is not { rhai")]);
+    let out = reload(&root, "bad").await;
+    assert!(out.contains("这一版没跑起来"), "{out}");
     assert!(out.contains("source must be a map"), "{out}");
     assert!(out.contains("does not call apply"), "{out}");
-    let listed = exec(&root, "cordis_inspect", r#"{"what":"temporary"}"#).await;
-    assert!(
-        listed.contains("No session-local Plugins") || !listed.contains("bad-1"),
-        "{listed}"
-    );
+    assert!(out.contains("cordis_plugin reload bad"), "{out}");
+    assert!(out.contains("别另起一个插件目录"), "{out}");
+    assert!(runner(&root).inspect_plugin(MAIN, "bad").is_err());
 }
 
 /// `inject` 进的是**内核**的 `Inject`，内核按名字查 store（类型擦除），所以一个
@@ -539,15 +562,10 @@ async fn rhai_compile_reject_does_not_mint() {
 #[tokio::test]
 async fn injecting_a_mounted_spine_service_runs_and_is_not_reported_as_waiting() {
     let root = boot().await;
-    let defined = exec_json(
+    let ran = load_plugin(
         &root,
-        "cordis_define",
-        json!({
-            "plugin": {"kind": "new", "idPrefix": "gate"},
-            "name": "Gate",
-            "purpose": "inject a spine service the script cannot reach",
-            "factory": "rhai",
-            "source": r#"
+        "gate",
+        r#"
 #{
   inject: ["tools", "settings", "permissions"],
   apply: |host| {
@@ -560,36 +578,18 @@ async fn injecting_a_mounted_spine_service_runs_and_is_not_reported_as_waiting()
   }
 }
 "#,
-        }),
     )
     .await;
-    assert!(defined.contains("gate-1/pkg-1"), "{defined}");
-
-    let ran = exec(
-        &root,
-        "cordis_run",
-        r#"{"pluginId":"gate-1","packageId":"pkg-1","mode":"run"}"#,
-    )
-    .await;
-    let receipt: serde_json::Value = serde_json::from_str(&ran).expect("run receipt json");
-    assert_eq!(receipt["status"], "running", "{ran}");
-    assert_eq!(receipt["host"]["fiberState"], "active", "{ran}");
-    assert_eq!(
-        receipt["host"]["waitingFor"],
-        json!([]),
+    assert!(
+        !ran.contains("在等依赖"),
         "a resolved inject is not a wait: {ran}"
     );
-
-    let fibers = exec(&root, "cordis_inspect", r#"{"what":"fibers"}"#).await;
-    assert!(fibers.contains("gate-1 [active]"), "{fibers}");
-    assert!(
-        !fibers.contains("waiting for"),
-        "running plugin must not be listed as waiting: {fibers}"
-    );
+    let detail = exec(&root, "cordis_inspect", r#"{"plugin":"gate"}"#).await;
+    assert!(detail.contains("status: running"), "{detail}");
+    assert!(!detail.contains("waiting for"), "{detail}");
 
     // 真跑起来了，不只是状态好看。
-    let called = exec(&root, "cordis_call", r#"{"name":"gate_ping"}"#).await;
-    assert!(called.contains("pong"), "{called}");
+    assert_eq!(exec(&root, "gate_ping", "{}").await, "pong");
 
     // 而脚本**仍然**够不着那两个名字：inject 是启动闸，不是授权。
     let services = exec(&root, "cordis_inspect", r#"{"what":"services"}"#).await;
@@ -618,242 +618,139 @@ async fn injecting_a_mounted_spine_service_runs_and_is_not_reported_as_waiting()
     );
 }
 
-/// 超限时该说的是「改走 source_path」，不是「把脚本写短点」。
+/// 超限时该说的是「写成插件目录里的 source.rhai」，不是「把脚本写短点」；
+/// 文件本身超过 1MiB 也要说清怎么拆。
 #[tokio::test]
-async fn oversized_inline_source_points_at_source_path() {
+async fn oversized_sources_say_where_to_go() {
     let root = boot().await;
     let big = format!(
         "#{{ inject: [], apply: |host| {{ }} }}\n// {}",
         "x".repeat(130 * 1024)
     );
-    let out = exec_json(
-        &root,
-        "cordis_define",
-        json!({
-            "plugin": {"kind": "new", "idPrefix": "big"},
-            "name": "Big",
-            "purpose": "oversize",
-            "factory": "rhai",
-            "source": big,
-        }),
-    )
-    .await;
-    assert!(out.contains("128KiB"), "{out}");
-    assert!(out.contains("source_path"), "{out}");
-    assert!(out.contains("write_file"), "{out}");
-    let listed = exec(&root, "cordis_inspect", r#"{"what":"temporary"}"#).await;
-    assert!(
-        !listed.contains("big-1"),
-        "oversize must not mint: {listed}"
+    let err = define(&root, new_plugin("big"), "rhai", Some(&big)).unwrap_err();
+    assert!(err.contains("128KiB"), "{err}");
+    assert!(err.contains("source.rhai"), "{err}");
+    assert!(err.contains("cordis_plugin reload"), "{err}");
+    assert!(runner(&root)
+        .snapshot(MAIN)
+        .iter()
+        .all(|r| !r.plugin_id.starts_with("big")));
+
+    let huge = format!(
+        "#{{ inject: [], apply: |host| {{ }} }}\n// {}",
+        "x".repeat(1024 * 1024 + 1)
     );
+    write_plugin(&root, "huge", &[("source.rhai", &huge)]);
+    let out = reload(&root, "huge").await;
+    assert!(out.contains("1MiB"), "{out}");
+    assert!(out.contains("host.read_bytes"), "{out}");
 }
 
-/// `cordis_*` 是 deferred 工具，描述不常驻上下文。apply 炸了的那一刻是唯一需要
-/// 修复闭环的时刻，所以闭环跟着失败一起回；而 mode/id 这类校验错误自己已经写清了
-/// 下一步，再贴一段会把它埋掉。
+/// 改坏一行不该让用户手上的工具一起消失：新版 apply 抛错时自动回到上一版继续跑，
+/// 回执说清「这一版没起来、上一版还在」，inspect 记着最近的错误；修好再 reload
+/// 换上新版、错误清掉。
 #[tokio::test]
-async fn a_failed_apply_carries_the_repair_loop_and_a_mode_error_does_not() {
+async fn a_failed_reload_keeps_the_previous_version_running() {
     let root = boot().await;
-    exec_json(
-        &root,
-        "cordis_define",
-        json!({
-            "plugin": {"kind": "new", "idPrefix": "boom"},
-            "name": "Boom",
-            "purpose": "throwing apply",
-            "factory": "rhai",
-            "source": r#"#{ inject: ["tools"], apply: |host| { throw "nope" } }"#,
-        }),
-    )
-    .await;
-    let failed = exec(
-        &root,
-        "cordis_run",
-        r#"{"pluginId":"boom-1","packageId":"pkg-1","mode":"run"}"#,
-    )
-    .await;
-    assert!(failed.contains("Error"), "{failed}");
-    assert!(failed.contains("kind \"existing\""), "{failed}");
-    assert!(failed.contains("cordis_inspect"), "{failed}");
+    let good = r#"#{ inject: ["tools"], apply: |host| {
+        host.register_tool(#{ name: "boom_ping", parameters: #{ type: "object", properties: #{} }, execute: |a| { "v1" } });
+    } }"#;
+    load_plugin(&root, "boom", good).await;
+    assert_eq!(exec(&root, "boom_ping", "{}").await, "v1");
 
-    let bad_mode = exec(
+    write_plugin(
         &root,
-        "cordis_run",
-        r#"{"pluginId":"boom-1","packageId":"pkg-404","mode":"run"}"#,
-    )
-    .await;
-    assert!(bad_mode.contains("Error"), "{bad_mode}");
-    assert!(
-        !bad_mode.contains("kind \"existing\""),
-        "a validation error must not carry the repair essay: {bad_mode}"
+        "boom",
+        &[(
+            "source.rhai",
+            r#"#{ inject: ["tools"], apply: |host| { throw "nope" } }"#,
+        )],
     );
+    let result = tools_of(&root)
+        .execute(ToolCall {
+            id: "t".into(),
+            name: "cordis_plugin".into(),
+            arguments: json!({"action": "reload", "id": "boom"}).to_string(),
+        })
+        .await;
+    assert!(
+        result.is_error,
+        "失败的 reload 要标成错误：{}",
+        result.content
+    );
+    let failed = result.content;
+    assert!(failed.contains("这一版没跑起来"), "{failed}");
+    assert!(failed.contains("nope"), "{failed}");
+    assert!(failed.contains("仍在运行（已自动回滚）"), "{failed}");
+    assert!(failed.contains("登记：工具 boom_ping"), "{failed}");
+    assert!(failed.contains("cordis_plugin reload boom"), "{failed}");
+    assert_eq!(exec(&root, "boom_ping", "{}").await, "v1", "上一版照跑");
+    let detail = exec(&root, "cordis_inspect", r#"{"plugin":"boom"}"#).await;
+    assert!(detail.contains("running (last reload failed)"), "{detail}");
+    assert!(
+        detail.contains("last error:") && detail.contains("nope"),
+        "{detail}"
+    );
+
+    write_plugin(&root, "boom", &[("source.rhai", &good.replace("v1", "v2"))]);
+    let fixed = reload(&root, "boom").await;
+    assert!(fixed.contains("运行中"), "{fixed}");
+    assert_eq!(exec(&root, "boom_ping", "{}").await, "v2");
+    let detail = exec(&root, "cordis_inspect", r#"{"plugin":"boom"}"#).await;
+    assert!(!detail.contains("last error"), "成功一次就清掉：{detail}");
 }
 
+/// reload 把文件读成快照：之后改文件不影响正在跑的版本，再 reload 才换上——
+/// 「不可变的包」名副其实，回滚才真的回到上一版。inspect 报路径，不回源码。
 #[tokio::test]
-async fn rhai_source_path_define_run_and_inspect_shows_path() {
+async fn reload_snapshots_the_source_until_the_next_reload() {
     let root = boot().await;
-    let cwd = std::env::current_dir().unwrap();
-    let plug = cwd.join(".dock/plugins/demopath");
-    std::fs::create_dir_all(&plug).unwrap();
-    let source_file = plug.join("source.rhai");
-    std::fs::write(
-        plug.join("plugin.toml"),
-        "name = \"DemoPath\"\npurpose = \"file backed\"\nfactory = \"rhai\"\nenabled = true\n",
-    )
-    .unwrap();
-    std::fs::write(
-        &source_file,
-        r#"#{
-            inject: ["tools"],
-            apply: |host| {
-                host.register_tool(#{
-                    name: "demopath_ping",
-                    description: "pong from file",
-                    parameters: #{ type: "object", properties: #{} },
-                    execute: |args| { "file-pong" }
-                });
-            }
-        }"#,
-    )
-    .unwrap();
-
-    let both = exec_json(
-        &root,
-        "cordis_define",
-        json!({
-            "plugin": {"kind": "new", "idPrefix": "dpath"},
-            "name": "DemoPath",
-            "purpose": "file backed",
-            "factory": "rhai",
-            "source": "#{ inject: [], apply: |host| { } }",
-            "source_path": ".dock/plugins/demopath/source.rhai"
-        }),
-    )
-    .await;
-    assert!(both.contains("Error"), "{both}");
-    assert!(
-        both.contains("not both") || both.contains("source or source_path"),
-        "{both}"
+    let src = |answer: &str| {
+        format!(
+            r#"#{{ inject: ["tools"], apply: |host| {{
+                host.register_tool(#{{ name: "snap_ping", description: "pong from file",
+                    parameters: #{{ type: "object", properties: #{{}} }}, execute: |a| {{ "{answer}" }} }});
+            }} }}"#
+        )
+    };
+    load_plugin(&root, "snap", &src("one")).await;
+    assert_eq!(exec(&root, "snap_ping", "{}").await, "one");
+    write_plugin(&root, "snap", &[("source.rhai", &src("two"))]);
+    assert_eq!(
+        exec(&root, "snap_ping", "{}").await,
+        "one",
+        "没 reload 不换"
     );
+    reload(&root, "snap").await;
+    assert_eq!(exec(&root, "snap_ping", "{}").await, "two");
 
-    let defined = exec_json(
-        &root,
-        "cordis_define",
-        json!({
-            "plugin": {"kind": "new", "idPrefix": "dpath"},
-            "name": "DemoPath",
-            "purpose": "file backed",
-            "factory": "rhai",
-            "source_path": ".dock/plugins/demopath/source.rhai"
-        }),
-    )
-    .await;
-    assert!(defined.contains("dpath-1/pkg-1"), "{defined}");
-
-    let ran = exec(
-        &root,
-        "cordis_run",
-        r#"{"pluginId":"dpath-1","packageId":"pkg-1","mode":"run"}"#,
-    )
-    .await;
-    assert!(ran.contains("\"status\":\"running\""), "{ran}");
-    assert_eq!(exec(&root, "demopath_ping", "{}").await, "file-pong");
-
-    let inspect = exec_json(
-        &root,
-        "cordis_inspect",
-        json!({ "pluginId": "dpath-1", "packageId": "pkg-1" }),
-    )
-    .await;
-    assert!(inspect.contains("source_path:"), "{inspect}");
-    assert!(inspect.contains("demopath"), "{inspect}");
-    assert!(!inspect.contains("file-pong"), "{inspect}");
-    assert!(!inspect.contains("register_tool"), "{inspect}");
-
-    // Escape / outside root rejected
-    let escape = exec_json(
-        &root,
-        "cordis_define",
-        json!({
-            "plugin": {"kind": "new", "idPrefix": "nope"},
-            "name": "Nope",
-            "purpose": "escape",
-            "factory": "rhai",
-            "source_path": ".dock/plugins/demopath/../../../Cargo.toml"
-        }),
-    )
-    .await;
-    assert!(escape.contains("Error"), "{escape}");
-    assert!(
-        escape.contains("..")
-            || escape.contains("must resolve under")
-            || escape.contains("source_path"),
-        "{escape}"
-    );
-
-    let _ = std::fs::remove_dir_all(plug);
+    let detail = exec(&root, "cordis_inspect", r#"{"plugin":"snap"}"#).await;
+    assert!(detail.contains("source: "), "{detail}");
+    assert!(detail.contains("snap/source.rhai"), "{detail}");
+    assert!(!detail.contains("register_tool"), "不回源码：{detail}");
 }
 
+/// `source.rhai` 换成指向插件目录外的软链：reload 拒掉，外面的内容不进回执，
+/// 工具也不登记。
 #[tokio::test]
-async fn rhai_source_path_rejects_symlink_swap_after_define() {
+async fn reload_rejects_a_source_symlinked_out_of_the_plugin_directory() {
     let root = boot().await;
-    let cwd = std::env::current_dir().unwrap();
-    let plug = cwd.join(".dock/plugins/swapprobe");
-    std::fs::create_dir_all(&plug).unwrap();
-    let source_file = plug.join("source.rhai");
-    std::fs::write(
-        plug.join("plugin.toml"),
-        "name = \"SwapProbe\"\npurpose = \"symlink swap\"\nfactory = \"rhai\"\nenabled = true\n",
-    )
-    .unwrap();
-    std::fs::write(
-        &source_file,
-        r#"#{
-            inject: ["tools"],
-            apply: |host| {
-                host.register_tool(#{
-                    name: "swapprobe_ping",
-                    description: "should not run after swap",
-                    parameters: #{ type: "object", properties: #{} },
-                    execute: |args| { "file-pong" }
-                });
-            }
-        }"#,
-    )
-    .unwrap();
-
-    let defined = exec_json(
+    let dir = write_plugin(
         &root,
-        "cordis_define",
-        json!({
-            "plugin": {"kind": "new", "idPrefix": "swap"},
-            "name": "SwapProbe",
-            "purpose": "symlink swap",
-            "factory": "rhai",
-            "source_path": ".dock/plugins/swapprobe/source.rhai"
-        }),
-    )
-    .await;
-    assert!(defined.contains("swap-1/pkg-1"), "{defined}");
-
+        "swapprobe",
+        &[("source.rhai", "#{ inject: [], apply: |host| {} }")],
+    );
     let outside = tempfile::NamedTempFile::new().unwrap();
-    std::fs::write(outside.path(), "TOP SECRET").unwrap();
-    std::fs::remove_file(&source_file).unwrap();
-    std::os::unix::fs::symlink(outside.path(), &source_file).unwrap();
-
-    let ran = exec(
-        &root,
-        "cordis_run",
-        r#"{"pluginId":"swap-1","packageId":"pkg-1","mode":"run"}"#,
+    std::fs::write(
+        outside.path(),
+        r#"#{ inject: ["tools"], apply: |host| { host.register_tool(#{ name: "swapprobe_ping", parameters: #{ type: "object", properties: #{} }, execute: |a| { "TOP SECRET" } }); } }"#,
     )
-    .await;
-    assert!(ran.contains("Error"), "{ran}");
-    assert!(
-        ran.contains("must resolve under")
-            || ran.contains("source_path")
-            || ran.contains("not a file"),
-        "{ran}"
-    );
+    .unwrap();
+    std::fs::remove_file(dir.join("source.rhai")).unwrap();
+    std::os::unix::fs::symlink(outside.path(), dir.join("source.rhai")).unwrap();
+
+    let ran = reload(&root, "swapprobe").await;
+    assert!(ran.contains("插件目录"), "{ran}");
     assert!(!ran.contains("TOP SECRET"), "{ran}");
     let names: Vec<_> = tools_of(&root)
         .specs()
@@ -864,50 +761,24 @@ async fn rhai_source_path_rejects_symlink_swap_after_define() {
         !names.iter().any(|n| n == "swapprobe_ping"),
         "tool must not register after symlink escape: {names:?}"
     );
-
-    let _ = std::fs::remove_dir_all(plug);
 }
 
 #[tokio::test]
 async fn rhai_run_registers_tool_provide_and_slot_then_stop_unregisters() {
     let root = boot().await;
-    let defined = exec_json(
-        &root,
-        "cordis_define",
-        json!({
-            "plugin": {"kind": "new", "idPrefix": "memo"},
-            "name": "Memo",
-            "purpose": "bag",
-            "factory": "rhai",
-            "source": RHAI_MEMO,
-        }),
-    )
-    .await;
-    assert!(defined.contains("memo-1/pkg-1"), "{defined}");
     assert!(root.get::<RhaiBag>("dynMemo").is_none());
-
-    let ran = exec(
-        &root,
-        "cordis_run",
-        r#"{"pluginId":"memo-1","packageId":"pkg-1","mode":"run"}"#,
-    )
-    .await;
-    assert!(ran.contains("\"status\":\"running\""), "{ran}");
+    let ran = load_plugin(&root, "memo", RHAI_MEMO).await;
+    // 回执把这一版登记的东西列全：模型下一步该试调哪颗，不用再去猜。
+    assert!(
+        ran.contains("登记：工具 memo_get；面板 memo、later；服务 dynMemo、dynMemoLimit；设置卡"),
+        "{ran}"
+    );
     let bag = root.get::<RhaiBag>("dynMemo").expect("provide dynMemo");
     assert_eq!(bag.get()["text"], "hi");
     assert_eq!(exec(&root, "memo_get", "{}").await, "memo-ok");
 
-    let inspect = exec_json(
-        &root,
-        "cordis_inspect",
-        json!({
-            "pluginId": "memo-1",
-            "packageId": "pkg-1"
-        }),
-    )
-    .await;
-    assert!(inspect.contains("source:"), "{inspect}");
-    assert!(inspect.contains("register_tool"), "{inspect}");
+    let inspect = exec(&root, "cordis_inspect", r#"{"plugin":"memo"}"#).await;
+    assert!(inspect.contains("registered: 工具 memo_get"), "{inspect}");
 
     let builtins = exec(&root, "cordis_inspect", r#"{"what":"builtins"}"#).await;
     assert!(builtins.contains("host.register_tool"), "{builtins}");
@@ -968,7 +839,7 @@ async fn rhai_run_registers_tool_provide_and_slot_then_stop_unregisters() {
         .unwrap();
     assert_eq!(
         settings.list(),
-        vec![("memo-1".to_string(), "便签".to_string())]
+        vec![("memo".to_string(), "便签".to_string())]
     );
     let bag = root.require::<RhaiBag>("dynMemoLimit").unwrap().get();
     assert_eq!(bag["limit"], serde_json::json!(10), "{bag}");
@@ -987,7 +858,12 @@ async fn rhai_run_registers_tool_provide_and_slot_then_stop_unregisters() {
     assert_eq!(item.tone, cordis_base::view::Tone::Success);
     assert_eq!(item.surface.as_deref(), Some("memo"));
 
-    exec(&root, "cordis_stop", r#"{"pluginId":"memo-1"}"#).await;
+    exec_json(
+        &root,
+        "cordis_plugin",
+        json!({"action": "disable", "id": "memo"}),
+    )
+    .await;
     assert!(
         status.list().iter().all(|i| i.id != "memo-count"),
         "包停了状态项要跟着走"
@@ -1028,18 +904,8 @@ async fn dynamic_tools_bypass_agent_preset_allowlist() {
         .unwrap()
         .allows(DYN_ECHO_TOOL));
 
-    exec(
-        &root,
-        "cordis_define",
-        r#"{"plugin":{"kind":"new","idPrefix":"echo"},"name":"Echo","purpose":"ping","factory":"echo"}"#,
-    )
-    .await;
-    exec(
-        &root,
-        "cordis_run",
-        r#"{"pluginId":"echo-1","packageId":"pkg-1","mode":"run"}"#,
-    )
-    .await;
+    write_plugin(&root, "echo", &[("plugin.toml", "factory = \"echo\"\n")]);
+    reload(&root, "echo").await;
 
     // 动态工具按需加载：对采样器隐藏，不再占用模型上下文
     let model: Vec<_> = tools_of(&root)
@@ -1082,77 +948,218 @@ async fn dynamic_tools_bypass_agent_preset_allowlist() {
     .await;
     assert_eq!(use_res, "pong");
 
-    // 也可以通过 cordis_call 调度执行
-    let call_res = exec(
-        &root,
-        "cordis_call",
-        &json!({
-            "name": DYN_ECHO_TOOL,
-            "arguments": {}
-        })
-        .to_string(),
-    )
-    .await;
-    assert!(call_res.contains("pong"), "{call_res}");
-
     assert_eq!(exec(&root, DYN_ECHO_TOOL, "{}").await, "pong");
 }
 
-#[tokio::test]
-async fn cordis_call_invokes_dynamic_tool_from_host_meta_path() {
-    let root = boot().await;
+/// 开一页自己的权限队列（询问档），根页是自动批准——和 GUI 里「每个会话一页、
+/// 第 1 页没人看」一样。
+async fn ask_page(root: &Context) -> (Context, std::sync::Arc<Permissions>) {
+    let page = root.isolate(SETTINGS).isolate(PERMISSIONS);
+    page.plugin(settings(), ()).unwrap().wait().await.unwrap();
+    page.plugin(permissions(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    page.require::<cordis_spine::AppSettings>(SETTINGS)
+        .unwrap()
+        .set_permission_mode(PermissionMode::Ask);
+    let perms = page.require::<Permissions>(PERMISSIONS).unwrap();
+    (page, perms)
+}
 
-    exec(
-        &root,
-        "cordis_define",
-        r#"{"plugin":{"kind":"new","idPrefix":"echo"},"name":"Echo","purpose":"ping","factory":"echo"}"#,
-    )
-    .await;
-    exec(
-        &root,
-        "cordis_run",
-        r#"{"pluginId":"echo-1","packageId":"pkg-1","mode":"run"}"#,
-    )
-    .await;
+async fn wait_for_prompt(perms: &Permissions) -> cordis_spine::PermissionPrompt {
+    for _ in 0..300 {
+        if let Some(p) = perms.front() {
+            return p;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("确认框没有出现在发起调用的那一页");
+}
 
-    let via_meta = exec(
+/// 回归：插件脚本里的 `host.call_tool` 要在**发起调用的那一页**上执行。以前它拿
+/// 插件 fiber 所在的根算，确认框弹到第 1 页——GUI 里那一页没人看，调用一直挂着
+/// （实测会话里 `bash git status` 挂了 307 秒）。这里根页是自动批准：修之前 bash
+/// 直接在根上跑掉，发起调用的那一页根本不会出现确认框。
+#[tokio::test(flavor = "multi_thread")]
+async fn host_call_tool_asks_on_the_calling_page() {
+    let root = boot_gated().await;
+    load_plugin(
         &root,
-        "cordis_call",
-        &format!(r#"{{"name":"{DYN_ECHO_TOOL}","arguments":{{}}}}"#),
+        "relay",
+        r#"#{ inject: ["tools"], apply: |host| {
+            host.register_tool(#{ name: "relay_bash", parameters: #{ type: "object", properties: #{} },
+                execute: |a| { host.call_tool("bash", #{ command: "echo relayed" }) } });
+        } }"#,
     )
     .await;
+    let (page, perms) = ask_page(&root).await;
+    let tools = tools_of(&root);
+    let caller = page.clone();
+    let call = tokio::spawn(async move {
+        tools
+            .execute_on(
+                &caller,
+                ToolCall {
+                    id: "t".into(),
+                    name: "relay_bash".into(),
+                    arguments: "{}".into(),
+                },
+            )
+            .await
+            .content
+    });
+    let prompt = wait_for_prompt(&perms).await;
+    assert_eq!(prompt.tool, "bash");
     assert!(
-        via_meta.contains("## cordis_call → dyn_echo") && via_meta.contains("pong"),
-        "{via_meta}"
+        prompt.summary.contains("echo relayed"),
+        "{}",
+        prompt.summary
     );
+    assert!(
+        root.require::<Permissions>(PERMISSIONS)
+            .unwrap()
+            .front()
+            .is_none(),
+        "根页不该收到这个请求"
+    );
+    perms.resolve(PermissionOptionKind::RejectOnce);
+    let out = call.await.unwrap();
+    assert!(!out.contains("relayed"), "拒了就不该跑：{out}");
+}
 
-    let recursive = exec(
-        &root,
-        "cordis_call",
-        r#"{"name":"cordis_call","arguments":{"name":"dyn_echo"}}"#,
-    )
-    .await;
-    assert!(recursive.contains("cannot call itself"), "{recursive}");
+/// 同一个缺陷的 HTTP 那一半：没声明的 host 要在发起调用的那一页确认；
+/// `plugin.toml` 里 `[permissions] http` 声明过的直接放行（批准加载时已经列给用户看过）。
+#[tokio::test(flavor = "multi_thread")]
+async fn plugin_http_asks_on_the_calling_page_unless_the_host_is_declared() {
+    let root = boot().await;
+    allow_local_http(&root);
+    let (base, seen) = spawn_api_server();
+    let source = format!(
+        r#"#{{ inject: ["tools"], apply: |host| {{
+            host.register_tool(#{{ name: "net_issues", parameters: #{{ type: "object", properties: #{{}} }},
+                execute: |a| {{ let r = http_request(#{{ url: "{base}/issues" }}); "HTTP " + r.status }} }});
+        }} }}"#
+    );
+    load_plugin(&root, "net", &source).await;
+    let (page, perms) = ask_page(&root).await;
+    let run = |page: Context| {
+        let tools = tools_of(&root);
+        tokio::spawn(async move {
+            tools
+                .execute_on(
+                    &page,
+                    ToolCall {
+                        id: "t".into(),
+                        name: "net_issues".into(),
+                        arguments: "{}".into(),
+                    },
+                )
+                .await
+                .content
+        })
+    };
+    let call = run(page.clone());
+    let prompt = wait_for_prompt(&perms).await;
+    assert_eq!(prompt.tool, "http_request 127.0.0.1");
+    assert!(prompt.summary.contains("插件 net"), "{}", prompt.summary);
+    perms.resolve(PermissionOptionKind::AllowOnce);
+    assert_eq!(call.await.unwrap(), "HTTP 200");
 
-    let missing = exec(
+    write_plugin(
         &root,
-        "cordis_call",
-        r#"{"name":"dyn_repo_info","arguments":{}}"#,
-    )
-    .await;
-    assert!(missing.contains("is not registered"), "{missing}");
+        "net",
+        &[("plugin.toml", "[permissions]\nhttp = [\"127.0.0.1\"]\n")],
+    );
+    let ran = reload(&root, "net").await;
+    assert!(ran.contains("HTTP 免逐次确认：127.0.0.1"), "{ran}");
+    let out = run(page.clone()).await.unwrap();
+    assert_eq!(out, "HTTP 200", "声明过的 host 不再问");
+    assert!(perms.front().is_none());
+    assert_eq!(seen.lock().unwrap().len(), 2);
+}
+
+/// `cordis_plugin` 的确认按插件记：「始终允许」一个插件，迭代它不用每次点；换一个
+/// 插件还会再问。确认框里列着它挂的钩子和声明的 HTTP host。
+#[tokio::test(flavor = "multi_thread")]
+async fn plugin_approval_is_per_plugin_and_lists_hooks_and_hosts() {
+    let root = boot_gated().await;
+    root.require::<cordis_spine::AppSettings>(SETTINGS)
+        .unwrap()
+        .set_permission_mode(PermissionMode::Ask);
+    let perms = root.require::<Permissions>(PERMISSIONS).unwrap();
+    let hooks = r#"#{ inject: [], apply: |host| {
+        host.on("tools/pre-execute", |c| { () });
+        host.on("agent/turn-end", |e| { () });
+    } }"#;
+    write_plugin(
+        &root,
+        "guard",
+        &[
+            ("source.rhai", hooks),
+            (
+                "plugin.toml",
+                "[permissions]\nhttp = [\"api.example.com\"]\n",
+            ),
+        ],
+    );
+    write_plugin(&root, "other", &[("source.rhai", hooks)]);
+    let spawn_reload = |id: &'static str| {
+        let root = root.clone();
+        tokio::spawn(async move { reload(&root, id).await })
+    };
+
+    let first = spawn_reload("guard");
+    let prompt = wait_for_prompt(&perms).await;
+    assert_eq!(prompt.tool, "cordis_plugin guard");
+    assert!(
+        prompt.summary.contains("加载插件 guard"),
+        "{}",
+        prompt.summary
+    );
+    assert!(
+        prompt
+            .summary
+            .contains("钩子：tools/pre-execute、agent/turn-end"),
+        "{}",
+        prompt.summary
+    );
+    assert!(
+        prompt.summary.contains("HTTP 免逐次确认：api.example.com"),
+        "{}",
+        prompt.summary
+    );
+    perms.resolve(PermissionOptionKind::AllowAlways);
+    assert!(first.await.unwrap().contains("运行中"));
+
+    // 同一个插件再 reload：不问。
+    let again = reload(&root, "guard").await;
+    assert!(again.contains("运行中"), "{again}");
+    assert!(perms.front().is_none());
+
+    // 换一个插件：还问。
+    let other = spawn_reload("other");
+    let prompt = wait_for_prompt(&perms).await;
+    assert_eq!(prompt.tool, "cordis_plugin other");
+    perms.resolve(PermissionOptionKind::RejectOnce);
+    let denied = other.await.unwrap();
+    assert!(!denied.contains("运行中"), "{denied}");
+    assert!(runner(&root).inspect_plugin(MAIN, "other").is_err());
 }
 
 #[tokio::test]
 async fn at_plugin_id_pre_step_injects_identity_reminder() {
     let root = boot().await;
-    exec(
+    write_plugin(
         &root,
-        "cordis_define",
-        r#"{"plugin":{"kind":"new","idPrefix":"echo"},"name":"Echo","purpose":"ping","factory":"echo"}"#,
-    )
-    .await;
-    let user = "@echo-1 please inspect";
+        "echo",
+        &[(
+            "plugin.toml",
+            "name = \"Echo\"\npurpose = \"ping\"\nfactory = \"echo\"\n",
+        )],
+    );
+    let user = "@echo please inspect";
     root.waterfall(PRE_STEP, PreStep::new(user, true, MAIN), move || {
         PreStep::new(user, true, MAIN)
     });
@@ -1162,27 +1169,21 @@ async fn at_plugin_id_pre_step_injects_identity_reminder() {
         _ => None,
     });
     let text = reminder.expect("system reminder");
-    assert!(text.contains("echo-1"), "{text}");
-    assert!(text.contains("pkg-1"), "{text}");
-    assert!(!text.contains("factory"), "{text}");
+    assert!(text.contains("# @echo"), "{text}");
+    assert!(text.contains(".dock/plugins/echo"), "{text}");
+    assert!(text.contains("cordis_plugin reload echo"), "{text}");
+    assert!(text.contains("不要另起一个插件目录"), "{text}");
     assert!(!text.to_lowercase().contains("source:"), "{text}");
 }
 
 #[tokio::test]
 async fn other_session_cannot_see_owned_plugin() {
     let root = boot().await;
-    exec(
-        &root,
-        "cordis_define",
-        r#"{"plugin":{"kind":"new","idPrefix":"echo"},"name":"Echo","purpose":"ping","factory":"echo"}"#,
-    )
-    .await;
-    let runner = root
-        .require::<DynamicRunner>(DYNAMIC_CORDIS_RUNNER)
-        .unwrap();
-    assert!(runner.inspect_plugin(MAIN, "echo-1").is_ok());
-    assert!(runner.inspect_plugin("child-other", "echo-1").is_err());
-    assert!(runner.reference("child-other", "echo-1").is_err());
+    let (id, _) = define(&root, new_plugin("echo"), "echo", None).unwrap();
+    let runner = runner(&root);
+    assert!(runner.inspect_plugin(MAIN, &id).is_ok());
+    assert!(runner.inspect_plugin("child-other", &id).is_err());
+    assert!(runner.reference("child-other", &id).is_err());
 }
 
 /// 先登记两颗工具和一个服务，再去盖命令表里的 `/help`（`slash` 插件自己登记的，
@@ -1248,30 +1249,13 @@ fn extra_names(root: &Context) -> Vec<String> {
 #[tokio::test]
 async fn rhai_apply_throw_rolls_back_register_tool_and_provide() {
     let root = boot().await;
-    let defined = exec_json(
+    write_plugin(
         &root,
-        "cordis_define",
-        json!({
-            "plugin": {"kind": "new", "idPrefix": "orb"},
-            "name": "Orphan",
-            "purpose": "rollback",
-            "factory": "rhai",
-            "source": RHAI_APPLY_THEN_RESERVED_SLASH,
-        }),
-    )
-    .await;
-    assert!(defined.contains("orb-1/pkg-1"), "{defined}");
-
-    let ran = exec(
-        &root,
-        "cordis_run",
-        r#"{"pluginId":"orb-1","packageId":"pkg-1","mode":"run"}"#,
-    )
-    .await;
-    assert!(
-        ran.contains("cannot shadow") || ran.contains("Error") || ran.contains("error"),
-        "{ran}"
+        "orb",
+        &[("source.rhai", RHAI_APPLY_THEN_RESERVED_SLASH)],
     );
+    let ran = reload(&root, "orb").await;
+    assert!(ran.contains("cannot shadow"), "{ran}");
     assert!(ran.contains("pick a different command"), "{ran}");
 
     let names = extra_names(&root);
@@ -1288,74 +1272,31 @@ async fn rhai_apply_throw_rolls_back_register_tool_and_provide() {
             .map(|e| e.command.clone())
             .collect::<Vec<_>>()
     );
-
-    let stopped = exec(&root, "cordis_stop", r#"{"pluginId":"orb-1"}"#).await;
-    assert!(
-        stopped.contains("wasRunning") || stopped.contains("Stopped") || stopped.contains("orb-1"),
-        "{stopped}"
+    // 修好同一个目录再 reload：还是 orb 这个 id，不会多出第二个插件。
+    write_plugin(&root, "orb", &[("source.rhai", RHAI_TWO_TOOLS)]);
+    let fixed = reload(&root, "orb").await;
+    assert!(fixed.contains("运行中"), "{fixed}");
+    assert!(extra_names(&root).iter().any(|n| n == "aagt_list"));
+    assert_eq!(
+        runner(&root)
+            .snapshot(MAIN)
+            .iter()
+            .filter(|r| r.plugin_id.starts_with("orb"))
+            .count(),
+        1
     );
-    let names = extra_names(&root);
-    assert!(!names.iter().any(|n| n == "orb_list"), "{names:?}");
-
-    exec(&root, "cordis_stop", r#"{"pluginId":"orb-1","drop":true}"#).await;
-    let again = exec_json(
-        &root,
-        "cordis_define",
-        json!({
-            "plugin": {"kind": "new", "idPrefix": "orb"},
-            "name": "Retry",
-            "purpose": "new id",
-            "factory": "echo",
-        }),
-    )
-    .await;
-    assert!(again.contains("orb-2"), "{again}");
-    assert!(!again.contains("orb-1/"), "{again}");
 }
 
 #[tokio::test]
 async fn update_replaces_entire_fiber_not_overlay() {
     let root = boot().await;
-    exec_json(
-        &root,
-        "cordis_define",
-        json!({
-            "plugin": {"kind": "new", "idPrefix": "aagt"},
-            "name": "A",
-            "purpose": "tools",
-            "factory": "rhai",
-            "source": RHAI_TWO_TOOLS,
-        }),
-    )
-    .await;
-    exec(
-        &root,
-        "cordis_run",
-        r#"{"pluginId":"aagt-1","packageId":"pkg-1","mode":"run"}"#,
-    )
-    .await;
+    load_plugin(&root, "aagt", RHAI_TWO_TOOLS).await;
     assert!(extra_names(&root).iter().any(|n| n == "aagt_list"));
     assert!(root.get::<RhaiBag>("dynAgentList").is_some());
 
-    exec_json(
-        &root,
-        "cordis_define",
-        json!({
-            "plugin": {"kind": "existing", "pluginId": "aagt-1"},
-            "name": "B",
-            "purpose": "slash only",
-            "factory": "rhai",
-            "source": RHAI_SLASH_ONLY,
-        }),
-    )
-    .await;
-    let updated = exec(
-        &root,
-        "cordis_run",
-        r#"{"pluginId":"aagt-1","packageId":"pkg-2","mode":"update"}"#,
-    )
-    .await;
-    assert!(updated.contains("pkg-2"), "{updated}");
+    write_plugin(&root, "aagt", &[("source.rhai", RHAI_SLASH_ONLY)]);
+    let updated = reload(&root, "aagt").await;
+    assert!(updated.contains("登记：斜杠 /agls"), "{updated}");
     let names = extra_names(&root);
     assert!(!names.iter().any(|n| n == "aagt_list"), "{names:?}");
     assert!(!names.iter().any(|n| n == "aagt_list_get"), "{names:?}");
@@ -1375,24 +1316,15 @@ async fn update_replaces_entire_fiber_not_overlay() {
 #[tokio::test]
 async fn rhai_define_without_apply_teaches_and_does_not_mint() {
     let root = boot().await;
-    let out = exec_json(
+    write_plugin(
         &root,
-        "cordis_define",
-        json!({
-            "plugin": {"kind": "new", "idPrefix": "noap"},
-            "name": "NoApply",
-            "purpose": "missing apply",
-            "factory": "rhai",
-            "source": "#{ inject: [\"tools\"] }",
-        }),
-    )
-    .await;
-    assert!(out.contains("apply"), "{out}");
-    let listed = exec(&root, "cordis_inspect", r#"{"what":"temporary"}"#).await;
-    assert!(
-        listed.contains("No session-local Plugins") || !listed.contains("noap-1"),
-        "{listed}"
+        "noap",
+        &[("source.rhai", "#{ inject: [\"tools\"] }")],
     );
+    let out = reload(&root, "noap").await;
+    assert!(out.contains("apply"), "{out}");
+    assert!(out.contains("这一版没跑起来"), "{out}");
+    assert!(runner(&root).inspect_plugin(MAIN, "noap").is_err());
 }
 
 const RHAI_STRING_PARAMS: &str = r#"#{
@@ -1422,24 +1354,8 @@ const RHAI_BAD_REQUIRED: &str = r#"#{
 #[tokio::test]
 async fn rhai_string_parameters_fail_loud_and_roll_back() {
     let root = boot().await;
-    exec_json(
-        &root,
-        "cordis_define",
-        json!({
-            "plugin": {"kind": "new", "idPrefix": "strp"},
-            "name": "Str",
-            "purpose": "string params",
-            "factory": "rhai",
-            "source": RHAI_STRING_PARAMS,
-        }),
-    )
-    .await;
-    let ran = exec(
-        &root,
-        "cordis_run",
-        r#"{"pluginId":"strp-1","packageId":"pkg-1","mode":"run"}"#,
-    )
-    .await;
+    write_plugin(&root, "strp", &[("source.rhai", RHAI_STRING_PARAMS)]);
+    let ran = reload(&root, "strp").await;
     assert!(ran.contains("must be a map"), "{ran}");
     assert!(ran.contains("not a JSON string"), "{ran}");
     let names = extra_names(&root);
@@ -1449,24 +1365,8 @@ async fn rhai_string_parameters_fail_loud_and_roll_back() {
 #[tokio::test]
 async fn rhai_required_unknown_property_fail_loud() {
     let root = boot().await;
-    exec_json(
-        &root,
-        "cordis_define",
-        json!({
-            "plugin": {"kind": "new", "idPrefix": "schm"},
-            "name": "Schema",
-            "purpose": "bad required",
-            "factory": "rhai",
-            "source": RHAI_BAD_REQUIRED,
-        }),
-    )
-    .await;
-    let ran = exec(
-        &root,
-        "cordis_run",
-        r#"{"pluginId":"schm-1","packageId":"pkg-1","mode":"run"}"#,
-    )
-    .await;
+    write_plugin(&root, "schm", &[("source.rhai", RHAI_BAD_REQUIRED)]);
+    let ran = reload(&root, "schm").await;
     assert!(ran.contains("undeclared property"), "{ran}");
     assert!(ran.contains("nope"), "{ran}");
     let names = extra_names(&root);
@@ -1476,12 +1376,7 @@ async fn rhai_required_unknown_property_fail_loud() {
 #[tokio::test]
 async fn concurrent_identical_cordis_run_shares_in_flight() {
     let root = boot().await;
-    exec(
-        &root,
-        "cordis_define",
-        r#"{"plugin":{"kind":"new","idPrefix":"echo"},"name":"Echo","purpose":"ping","factory":"echo"}"#,
-    )
-    .await;
+    define(&root, new_plugin("echo"), "echo", None).unwrap();
     let runner = root
         .require::<DynamicRunner>(DYNAMIC_CORDIS_RUNNER)
         .unwrap();
@@ -1532,18 +1427,16 @@ async fn concurrent_identical_cordis_run_shares_in_flight() {
 #[tokio::test]
 async fn concurrent_different_package_is_already_starting() {
     let root = boot().await;
-    exec(
+    define(&root, new_plugin("echo"), "echo", None).unwrap();
+    define(
         &root,
-        "cordis_define",
-        r#"{"plugin":{"kind":"new","idPrefix":"echo"},"name":"Echo","purpose":"ping","factory":"echo"}"#,
+        PluginSel::Existing {
+            plugin_id: "echo-1".into(),
+        },
+        "note",
+        None,
     )
-    .await;
-    exec(
-        &root,
-        "cordis_define",
-        r#"{"plugin":{"kind":"existing","pluginId":"echo-1"},"name":"Note","purpose":"other","factory":"note"}"#,
-    )
-    .await;
+    .unwrap();
     let runner = root
         .require::<DynamicRunner>(DYNAMIC_CORDIS_RUNNER)
         .unwrap();
@@ -1594,25 +1487,8 @@ const RHAI_ON_EVENT: &str = r#"#{
 #[tokio::test]
 async fn host_on_session_event_sees_user_line() {
     let root = boot().await;
-    exec_json(
-        &root,
-        "cordis_define",
-        json!({
-            "plugin": {"kind": "new", "idPrefix": "obsv"},
-            "name": "Observer",
-            "purpose": "session/event",
-            "factory": "rhai",
-            "source": RHAI_ON_EVENT,
-        }),
-    )
-    .await;
-    let ran = exec(
-        &root,
-        "cordis_run",
-        r#"{"pluginId":"obsv-1","packageId":"pkg-1","mode":"run"}"#,
-    )
-    .await;
-    assert!(ran.contains("\"status\":\"running\""), "{ran}");
+    let ran = load_plugin(&root, "obsv", RHAI_ON_EVENT).await;
+    assert!(ran.contains("钩子 session/event"), "{ran}");
 
     root.require::<Sessions>(SESSIONS)
         .unwrap()
@@ -1660,58 +1536,15 @@ async fn disk_plugin_autoloads_and_is_visible_to_other_sessions() {
 
     let listing =
         runner.overlay_listing_from(MAIN, &[(PersistScope::Project, dir.path().to_path_buf())]);
-    assert!(listing.contains("echo"), "{listing}");
-    assert!(listing.contains("永久"), "{listing}");
-
-    let permanent = exec(&root, "cordis_inspect", r#"{"what":"permanent"}"#).await;
     assert!(
-        permanent.contains("永久") || permanent.contains("echo") || permanent.contains("disk"),
-        "{permanent}"
+        listing.contains("echo [project] Echo — disk echo (运行中)"),
+        "{listing}"
     );
+    assert!(listing.contains("cordis_plugin reload"), "{listing}");
 
-    let gone = exec(&root, "cordis_stop", r#"{"pluginId":"echo","drop":true}"#).await;
-    assert!(gone.contains("Removed"), "{gone}");
+    let gone = runner.undefine(MAIN, "echo").await.unwrap();
+    assert!(gone.was_running);
     assert!(plugin_dir.join("plugin.toml").exists());
-}
-
-#[tokio::test]
-async fn promote_writes_disk_and_stops_session_copy() {
-    let root = boot().await;
-    exec(
-        &root,
-        "cordis_define",
-        r#"{"plugin":{"kind":"new","idPrefix":"echo"},"name":"Echo","purpose":"ping","factory":"echo"}"#,
-    )
-    .await;
-    exec(
-        &root,
-        "cordis_run",
-        r#"{"pluginId":"echo-1","packageId":"pkg-1","mode":"run"}"#,
-    )
-    .await;
-    assert!(root.get::<DynEcho>(DYN_ECHO).is_some());
-
-    let dir = tempfile::tempdir().unwrap();
-    let runner = root
-        .require::<DynamicRunner>(DYNAMIC_CORDIS_RUNNER)
-        .unwrap();
-    let receipt = runner
-        .promote_into(
-            MAIN,
-            "echo-1",
-            None,
-            PersistScope::Project,
-            dir.path().to_path_buf(),
-        )
-        .await
-        .expect("promote");
-    assert_eq!(receipt.plugin_id, "echo");
-    assert!(receipt.stopped_source);
-    assert!(dir.path().join("echo").join("plugin.toml").exists());
-    assert!(root.get::<DynEcho>(DYN_ECHO).is_some());
-    assert!(runner.inspect_plugin(MAIN, "echo").is_ok());
-    let session = runner.inspect_plugin(MAIN, "echo-1").unwrap();
-    assert!(session.active_run.is_none());
 }
 
 // —— scriptable waterfalls ————————————————————————————————————————————————
@@ -1756,27 +1589,8 @@ async fn boot_with_loop() -> Context {
     root
 }
 
-async fn run_rhai(root: &Context, prefix: &str, source: &str) {
-    let defined = exec_json(
-        root,
-        "cordis_define",
-        json!({
-            "plugin": {"kind": "new", "idPrefix": prefix},
-            "name": "Hooks",
-            "purpose": "waterfall",
-            "factory": "rhai",
-            "source": source,
-        }),
-    )
-    .await;
-    assert!(defined.contains("pkg-1"), "{defined}");
-    let ran = exec_json(
-        root,
-        "cordis_run",
-        json!({"pluginId": format!("{prefix}-1"), "packageId": "pkg-1", "mode": "run"}),
-    )
-    .await;
-    assert!(ran.contains("\"status\":\"running\""), "{ran}");
+async fn run_rhai(root: &Context, id: &str, source: &str) {
+    load_plugin(root, id, source).await;
 }
 
 fn reminders(root: &Context) -> Vec<String> {
@@ -2105,25 +1919,8 @@ fn allow_local_http(root: &Context) {
     });
 }
 
-async fn define_and_run(root: &Context, prefix: &str, src: &str) {
-    let defined = exec_json(
-        root,
-        "cordis_define",
-        json!({
-            "plugin": {"kind": "new", "idPrefix": prefix},
-            "name": "Api", "purpose": "wrap an api",
-            "factory": "rhai", "source": src
-        }),
-    )
-    .await;
-    assert!(defined.contains("pkg-1"), "{defined}");
-    let ran = exec(
-        root,
-        "cordis_run",
-        &format!(r#"{{"pluginId":"{prefix}-1","packageId":"pkg-1","mode":"run"}}"#),
-    )
-    .await;
-    assert!(ran.contains("\"status\":\"running\""), "{ran}");
+async fn define_and_run(root: &Context, id: &str, src: &str) {
+    load_plugin(root, id, src).await;
 }
 
 /// 主场景：GET JSON → `parse_json` → 取嵌套字段、数组元素、数组里的数组、布尔与数字。
@@ -2370,8 +2167,8 @@ async fn rhai_http_still_blocks_loopback_under_default_policy() {
     assert!(out.contains("SSRF"), "默认策略应当挡住环回：{out}");
 }
 
-/// `http_request` 只挂在**运行期**引擎上：define 期的 preflight 会 eval 源码顶层，
-/// 挂上去等于 `cordis_define` 本身就能发请求——那是权限门够不着的时机。
+/// `http_request` 只挂在**运行期**引擎上：编译检查会 eval 源码顶层，挂上去等于
+/// 检查本身就能发请求——那是权限门够不着的时机。
 #[tokio::test]
 async fn http_request_is_not_available_at_define_time() {
     let root = boot().await;
@@ -2385,18 +2182,10 @@ async fn http_request_is_not_available_at_define_time() {
         apply: |host| {{ }}
     }}"#
     );
-    let defined = exec_json(
-        &root,
-        "cordis_define",
-        json!({
-            "plugin": {"kind": "new", "idPrefix": "sneak"},
-            "name": "Sneaky", "purpose": "define-time fetch",
-            "factory": "rhai", "source": src
-        }),
-    )
-    .await;
+    write_plugin(&root, "sneak", &[("source.rhai", &src)]);
+    let defined = reload(&root, "sneak").await;
     assert!(
-        defined.contains("Error"),
+        defined.contains("这一版没跑起来"),
         "define 期不该能发请求：{defined}"
     );
     assert!(
@@ -2474,18 +2263,10 @@ async fn codec_is_not_available_at_define_time() {
         sneaky: to_base64("x"),
         apply: |host| { }
     }"#;
-    let defined = exec_json(
-        &root,
-        "cordis_define",
-        json!({
-            "plugin": {"kind": "new", "idPrefix": "cdcf"},
-            "name": "SneakyCodec", "purpose": "define-time codec",
-            "factory": "rhai", "source": src
-        }),
-    )
-    .await;
+    write_plugin(&root, "cdcf", &[("source.rhai", src)]);
+    let defined = reload(&root, "cdcf").await;
     assert!(
-        defined.contains("Error"),
+        defined.contains("这一版没跑起来"),
         "define 期不该有 to_base64：{defined}"
     );
 }
@@ -2573,18 +2354,10 @@ async fn utc_now_is_not_available_at_define_time() {
         sneaky: utc_now(),
         apply: |host| { }
     }"#;
-    let defined = exec_json(
-        &root,
-        "cordis_define",
-        json!({
-            "plugin": {"kind": "new", "idPrefix": "utmf"},
-            "name": "SneakyTime", "purpose": "define-time utc_now",
-            "factory": "rhai", "source": src
-        }),
-    )
-    .await;
+    write_plugin(&root, "utmf", &[("source.rhai", src)]);
+    let defined = reload(&root, "utmf").await;
     assert!(
-        defined.contains("Error"),
+        defined.contains("这一版没跑起来"),
         "define 期不该有 utc_now：{defined}"
     );
 }
@@ -3028,7 +2801,8 @@ async fn disk_plugin_is_matched_by_real_directory_not_spelling() {
     runner.delete_disk_at(&canonical).await.unwrap();
     assert!(!plugin_dir.exists());
     assert!(
-        runner.session_plugins().is_empty() && runner.disk_plugins_in(&roots).is_empty(),
+        runner.snapshot(MAIN).iter().all(|r| r.plugin_id != "echo")
+            && runner.disk_plugins_in(&roots).is_empty(),
         "删掉之后注册表里也不该留着它"
     );
     assert!(
@@ -3051,15 +2825,12 @@ async fn register_tool_with_a_taken_view_leaves_no_tool_behind() {
             std::sync::Arc::new(|_: &cordis_spine::ToolViewInput<'_>| None),
         )
         .unwrap();
-    exec_json(
+    write_plugin(
         &root,
-        "cordis_define",
-        json!({
-            "plugin": {"kind": "new", "idPrefix": "dup"},
-            "name": "Dup",
-            "purpose": "view conflict",
-            "factory": "rhai",
-            "source": r#"#{
+        "dup",
+        &[(
+            "source.rhai",
+            r#"#{
                 inject: ["tools"],
                 apply: |host| {
                     host.register_tool(#{
@@ -3071,15 +2842,9 @@ async fn register_tool_with_a_taken_view_leaves_no_tool_behind() {
                     host.provide("dupAlive", #{ ok: true });
                 }
             }"#,
-        }),
-    )
-    .await;
-    let out = exec(
-        &root,
-        "cordis_run",
-        r#"{"pluginId":"dup-1","packageId":"pkg-1","mode":"run"}"#,
-    )
-    .await;
+        )],
+    );
+    let out = reload(&root, "dup").await;
     assert!(out.contains("已有卡片视图"), "{out}");
     let names: Vec<_> = tools_of(&root)
         .specs()
@@ -3095,15 +2860,12 @@ async fn register_tool_with_a_taken_view_leaves_no_tool_behind() {
 #[tokio::test]
 async fn session_event_handlers_run_in_order() {
     let root = boot().await;
-    let defined = exec_json(
+    write_plugin(
         &root,
-        "cordis_define",
-        json!({
-            "plugin": {"kind": "new", "idPrefix": "order"},
-            "name": "Order",
-            "purpose": "session/event order",
-            "factory": "rhai",
-            "source": r#"#{
+        "order",
+        &[(
+            "source.rhai",
+            r#"#{
                 inject: ["tools"],
                 apply: |host| {
                     let seen = [];
@@ -3113,17 +2875,10 @@ async fn session_event_handlers_run_in_order() {
                     });
                 }
             }"#,
-        }),
-    )
-    .await;
-    assert!(!defined.contains("Error"), "{defined}");
-    let ran = exec(
-        &root,
-        "cordis_run",
-        r#"{"pluginId":"order-1","packageId":"pkg-1","mode":"run"}"#,
-    )
-    .await;
-    assert!(!ran.contains("Error"), "{ran}");
+        )],
+    );
+    let ran = reload(&root, "order").await;
+    assert!(ran.contains("运行中"), "{ran}");
 
     let n = 40;
     for i in 0..n {
@@ -3160,33 +2915,29 @@ async fn session_event_handlers_run_in_order() {
     assert_eq!(got, want, "回调要按发出的顺序跑");
 }
 
-/// 仓库里的示例插件 `examples/plugins/activity` 照真实路径（define → run）能装上：
+/// 仓库里的示例插件 `examples/plugins/activity` 照真实路径（拷进插件目录 → reload）能装上：
 /// 面板、状态项、设置卡都登记；工具事件计数；面板按钮暂停 / 清零。示例跟着 Host API 一起变，坏了这里先红。
 #[tokio::test]
 async fn example_activity_plugin_runs() {
     let home = tempfile::tempdir().unwrap();
     let _env = cordis_base::test_env::scoped().set("DOCK_HOME", home.path());
     let root = boot().await;
-    let defined = exec_json(
+    write_plugin(
         &root,
-        "cordis_define",
-        json!({
-            "plugin": {"kind": "new", "idPrefix": "activ"},
-            "name": "Agent 活动",
-            "purpose": "example",
-            "factory": "rhai",
-            "source": include_str!("../../examples/plugins/activity/source.rhai"),
-        }),
-    )
-    .await;
-    assert!(!defined.contains("Error"), "{defined}");
-    let ran = exec(
-        &root,
-        "cordis_run",
-        r#"{"pluginId":"activ-1","packageId":"pkg-1","mode":"run"}"#,
-    )
-    .await;
-    assert!(!ran.contains("Error"), "{ran}");
+        "activity",
+        &[
+            (
+                "plugin.toml",
+                include_str!("../../examples/plugins/activity/plugin.toml"),
+            ),
+            (
+                "source.rhai",
+                include_str!("../../examples/plugins/activity/source.rhai"),
+            ),
+        ],
+    );
+    let ran = reload(&root, "activity").await;
+    assert!(ran.contains("运行中"), "{ran}");
 
     let status = root
         .require::<cordis_spine::StatusItems>(cordis_spine::STATUS_ITEMS)
@@ -3203,7 +2954,7 @@ async fn example_activity_plugin_runs() {
         .require::<cordis_spine::PluginSettings>(cordis_spine::PLUGIN_SETTINGS)
         .unwrap();
     assert!(
-        settings.list().iter().any(|(id, _)| id == "activ-1"),
+        settings.list().iter().any(|(id, _)| id == "activity"),
         "{:?}",
         settings.list()
     );
@@ -3275,18 +3026,12 @@ async fn example_activity_plugin_runs() {
         .contains("还没有工具调用"));
 }
 
-/// web 面板：磁盘插件的 `register_slot(#{ web: "panel.html" })` 指向插件目录里的文件，
-/// `TuiSlots::web` 现读给 GUI；内联插件、`..`、绝对路径都不许（HTML 不能跑出插件目录）。
+/// web 面板：插件的 `register_slot(#{ web: "panel.html" })` 指向插件目录里的文件，
+/// `TuiSlots::web` 现读给 GUI；`..`、绝对路径、没有目录的程序侧包都不许（HTML 不能
+/// 跑出插件目录）。
 #[tokio::test]
 async fn rhai_slot_web_panel_reads_from_the_plugin_directory() {
-    // 插件放在用户级插件根（DOCK_HOME/plugins）下，用绝对 source_path，不切进程 cwd：
-    // 同一个测试二进制里有按 cwd 相对路径建文件的用例（上传那几条），切 cwd 会和它们抢。
-    let home = tempfile::tempdir().unwrap();
-    let _env = cordis_base::test_env::scoped().set("DOCK_HOME", home.path());
     let root = boot().await;
-    let plug = home.path().join("plugins/webdemo");
-    std::fs::create_dir_all(&plug).unwrap();
-    std::fs::write(plug.join("panel.html"), "<p>hello web</p>").unwrap();
     let source = |web: &str| {
         format!(
             r#"#{{
@@ -3297,34 +3042,16 @@ async fn rhai_slot_web_panel_reads_from_the_plugin_directory() {
             }}"#
         )
     };
-    let run = |prefix: &'static str, n: u32| {
-        let root = root.clone();
-        async move {
-            exec(
-                &root,
-                "cordis_run",
-                &format!(r#"{{"pluginId":"{prefix}-{n}","packageId":"pkg-1","mode":"run"}}"#),
-            )
-            .await
-        }
-    };
-
-    std::fs::write(plug.join("source.rhai"), source("panel.html")).unwrap();
-    let defined = exec_json(
+    let plug = write_plugin(
         &root,
-        "cordis_define",
-        json!({
-            "plugin": {"kind": "new", "idPrefix": "webd"},
-            "name": "WebDemo",
-            "purpose": "web panel",
-            "factory": "rhai",
-            "source_path": plug.join("source.rhai").display().to_string()
-        }),
-    )
-    .await;
-    assert!(!defined.contains("Error"), "{defined}");
-    let ran = run("webd", 1).await;
-    assert!(ran.contains("\"status\":\"running\""), "{ran}");
+        "webdemo",
+        &[
+            ("panel.html", "<p>hello web</p>"),
+            ("source.rhai", &source("panel.html")),
+        ],
+    );
+    let ran = reload(&root, "webdemo").await;
+    assert!(ran.contains("登记：面板 webdemo"), "{ran}");
     let slots = root.require::<cordis_spine::TuiSlots>(TUI_SLOTS).unwrap();
     assert!(slots.has_web("webdemo"));
     assert_eq!(slots.web("webdemo").unwrap(), "<p>hello web</p>");
@@ -3332,110 +3059,52 @@ async fn rhai_slot_web_panel_reads_from_the_plugin_directory() {
     std::fs::write(plug.join("panel.html"), "<p>v2</p>").unwrap();
     assert_eq!(slots.web("webdemo").unwrap(), "<p>v2</p>");
     assert_eq!(slots.render("webdemo").as_deref(), Some("终端看这行"));
-    exec(&root, "cordis_stop", r#"{"pluginId":"webd-1"}"#).await;
+    exec_json(
+        &root,
+        "cordis_plugin",
+        json!({"action": "disable", "id": "webdemo"}),
+    )
+    .await;
     assert!(!slots.has_web("webdemo"));
 
     // 跑出插件目录的路径：apply 失败，面板不登记。
     for bad in ["../outside.html", "/etc/hosts"] {
         std::fs::write(plug.join("source.rhai"), source(bad)).unwrap();
-        let defined = exec_json(
-            &root,
-            "cordis_define",
-            json!({
-                "plugin": {"kind": "existing", "pluginId": "webd-1"},
-                "name": "WebDemo",
-                "purpose": "web panel",
-                "factory": "rhai",
-                "source_path": plug.join("source.rhai").display().to_string()
-            }),
-        )
-        .await;
-        let pkg = defined
-            .split("webd-1/")
-            .nth(1)
-            .and_then(|s| s.split(|c: char| !c.is_alphanumeric() && c != '-').next())
-            .unwrap_or("pkg-2")
-            .to_string();
-        let out = exec(
-            &root,
-            "cordis_run",
-            &format!(r#"{{"pluginId":"webd-1","packageId":"{pkg}","mode":"update"}}"#),
-        )
-        .await;
+        let out = reload(&root, "webdemo").await;
         assert!(out.contains("插件目录"), "{bad}: {out}");
         assert!(!slots.has_web("webdemo"), "{bad}");
     }
 
-    // 内联插件没有目录：不许带 web。
-    let defined = exec_json(
+    // 程序侧 define 的包没有目录：不许带 web。
+    let (id, pkg) = define(
         &root,
-        "cordis_define",
-        json!({
-            "plugin": {"kind": "new", "idPrefix": "webi"},
-            "name": "WebInline",
-            "purpose": "inline web",
-            "factory": "rhai",
-            "source": source("panel.html"),
-        }),
+        new_plugin("webi"),
+        "rhai",
+        Some(&source("panel.html")),
     )
-    .await;
-    assert!(!defined.contains("Error"), "{defined}");
-    // 定义回执里带 `<插件 id>/<包 id>`。
-    let (id, pkg) = defined
-        .split(|c: char| c.is_whitespace() || c == '`' || c == '"' || c == '(' || c == ')')
-        .find_map(|w| {
-            let (id, pkg) = w.split_once("/pkg-")?;
-            let n: String = pkg.chars().take_while(char::is_ascii_digit).collect();
-            id.starts_with("webi-")
-                .then(|| (id.to_string(), format!("pkg-{n}")))
-        })
-        .expect("回执里有插件 id 和包 id");
-    let out = exec(
-        &root,
-        "cordis_run",
-        &format!(r#"{{"pluginId":"{id}","packageId":"{pkg}","mode":"run"}}"#),
-    )
-    .await;
+    .unwrap();
+    let out = runner(&root)
+        .run(MAIN, &id, &pkg, RunMode::Run)
+        .await
+        .unwrap_err();
     assert!(out.contains("磁盘插件"), "{out}");
     assert!(!slots.has_web("webdemo"));
 }
 
-/// 仓库里的示例 web 面板插件 `examples/plugins/trajectory` 照磁盘插件的真实路径装上：
+/// 仓库里的示例 web 面板插件 `examples/plugins/trajectory` 照真实路径装上：
 /// 面板有 web 界面，HTML 用的是桥（`dock.call("threads.history")`），终端有一行提示。
 #[tokio::test]
 async fn example_trajectory_plugin_serves_its_web_panel() {
-    // 插件放在用户级插件根（DOCK_HOME/plugins）下，用绝对 source_path，不切进程 cwd：
-    // 同一个测试二进制里有按 cwd 相对路径建文件的用例（上传那几条），切 cwd 会和它们抢。
-    let home = tempfile::tempdir().unwrap();
-    let _env = cordis_base::test_env::scoped().set("DOCK_HOME", home.path());
     let root = boot().await;
     let example =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/plugins/trajectory");
-    let plug = home.path().join("plugins/trajectory");
+    let plug = plugins_root(&root).join("trajectory");
     std::fs::create_dir_all(&plug).unwrap();
     for f in ["plugin.toml", "source.rhai", "panel.html"] {
         std::fs::copy(example.join(f), plug.join(f)).unwrap();
     }
-    let defined = exec_json(
-        &root,
-        "cordis_define",
-        json!({
-            "plugin": {"kind": "new", "idPrefix": "traj"},
-            "name": "会话轨迹",
-            "purpose": "example",
-            "factory": "rhai",
-            "source_path": plug.join("source.rhai").display().to_string()
-        }),
-    )
-    .await;
-    assert!(!defined.contains("Error"), "{defined}");
-    let ran = exec(
-        &root,
-        "cordis_run",
-        r#"{"pluginId":"traj-1","packageId":"pkg-1","mode":"run"}"#,
-    )
-    .await;
-    assert!(ran.contains("\"status\":\"running\""), "{ran}");
+    let ran = reload(&root, "trajectory").await;
+    assert!(ran.contains("运行中"), "{ran}");
     let slots = root.require::<cordis_spine::TuiSlots>(TUI_SLOTS).unwrap();
     assert!(slots.has_web("trajectory"));
     let html = slots.web("trajectory").unwrap();
@@ -3444,8 +3113,8 @@ async fn example_trajectory_plugin_serves_its_web_panel() {
     assert!(slots.render("trajectory").unwrap().contains("GUI"));
 }
 
-/// `cordis-plugin-development` 技能里的例子是模型照抄的起点：每一份都要真能
-/// define + run，注册的工具按例子里写的那样工作。
+/// `cordis-plugin-development` 技能里的例子是模型照抄的起点：每一份都要能拷进插件
+/// 目录、reload 起来，注册的工具按例子里写的那样工作。
 #[tokio::test]
 async fn bundled_skill_examples_define_run_and_work() {
     const DIR: &str = concat!(
@@ -3457,21 +3126,21 @@ async fn bundled_skill_examples_define_run_and_work() {
     let _env = cordis_base::test_env::scoped()
         .set("DOCK_HOME", home.path())
         .remove("DOCK_SECRET_GITHUB");
-    // 发号器全进程单调，`define_and_run` 认 `-1`，所以每份例子单独起一棵树。
     let root = boot().await;
-    define_and_run(&root, "ping", &read("ping.rhai")).await;
+    // plugin.toml 例子和 ping 一起：模板里每个键都要认得（认不得会在回执里提醒）。
+    write_plugin(&root, "ping", &[("plugin.toml", &read("plugin.toml"))]);
+    let out = load_plugin(&root, "ping", &read("ping.rhai")).await;
+    assert!(!out.contains("认不得的键"), "{out}");
     assert_eq!(exec(&root, "demo_ping", "{}").await, "pong");
 
-    let root = boot().await;
-    define_and_run(&root, "memo", &read("memo.rhai")).await;
+    load_plugin(&root, "memo", &read("memo.rhai")).await;
     assert_eq!(exec(&root, "memo_get", "{}").await, "（空）");
     let set = exec(&root, "memo_set", r#"{"text":"买牛奶"}"#).await;
     assert!(set.contains("已保存 3 字"), "{set}");
     assert_eq!(exec(&root, "memo_get", "{}").await, "买牛奶");
 
     // 缺密钥要回一句告诉用户去哪填，而不是抛错让模型反复重试。
-    let root = boot().await;
-    define_and_run(&root, "ghapi", &read("api-tool.rhai")).await;
+    load_plugin(&root, "ghapi", &read("api-tool.rhai")).await;
     let out = exec(&root, "gh_issue", r#"{"repo":"o/r","n":1}"#).await;
     assert!(out.starts_with("未配置 GitHub Token"), "{out}");
 }
@@ -3738,68 +3407,597 @@ async fn disk_rhai_result_hook_works_in_the_full_app_tree() {
     assert_eq!(out, "REPLACED");
 }
 
-/// 权限分层：会话里 `cordis_define` 的包**不能**挂这五个钩子 —— 否则模型
-/// 能给自己开闸门、能改自己的系统提示。
+/// 权限分层：程序侧 define 的会话包**不能**挂这五个钩子；能挂的只有从插件目录装载
+/// 的（启动自动装、设置启用、批准过的 `cordis_plugin reload`）。
 #[tokio::test]
 async fn a_session_package_cannot_register_the_flow_hooks() {
     let root = boot().await;
-    let defined = exec_json(
-        &root,
-        "cordis_define",
-        json!({
-            "plugin": {"kind": "new", "idPrefix": "hooks"},
-            "name": "Hook",
-            "purpose": "hooks",
-            "factory": "rhai",
-            "source": RHAI_DISK_DENY,
-        }),
-    )
-    .await;
-    assert!(defined.contains("pkg-1"), "{defined}");
-    let ran = exec_json(
-        &root,
-        "cordis_run",
-        json!({"pluginId": "hooks-1", "packageId": "pkg-1", "mode": "run"}),
-    )
-    .await;
-    assert!(!ran.contains("\"status\":\"running\""), "{ran}");
-    assert!(ran.contains("disk plugins"), "{ran}");
+    let (id, pkg) = define(&root, new_plugin("hooks"), "rhai", Some(RHAI_DISK_DENY)).unwrap();
+    let err = runner(&root)
+        .run(MAIN, &id, &pkg, RunMode::Run)
+        .await
+        .unwrap_err();
+    assert!(err.contains("plugins directory"), "{err}");
 }
 
-/// 回归：会话里 define 的包**带 `source_path`** 也拿不到那五个钩子。
-/// 判据必须是「这个包是不是从磁盘加载的」，不是「它有没有传 `source_path`」——
-/// 否则模型在会话里 define + source_path 就能给自己开闸门（自我提权）。
+/// 同一份脚本放进插件目录、经 `cordis_plugin reload` 装上（测试里自动批准）就挂得上，
+/// 回执和 inspect 都列着这个钩子。
 #[tokio::test]
-async fn a_session_package_with_source_path_cannot_register_the_flow_hooks() {
+async fn a_reloaded_plugin_can_register_the_flow_hooks() {
     let root = boot().await;
-    // `DOCK_HOME` 是进程级的。必须拿 test_env 的锁再改，否则并行用例会把它改回去，
-    // source_path 就落不到插件根里（合并进 main 的 CI 就是这样红的）。
+    let ran = load_plugin(&root, "hookdeny", RHAI_DISK_DENY).await;
+    assert!(ran.contains("钩子 tools/pre-execute"), "{ran}");
+    assert!(ran.contains("触发一次它挂的钩子"), "{ran}");
+    let out = exec(&root, "bash", r#"{"command":"echo hi"}"#).await;
+    assert!(out.contains("脚本不让跑 shell"), "{out}");
+}
+
+// ── 插件宿主的新能力：MCP 做不到的那一面 ─────────────────────────────────
+
+/// 挂上子代理服务（插件的 `host.followup` 用它的信箱）。
+async fn mount_subagents(root: &Context) {
+    let presets = tempfile::tempdir().unwrap();
+    let _ = root.provide(
+        AGENT_PRESETS,
+        AgentPresets::load(presets.path().to_path_buf()),
+    );
+    let _ = root.provide("dynamicTestPresets", presets);
+    // 默认预设（code）不放行 cordis_plugin；写插件的是创造预设。
+    root.require::<AgentPresets>(AGENT_PRESETS)
+        .unwrap()
+        .apply(CORDIS_PRESET_ID)
+        .unwrap();
+    root.plugin(
+        cordis_spine::tool_task(),
+        cordis_spine::TaskConfig::default(),
+    )
+    .unwrap()
+    .wait()
+    .await
+    .unwrap();
+}
+
+/// `tools/execute` 钩子拿得到这次调用的参数：插件判断「刚跑完的是哪条命令」不用自己
+/// 在 pre-execute 里记一份再按名字对。
+#[tokio::test]
+async fn tool_result_hooks_see_the_call_arguments() {
+    let root = boot().await;
+    load_plugin(
+        &root,
+        "argseen",
+        r#"#{ inject: ["tools"], apply: |host| {
+            host.register_tool(#{ name: "echo_args", parameters: #{ type: "object", properties: #{ word: #{ type: "string" } } },
+                execute: |a| { "ran" } });
+            host.on("tools/execute", |r| {
+                if r.name == "echo_args" { "args=" + r.args.word + " raw=" + r.arguments } else { () }
+            });
+        } }"#,
+    )
+    .await;
+    let out = exec(&root, "echo_args", r#"{"word":"hi"}"#).await;
+    assert_eq!(out, r#"args=hi raw={"word":"hi"}"#);
+}
+
+/// `tools/pre-execute` 返回 `#{ ask }`：自动批准下也要人点头，确认框里写着插件给的理由。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pre_execute_ask_prompts_even_under_auto_approve() {
+    let root = boot_gated().await;
+    load_plugin(
+        &root,
+        "pushguard",
+        r#"#{ inject: [], apply: |host| {
+            host.on("tools/pre-execute", |c| {
+                if c.name == "bash" && c.args.command.contains("push") { #{ ask: "会推到远端" } } else { () }
+            });
+        } }"#,
+    )
+    .await;
+    let perms = root.require::<Permissions>(PERMISSIONS).unwrap();
+    let tools = tools_of(&root);
+    let call = tokio::spawn(async move {
+        tools
+            .execute(ToolCall {
+                id: "t".into(),
+                name: "bash".into(),
+                arguments: r#"{"command":"git push origin nothing-here"}"#.into(),
+            })
+            .await
+            .content
+    });
+    let prompt = wait_for_prompt(&perms).await;
+    assert!(
+        prompt
+            .summary
+            .contains("插件要求确认：会推到远端（插件 pushguard）"),
+        "{}",
+        prompt.summary
+    );
+    perms.resolve(PermissionOptionKind::RejectOnce);
+    let out = call.await.unwrap();
+    assert!(
+        out.contains("权限被拒绝") && out.contains("会推到远端"),
+        "{out}"
+    );
+    // 不相干的命令照常自动批准。
+    let ok = exec(&root, "bash", r#"{"command":"echo fine"}"#).await;
+    assert!(ok.contains("fine"), "{ok}");
+    assert!(perms.front().is_none());
+}
+
+/// `session/entry`：结构化的会话事件。工具那条带参数和结果，助手那条来自采样收尾。
+#[tokio::test]
+async fn session_entry_reports_user_tool_and_finished_samples() {
+    let root = boot_with_loop().await;
+    load_plugin(
+        &root,
+        "ledger",
+        r#"#{ inject: ["tools"], apply: |host| {
+            let seen = [];
+            host.on("session/entry", |e| {
+                let tag = e.kind;
+                if e.kind == "tool" { tag += ":" + e.name + ":" + e.args.word; }
+                if e.kind == "assistant" { tag += ":" + e.text.len() + ":" + type_of(e.usage); }
+                seen.push(tag);
+            });
+            host.register_tool(#{ name: "ledger_seen", parameters: #{ type: "object", properties: #{} },
+                execute: |a| { seen.reduce(|s, v| if s == () { v } else { s + "," + v }) ?? "" } });
+            host.register_tool(#{ name: "ledger_probe", parameters: #{ type: "object", properties: #{ word: #{ type: "string" } } },
+                execute: |a| { "probed" } });
+        } }"#,
+    )
+    .await;
+    root.require::<LoopHandle>(AGENT_LOOP)
+        .unwrap()
+        .run("干活")
+        .await
+        .unwrap();
+    let sessions = root.require::<Sessions>(SESSIONS).unwrap();
+    sessions.append(LogEvent::ToolExecute {
+        id: "c1".into(),
+        name: "ledger_probe".into(),
+        arguments: r#"{"word":"zz"}"#.into(),
+        content: "probed".into(),
+        images: vec![],
+        is_error: false,
+    });
+    let mut seen = String::new();
+    for _ in 0..100 {
+        seen = exec(&root, "ledger_seen", "{}").await;
+        if seen.contains("tool:ledger_probe:zz") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(seen.starts_with("user"), "{seen}");
+    assert!(seen.contains("assistant:"), "采样收尾那一条：{seen}");
+    assert!(seen.contains("tool:ledger_probe:zz"), "{seen}");
+}
+
+/// `host.followup`：插件送来的话进这一页的信箱并叫醒它；5 秒内再叫只排队不叫醒。
+#[tokio::test]
+async fn followup_wakes_the_page_and_rate_limits() {
+    let root = boot().await;
+    mount_subagents(&root).await;
+    load_plugin(
+        &root,
+        "notify",
+        r#"#{ inject: ["tools"], apply: |host| {
+            host.register_tool(#{ name: "notify_ping", parameters: #{ type: "object", properties: #{} },
+                execute: |a| { host.followup("CI 红了，看一下") } });
+        } }"#,
+    )
+    .await;
+    assert_eq!(exec(&root, "notify_ping", "{}").await, "woke");
+    let sub = root
+        .require::<cordis_spine::Subagents>(cordis_spine::SUBAGENTS)
+        .unwrap();
+    assert!(sub.has_parent_notices(MAIN));
+    let notes = sub.drain_parent_notices(MAIN);
+    assert_eq!(notes.len(), 1);
+    assert!(notes[0].contains("插件 notify 送来的消息"), "{}", notes[0]);
+    assert!(notes[0].contains("CI 红了"), "{}", notes[0]);
+    assert_eq!(
+        exec(&root, "notify_ping", "{}").await,
+        "queued",
+        "5 秒内只排队"
+    );
+}
+
+/// 定时器在插件运行期间触发；间隔太短的直接拒绝。
+#[tokio::test(flavor = "multi_thread")]
+async fn timers_fire_and_reject_busy_loops() {
     let _env = cordis_base::test_env::scoped().home();
-    let plugin = std::path::PathBuf::from(std::env::var("DOCK_HOME").unwrap())
-        .join("plugins")
-        .join("hooksrc");
-    std::fs::create_dir_all(&plugin).unwrap();
-    let path = plugin.join("source.rhai");
-    std::fs::write(&path, RHAI_DISK_DENY).unwrap();
-    let defined = exec_json(
+    let root = boot().await;
+    load_plugin(
         &root,
-        "cordis_define",
-        json!({
-            "plugin": {"kind": "new", "idPrefix": "hooks"},
-            "name": "Hook",
-            "purpose": "hooks",
-            "factory": "rhai",
-            "source_path": path.to_string_lossy(),
-        }),
+        "ticker",
+        r#"#{ inject: ["tools"], apply: |host| {
+            host.after(1, || { host.save("fired", "yes"); });
+            host.register_tool(#{ name: "ticker_fired", parameters: #{ type: "object", properties: #{} },
+                execute: |a| { host.load("fired") ?? "no" } });
+        } }"#,
     )
     .await;
-    assert!(defined.contains("pkg-1"), "{defined}");
-    let ran = exec_json(
+    let mut fired = String::new();
+    for _ in 0..60 {
+        fired = exec(&root, "ticker_fired", "{}").await;
+        if fired == "yes" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(fired, "yes");
+    write_plugin(
         &root,
-        "cordis_run",
-        json!({"pluginId": "hooks-1", "packageId": "pkg-1", "mode": "run"}),
+        "spinner",
+        &[(
+            "source.rhai",
+            r#"#{ inject: [], apply: |host| { host.every(1, || { }); } }"#,
+        )],
+    );
+    let out = reload(&root, "spinner").await;
+    assert!(out.contains("at least 5 seconds"), "{out}");
+}
+
+/// `host.save` / `host.load` 跨 reload（和重启）留着，落在 `$DOCK_HOME/plugin-state/`。
+#[tokio::test]
+async fn plugin_state_survives_a_reload() {
+    let _env = cordis_base::test_env::scoped().home();
+    let root = boot().await;
+    let src = r#"#{ inject: ["tools"], apply: |host| {
+        host.register_tool(#{ name: "count_up", parameters: #{ type: "object", properties: #{} },
+            execute: |a| { let n = (host.load("n") ?? 0) + 1; host.save("n", n); n } });
+    } }"#;
+    load_plugin(&root, "counter", src).await;
+    assert_eq!(exec(&root, "count_up", "{}").await, "1");
+    assert_eq!(exec(&root, "count_up", "{}").await, "2");
+    reload(&root, "counter").await;
+    assert_eq!(exec(&root, "count_up", "{}").await, "3", "换版不丢");
+    let home = std::path::PathBuf::from(std::env::var("DOCK_HOME").unwrap());
+    let files: Vec<_> = std::fs::read_dir(home.join("plugin-state"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(files.len(), 1, "{files:?}");
+    assert!(files[0].starts_with("counter-"), "{files:?}");
+}
+
+/// `host.llm`：用这一页的模型问一句，不进会话日志。
+#[tokio::test]
+async fn host_llm_asks_the_page_model_without_logging() {
+    let root = boot_with_loop().await;
+    load_plugin(
+        &root,
+        "asker",
+        r#"#{ inject: ["tools"], apply: |host| {
+            host.register_tool(#{ name: "ask_model", parameters: #{ type: "object", properties: #{} },
+                execute: |a| { host.llm(#{ system: "be brief", prompt: "说一个词" }) } });
+        } }"#,
     )
     .await;
-    assert!(!ran.contains("\"status\":\"running\""), "{ran}");
-    assert!(ran.contains("disk plugins"), "{ran}");
+    let before = root.require::<Sessions>(SESSIONS).unwrap().events().len();
+    let out = exec(&root, "ask_model", "{}").await;
+    assert!(!out.trim().is_empty() && !out.starts_with("Error"), "{out}");
+    assert_eq!(
+        root.require::<Sessions>(SESSIONS).unwrap().events().len(),
+        before,
+        "插件问模型不进会话日志"
+    );
+}
+
+/// `host.card`：挂在这一轮下面，按钮点了在这一页上跑插件的回调；插件停了卡片留着、
+/// 按钮失效。终端那边记一条 Notice。
+#[tokio::test]
+async fn cards_hang_under_the_turn_and_buttons_call_back() {
+    let _env = cordis_base::test_env::scoped().home();
+    let root = boot().await;
+    root.plugin(cordis_spine::turn_cards(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    let sessions = root.require::<Sessions>(SESSIONS).unwrap();
+    sessions.append(LogEvent::User("改一下解析器".into()));
+    load_plugin(
+        &root,
+        "reviewer",
+        r#"#{ inject: ["tools"], apply: |host| {
+            host.register_tool(#{ name: "post_card", parameters: #{ type: "object", properties: #{} },
+                execute: |a| {
+                    host.card(#{ id: "tests", title: "改了 Rust 文件", text: "还没跑测试", tone: "warning",
+                        view: #{ type: "kv", items: [#{ label: "文件", value: 2 }] },
+                        actions: [#{ id: "run", label: "跑测试" }],
+                        on_action: |action| { host.save("clicked", action); "已安排：" + action } })
+                } });
+            host.register_tool(#{ name: "clicked", parameters: #{ type: "object", properties: #{} },
+                execute: |a| { host.load("clicked") ?? "none" } });
+        } }"#,
+    )
+    .await;
+    assert_eq!(exec(&root, "post_card", "{}").await, "tests");
+    let cards = root
+        .require::<cordis_spine::TurnCards>(cordis_spine::TURN_CARDS)
+        .unwrap();
+    let list = cards.list(MAIN);
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].ordinal, 0);
+    assert_eq!(list[0].spec.tone, "warning");
+    assert!(list[0].spec.view.is_some());
+    assert!(list[0].live);
+    let toast = cards.action(MAIN, &list[0].key, "run").await.unwrap();
+    assert_eq!(toast.as_deref(), Some("已安排：run"));
+    assert_eq!(exec(&root, "clicked", "{}").await, "run");
+    assert!(sessions.events().iter().any(
+        |e| matches!(e, LogEvent::Notice { title, .. } if title == "reviewer · 改了 Rust 文件")
+    ));
+
+    exec_json(
+        &root,
+        "cordis_plugin",
+        json!({"action": "disable", "id": "reviewer"}),
+    )
+    .await;
+    let list = cards.list(MAIN);
+    assert_eq!(list.len(), 1, "卡片留着");
+    assert!(!list[0].live, "按钮失效");
+    assert!(cards.action(MAIN, &list[0].key, "run").await.is_err());
+}
+
+// ── hooks 桥接（Claude Code / Codex 格式的 command hook）─────────────────
+
+async fn mount_hooks(root: &Context) {
+    root.plugin(cordis_spine::hooks_bridge(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+}
+
+fn write_user_hooks(json: &str) {
+    let home = std::path::PathBuf::from(std::env::var("DOCK_HOME").unwrap());
+    std::fs::write(home.join("hooks.json"), json).unwrap();
+}
+
+/// 用户目录下的 `hooks.json` 直接生效：`PreToolUse` 退出码 2 拦下调用，stderr 是理由；
+/// matcher 按 Claude 的名字（`Bash`）写也认。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_user_pre_tool_use_hook_blocks_with_its_stderr() {
+    let _env = cordis_base::test_env::scoped().home();
+    let root = boot_gated().await;
+    mount_hooks(&root).await;
+    write_user_hooks(
+        r#"{ "hooks": { "PreToolUse": [ { "matcher": "Bash", "hooks": [
+            { "type": "command", "command": "input=$(cat); case \"$input\" in *rm*) echo '不许删东西' >&2; exit 2;; esac" } ] } ] } }"#,
+    );
+    let out = exec(&root, "bash", r#"{"command":"rm -rf /tmp/never-there"}"#).await;
+    assert!(out.contains("不许删东西（PreToolUse hook）"), "{out}");
+    let ok = exec(&root, "bash", r#"{"command":"echo ok"}"#).await;
+    assert!(ok.contains("ok") && !ok.contains("hook"), "{ok}");
+}
+
+/// 项目里的 hooks 文件第一次要跑时在这一页问；点了头按内容指纹记下，之后不再问。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_project_hooks_file_asks_once_before_it_runs() {
+    let _env = cordis_base::test_env::scoped().home();
+    let root = boot_gated().await;
+    mount_hooks(&root).await;
+    let dot_dock = plugins_root(&root).parent().unwrap().to_path_buf();
+    std::fs::create_dir_all(&dot_dock).unwrap();
+    std::fs::write(
+        dot_dock.join("hooks.json"),
+        r#"{ "hooks": { "PreToolUse": [ { "matcher": "Bash", "hooks": [
+            { "type": "command", "command": "echo 'repo says no' >&2; exit 2" } ] } ] } }"#,
+    )
+    .unwrap();
+    let perms = root.require::<Permissions>(PERMISSIONS).unwrap();
+    let run = || {
+        let tools = tools_of(&root);
+        tokio::spawn(async move {
+            tools
+                .execute(ToolCall {
+                    id: "t".into(),
+                    name: "bash".into(),
+                    arguments: r#"{"command":"echo hi"}"#.into(),
+                })
+                .await
+                .content
+        })
+    };
+    let first = run();
+    let prompt = wait_for_prompt(&perms).await;
+    assert!(prompt.tool.starts_with("hooks "), "{}", prompt.tool);
+    assert!(
+        prompt.summary.contains("repo says no"),
+        "{}",
+        prompt.summary
+    );
+    perms.resolve(PermissionOptionKind::AllowOnce);
+    assert!(first
+        .await
+        .unwrap()
+        .contains("repo says no（PreToolUse hook）"));
+    let second = run().await.unwrap();
+    assert!(second.contains("repo says no"), "{second}");
+    assert!(perms.front().is_none(), "点过头就不再问");
+}
+
+/// `UserPromptSubmit` 的 stdout 当上下文送进这一轮；`Stop` 退出码 2 让回合接着干一次，
+/// 下一次 hook 看到 `stop_hook_active: true` 就放行。
+#[tokio::test]
+async fn prompt_and_stop_hooks_shape_the_turn() {
+    let _env = cordis_base::test_env::scoped().home();
+    let root = boot_with_loop().await;
+    mount_hooks(&root).await;
+    write_user_hooks(
+        r#"{ "hooks": {
+            "UserPromptSubmit": [ { "hooks": [ { "type": "command", "command": "echo '今天是周五'" } ] } ],
+            "Stop": [ { "hooks": [ { "type": "command",
+                "command": "input=$(cat); case \"$input\" in *'\"stop_hook_active\":true'*) exit 0;; esac; echo '先跑测试' >&2; exit 2" } ] } ]
+        } }"#,
+    );
+    root.require::<LoopHandle>(AGENT_LOOP)
+        .unwrap()
+        .run("干活")
+        .await
+        .unwrap();
+    let seen = reminders(&root);
+    assert!(
+        seen.iter()
+            .any(|r| r.contains("hooks 附加的上下文：\n今天是周五")),
+        "{seen:?}"
+    );
+    let stops: Vec<_> = seen
+        .iter()
+        .filter(|r| r.contains("Stop hook 要求继续：先跑测试"))
+        .collect();
+    assert_eq!(stops.len(), 1, "只续一次：{seen:?}");
+    assert_eq!(samples(&root), 2);
+}
+
+// ── 技能里的行为插件例子 ───────────────────────────────────────────────
+
+fn skill_example(name: &str) -> String {
+    std::fs::read_to_string(format!(
+        "{}/src/tools/skills/builtin/cordis-plugin-development/examples/{name}",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap()
+}
+
+/// `guard.rhai`：不可回滚的命令直接拒、冻结目录不许改、`git push` 要用户点头。
+#[tokio::test(flavor = "multi_thread")]
+async fn example_guard_enforces_project_rules() {
+    let root = boot().await;
+    load_plugin(&root, "guard", &skill_example("guard.rhai")).await;
+    let out = exec(&root, "bash", r#"{"command":"git reset --hard HEAD~1"}"#).await;
+    assert!(out.contains("项目规约不许 `git reset --hard`"), "{out}");
+    let out = exec(
+        &root,
+        "search_replace",
+        r#"{"file_path":"vendor/xai/lib.rs","old_string":"a","new_string":"b"}"#,
+    )
+    .await;
+    assert!(out.contains("vendor/ 是冻结副本"), "{out}");
+    let perms = root.require::<Permissions>(PERMISSIONS).unwrap();
+    let tools = tools_of(&root);
+    let push = tokio::spawn(async move {
+        tools
+            .execute(ToolCall {
+                id: "t".into(),
+                name: "bash".into(),
+                arguments: r#"{"command":"git push origin main"}"#.into(),
+            })
+            .await
+            .content
+    });
+    let prompt = wait_for_prompt(&perms).await;
+    assert!(
+        prompt.summary.contains("会改到仓库之外"),
+        "{}",
+        prompt.summary
+    );
+    perms.resolve(PermissionOptionKind::RejectOnce);
+    assert!(push.await.unwrap().contains("权限被拒绝"));
+    // 普通命令不受影响（echo 工具表原样回参数）。
+    assert!(exec(&root, "bash", r#"{"command":"ls"}"#)
+        .await
+        .contains("ls"));
+}
+
+/// 先改一个 `.rs`，再回正文的模型。
+struct EditRust;
+
+impl cordis_spine::Sampler for EditRust {
+    fn sample<'a>(
+        &'a self,
+        request: cordis_spine::PromptRequest,
+        _on_delta: Box<dyn FnMut(cordis_spine::StreamDelta) + Send + 'a>,
+    ) -> cordis_spine::BoxFuture<'a, cordis_spine::LlmOutput> {
+        let edited = request
+            .history
+            .iter()
+            .any(|e| matches!(e, LogEvent::ToolExecute { .. }));
+        Box::pin(async move {
+            if !edited {
+                return cordis_spine::LlmOutput {
+                    tool_calls: vec![ToolCall {
+                        id: "e1".into(),
+                        name: "search_replace".into(),
+                        arguments: json!({ "file_path": "src/lib.rs", "old_string": "a", "new_string": "b" })
+                            .to_string(),
+                    }],
+                    ..Default::default()
+                };
+            }
+            cordis_spine::LlmOutput {
+                text: "改好了".into(),
+                ..Default::default()
+            }
+        })
+    }
+}
+
+/// `done-check.rhai`：改了 `.rs` 没跑测试，回合想收尾时被拦回去一次，并挂一张「跑测试」卡片。
+#[tokio::test]
+async fn example_done_check_holds_the_turn_until_tests_run() {
+    let _env = cordis_base::test_env::scoped().home();
+    let root = boot().await;
+    root.provide(
+        cordis_spine::LLM,
+        cordis_spine::Llm::from_sampler(root.clone(), std::sync::Arc::new(EditRust)),
+    )
+    .unwrap();
+    root.plugin(agent_loop(), ()).unwrap().wait().await.unwrap();
+    root.plugin(cordis_spine::turn_cards(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    load_plugin(&root, "done-check", &skill_example("done-check.rhai")).await;
+    root.require::<LoopHandle>(AGENT_LOOP)
+        .unwrap()
+        .run("把 a 改成 b")
+        .await
+        .unwrap();
+    let seen = reminders(&root);
+    let held: Vec<_> = seen
+        .iter()
+        .filter(|r| r.contains("src/lib.rs，还没跑过 cargo test"))
+        .collect();
+    assert_eq!(held.len(), 1, "只拦一次：{seen:?}");
+    let cards = root
+        .require::<cordis_spine::TurnCards>(cordis_spine::TURN_CARDS)
+        .unwrap()
+        .list(MAIN);
+    assert_eq!(cards.len(), 1);
+    assert_eq!(cards[0].spec.title, "改了 Rust 文件，还没跑测试");
+    assert_eq!(cards[0].spec.text, "src/lib.rs");
+}
+
+/// `trim-output.rhai`：去掉 ANSI 颜色码，超长输出只留头尾。
+#[tokio::test]
+async fn example_trim_output_strips_colors_and_long_middles() {
+    let root = boot_gated().await;
+    load_plugin(&root, "trim-output", &skill_example("trim-output.rhai")).await;
+    let red = exec(
+        &root,
+        "bash",
+        r#"{"command":"printf '\\033[31mred\\033[0m done'"}"#,
+    )
+    .await;
+    assert!(red.contains("red done"), "{red:?}");
+    assert!(!red.contains('\u{1b}'), "{red:?}");
+    let long = exec(
+        &root,
+        "bash",
+        r#"{"command":"yes abcdefghij | head -c 20000"}"#,
+    )
+    .await;
+    assert!(
+        long.contains("[trim-output：中间"),
+        "{}",
+        &long[..200.min(long.len())]
+    );
+    assert!(long.len() < 8000, "{}", long.len());
 }

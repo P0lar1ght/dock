@@ -343,23 +343,8 @@ export interface DiskPlugin {
   error: string | null;
 }
 
-/** 动态插件：agent 在会话里 cordis_define 的，只在内存里。 */
-export interface SessionPlugin {
-  id: string;
-  name: string;
-  purpose: string;
-  factory: string;
-  running: boolean;
-  error: string | null;
-  /** 定义它的会话（关了就是 null）。 */
-  threadId: string | null;
-  threadTitle: string | null;
-  cwd: string | null;
-}
-
 export interface PluginListing {
   disk: DiskPlugin[];
-  session: SessionPlugin[];
   userRoot: string;
   projects: string[];
 }
@@ -367,9 +352,6 @@ export interface PluginListing {
 export const pluginList = () => dock.call<PluginListing>("plugin/list");
 export const pluginEnable = (path: string, enabled: boolean) => dock.call<PluginListing>("plugin/enable", { path, enabled });
 export const pluginDelete = (path: string) => dock.call<PluginListing>("plugin/delete", { path });
-export const pluginPromote = (id: string, scope: "user" | "project") =>
-  dock.call<PluginListing>("plugin/promote", { id, scope });
-export const pluginDiscard = (id: string) => dock.call<PluginListing>("plugin/discard", { id });
 
 export interface SkillRow {
   name: string;

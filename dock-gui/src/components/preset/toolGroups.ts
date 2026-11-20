@@ -116,12 +116,8 @@ const ZH: Record<string, string> = {
   browser_screenshot: "页面截图",
   browser_tabs: "管理标签页",
   browser_close: "关闭浏览器",
-  cordis_inspect: "查看 Cordis 插件树",
-  cordis_define: "定义一个动态插件",
-  cordis_run: "运行动态插件",
-  cordis_call: "调用动态插件的服务",
-  cordis_stop: "停掉动态插件",
-  cordis_promote: "把动态插件存成永久插件",
+  cordis_inspect: "查看插件与插件宿主",
+  cordis_plugin: "重新加载 / 停用插件",
 };
 
 /** 工具的中文简介，没收录就用 Dock 给的。 */

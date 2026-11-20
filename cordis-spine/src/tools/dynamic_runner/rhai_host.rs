@@ -30,14 +30,17 @@ use cordis_base::types::{
 };
 use cordis_base::view::ViewNode;
 
-/// Inline `source` ceiling (tool-call payload).
+/// 结构化的会话事件（Rhai 专用的钩子名，不是 ctx 事件）。
+const SESSION_ENTRY: &str = "session/entry";
+
+/// 程序侧 inline 源码上限。
 pub const MAX_INLINE_SOURCE: usize = 128 * 1024;
-/// File-backed `source_path` ceiling (re-read on run/update).
+/// 磁盘插件 `source.rhai` 上限（reload 时读成快照）。
 pub const MAX_FILE_SOURCE: usize = 1024 * 1024;
 /// Over the inline ceiling the answer is never "shorten the script" — it is the
 /// file route, which is the documented default for anything real anyway.
-pub const INLINE_TOO_LARGE: &str = "rhai source exceeds 128KiB — inline `source` is for tiny samples. Write the script to .dock/plugins/<id>/source.rhai (or ~/.dock/plugins/<id>/) with write_file, then cordis_define with `source_path` instead of `source` (≤1MiB, re-read on every run).";
-pub const FILE_TOO_LARGE: &str = "rhai source file exceeds 1MiB — split the plugin into smaller Packages, or move the bulk out of the script (read it at runtime with host.read_bytes).";
+pub const INLINE_TOO_LARGE: &str = "rhai source exceeds 128KiB — write it to .dock/plugins/<id>/source.rhai (≤1MiB) and cordis_plugin reload that id.";
+pub const FILE_TOO_LARGE: &str = "source.rhai exceeds 1MiB — move the bulk out of the script (read it at runtime with host.read_bytes) or split it into two plugins.";
 const DEFINE_MAX_OPS: u64 = 100_000;
 const RUN_MAX_OPS: u64 = 1_000_000;
 
@@ -120,12 +123,37 @@ pub const HOST_BUILTINS: &[(&str, &str, &[&str])] = &[
     ),
     (
         "host.call_tool",
-        "Execute a live model tool (permissions still apply).",
+        "Execute a live model tool (permissions still apply), on the page that triggered this script.",
         &["host.call_tool(name: String, args: Map | String) -> String"],
     ),
     (
+        "host.followup",
+        "Send the agent a message from this plugin. It goes into a page's mailbox: a running turn picks it up before its next sample; an idle main page is woken to start a turn (at most once per 5 seconds per page — extra messages wait for the next turn). Without identity: the page that triggered this script, else the last main page this plugin saw. Returns \"woke\" or \"queued\". Runtime only.",
+        &["host.followup(text: String) -> String", "host.followup(identity: String, text: String) -> String"],
+    ),
+    (
+        "host.every / host.after",
+        "Timers. every(seconds, || { ... }) repeats (min 5s); after(seconds, || { ... }) runs once (min 1s). At most 16 per plugin run; stopped with the plugin. Callbacks run off-turn: use host.followup to involve the agent.",
+        &["host.every(seconds: i64 | f64, || { ... })", "host.after(seconds: i64 | f64, || { ... })"],
+    ),
+    (
+        "host.llm",
+        "Ask the current page's model one question and get its text back (no tools, not logged in the session, not counted in /usage). Blocks the caller: inside a hook it holds the turn. Throws on request failure. Runtime only.",
+        &["host.llm(prompt: String) -> String", "host.llm(#{ system?, prompt }) -> String"],
+    ),
+    (
+        "host.card / host.update_card / host.remove_card",
+        "Hang a card under the current turn's answer (GUI; the terminal shows it once as a notice). spec: title, text?, tone? (default / muted / accent / success / warning / danger), view? (a dock.view.1 map, docs/PLUGIN-VIEWS.md), actions? [#{ id, label }], on_action? |action| { ... } — runs on the card's page (host.followup / call_tool land there); return a string to show the user a toast. Re-posting the same id in the same turn updates it; update_card / remove_card target the latest card with that id. Cards outlive the plugin run; their buttons stop working when it stops. Needs a main page: call from a tool or hook, or after one has run.",
+        &["host.card(#{ id?, title, text?, tone?, view?, actions?, on_action? }) -> String", "host.update_card(id: String, #{ title?, text?, tone?, view?, actions? })", "host.remove_card(id: String)"],
+    ),
+    (
+        "host.load / host.save / host.forget",
+        "Small persistent key-value store for this plugin, kept across restarts in $DOCK_HOME/plugin-state/ (≤1MiB in total, JSON values). Programmatic packages without a plugin directory keep it in memory only.",
+        &["host.load(key: String) -> value | ()", "host.save(key: String, value)", "host.forget(key: String)"],
+    ),
+    (
         "host.on",
-        "Observe \"session/event\", or intercept the scriptable waterfalls. session/event payload is a short line: user\\t… / assistant\\t… / tool\\tname / reminder\\t…, handled after emit returns, one at a time in emit order. \"agent/step-start\" (#{ step, identity, main }) runs before every sample and \"agent/turn-end\" (#{ text, rounds, ended_with_text, queued_followups, identity, main }) runs when the turn wants to end; return a <system-reminder> string to inject / keep working, or () for no opinion. Five more hooks are for **disk plugins only** (installed from a plugins dir, enabled in settings, or persisted by an approved cordis_promote — a package defined in this session cannot register them): \"agent/pre-step\" (#{ user, identity, main }) — return #{ deny: \"reason\" } to refuse the turn; \"system-prompt/assemble\" (#{ tools }) — return a string to add one section to the system prompt; \"tools/pre-execute\" (#{ called, name, arguments, identity, main }) — return #{ deny: \"reason\" } to refuse the call or #{ rewrite: #{ name, arguments } } to redirect it; \"tools/execute\" (#{ name, call_id, content, is_error }) — return a string to replace the content; \"llm/stream\" (#{ text, tool_calls }) — return a string to replace the assistant text. Hooks run inline and block the turn, bounded by max_operations; a throw is treated as no opinion. Built-in slots outrank a script. Stop unregisters the listener.",
+        "Observe \"session/event\" (a short line: user\\t… / assistant\\t… / tool\\tname / reminder\\t…) or \"session/entry\" (structured: #{ kind: user|assistant|tool|reminder|notice|turn-end, identity, main, replay, … }; assistant entries carry the final text, tool_calls, model, usage #{ prompt_tokens, completion_tokens, cached_prompt_tokens, … }, cache_hit, elapsed_ms, cost_usd; tool entries carry name, arguments, args, content, is_error), both handled after emit returns, one at a time in emit order; or intercept the scriptable waterfalls. \"agent/step-start\" (#{ step, identity, main }) runs before every sample and \"agent/turn-end\" (#{ text, rounds, ended_with_text, queued_followups, identity, main }) runs when the turn wants to end; return a <system-reminder> string to inject / keep working, or () for no opinion. Five more hooks are for plugins loaded from a plugins directory (.dock/plugins/<id>/ via cordis_plugin reload or autoload; a package defined programmatically cannot register them): \"agent/pre-step\" (#{ user, identity, main }) — return #{ deny: \"reason\" } to refuse the turn; \"system-prompt/assemble\" (#{ tools }) — return a string to add one section to the system prompt; \"tools/pre-execute\" (#{ called, name, arguments, args, identity, main }) — return #{ deny: \"reason\" } to refuse the call, #{ ask: \"reason\" } to require the user's go-ahead even under auto-approve, or #{ rewrite: #{ name, arguments } } to redirect it; \"tools/execute\" (#{ name, call_id, arguments, args, content, is_error, identity, main }) — return a string to replace the content; \"llm/stream\" (#{ text, tool_calls }) — return a string to replace the assistant text. Hooks run inline and block the turn, bounded by max_operations; a throw is treated as no opinion. Built-in slots outrank a script. Stop unregisters the listener.",
         &[
             "host.on(\"session/event\", |line| { ... })",
             "host.on(\"agent/step-start\", |step| { ... })",
@@ -241,12 +269,25 @@ pub fn preflight_limited(source: &str, max_bytes: usize) -> Result<RhaiMeta, Str
     })
 }
 
+/// 一次运行的外部条件。
+#[derive(Clone, Default)]
+pub struct RunScope {
+    /// 磁盘插件的目录：`register_slot` 的 `web` 文件只能在这里面。
+    pub plugin_dir: Option<PathBuf>,
+    /// 从插件目录装载的（启动、开项目、设置启用、批准过的 reload）。只有这样的
+    /// 包能挂那五个能否决流程的钩子。
+    pub disk_backed: bool,
+    /// `plugin.toml` 声明过的 HTTP host：请求它们不再逐次确认。
+    pub http_allow: Vec<String>,
+    /// 这次运行登记了什么，每登记一样记一笔。
+    pub surface: super::registry::SurfaceCell,
+}
+
 pub fn build_rhai_limited(
     fiber_name: &str,
     source: &str,
     max_bytes: usize,
-    plugin_dir: Option<PathBuf>,
-    disk_backed: bool,
+    scope: RunScope,
 ) -> Result<Plugin, String> {
     let meta = preflight_limited(source, max_bytes)?;
     let name = fiber_name.to_string();
@@ -257,30 +298,35 @@ pub fn build_rhai_limited(
         Inject::from(meta.inject.clone())
     };
     Ok(plugin(name.clone(), inject, move |ctx, _: &()| {
-        apply_rhai(ctx, &name, &source, plugin_dir.clone(), disk_backed)
-            .map_err(cordis::Error::plugin)?;
+        apply_rhai(ctx, &name, &source, scope.clone()).map_err(cordis::Error::plugin)?;
         Ok(None)
     }))
 }
 
-fn apply_rhai(
-    ctx: &Context,
-    plugin_id: &str,
-    source: &str,
-    plugin_dir: Option<PathBuf>,
-    disk_backed: bool,
-) -> Result<(), String> {
+fn apply_rhai(ctx: &Context, plugin_id: &str, source: &str, scope: RunScope) -> Result<(), String> {
+    let RunScope {
+        plugin_dir,
+        disk_backed,
+        http_allow,
+        surface,
+    } = scope;
     let mut engine = sandboxed_engine(RUN_MAX_OPS);
     let tag = format!("[cordis:{plugin_id}]");
     engine.on_print(move |s| eprintln!("{tag} {s}"));
     register_host(&mut engine);
     // 只挂在**运行期**引擎上。define 期的 `preflight` 会 eval 源码顶层，挂上去
-    // 等于 `cordis_define` 本身就能发请求——那是权限门够不着的时机。
+    // 等于编译检查本身就能发请求——那是权限门够不着的时机。
     let http_params = ctx
         .get::<super::DynamicRunner>(crate::names::DYNAMIC_CORDIS_RUNNER)
         .map(|r| r.http_params())
         .unwrap_or_else(crate::tools::web_fetch::web_fetch_params);
-    super::rhai_http::register(&mut engine, ctx.clone(), plugin_id.to_string(), http_params);
+    super::rhai_http::register(
+        &mut engine,
+        ctx.clone(),
+        plugin_id.to_string(),
+        http_params,
+        http_allow,
+    );
     // Codecs + HMAC: pure, no perms — still runtime-only so define-time preflight cannot call them.
     super::rhai_codec::register(&mut engine);
     super::rhai_regex::register(&mut engine);
@@ -290,11 +336,19 @@ fn apply_rhai(
         .compile(source)
         .map_err(|e| format!("rhai syntax: {e}"))?;
     let engine = Arc::new(engine);
+    let plugin_dir_for_state = plugin_dir.clone();
     let inner = Arc::new(HostInner {
         ctx: ctx.clone(),
         plugin_id: plugin_id.to_string(),
         plugin_dir,
         disk_backed,
+        surface,
+        last_page: Arc::default(),
+        cards_owned: std::sync::atomic::AtomicBool::new(false),
+        last_wake: Mutex::new(HashMap::new()),
+        timers: std::sync::atomic::AtomicUsize::new(0),
+        store_path: state_path(plugin_id, plugin_dir_for_state.as_deref()),
+        store: Mutex::new(None),
         engine: engine.clone(),
         ast: ast.clone(),
         disposers: Mutex::new(Vec::new()),
@@ -317,7 +371,7 @@ fn apply_rhai(
     // Own whatever apply registered even when it throws. `register_*` mutates the
     // live tools/slash/slots maps immediately; the Disposable only lives on the
     // fiber after `own` / `own_registered`. Skipping that on error left orphans
-    // that `cordis_stop` could not see (`run` was never set).
+    // that stopping the plugin could not see (`run` was never set).
     let apply_err = apply
         .call::<Dynamic>(engine.as_ref(), &ast, (host,))
         .err()
@@ -361,6 +415,20 @@ fn register_host(engine: &mut Engine) {
     engine.register_fn("register_tool_view", Host::register_tool_view);
     engine.register_fn("clear_status", Host::clear_status);
     engine.register_fn("call_tool", Host::call_tool);
+    engine.register_fn("followup", Host::followup);
+    engine.register_fn("followup", Host::followup_to);
+    engine.register_fn("every", Host::every_int);
+    engine.register_fn("every", Host::every_float);
+    engine.register_fn("after", Host::after_int);
+    engine.register_fn("after", Host::after_float);
+    engine.register_fn("llm", Host::llm);
+    engine.register_fn("llm", Host::llm_map);
+    engine.register_fn("load", Host::load);
+    engine.register_fn("save", Host::save);
+    engine.register_fn("forget", Host::forget);
+    engine.register_fn("card", Host::card);
+    engine.register_fn("update_card", Host::update_card);
+    engine.register_fn("remove_card", Host::remove_card);
     engine.register_fn("on", Host::on);
     engine.register_fn("log", Host::log);
     engine.register_fn("secret", Host::secret);
@@ -375,12 +443,24 @@ struct Host {
 struct HostInner {
     ctx: Context,
     plugin_id: String,
-    /// 磁盘插件（`source_path`）所在目录：`register_slot` 的 `web` 文件只能在这里面。
+    /// 磁盘插件所在目录：`register_slot` 的 `web` 文件只能在这里面。
     plugin_dir: Option<PathBuf>,
-    /// 这个包是不是从磁盘来的（插件目录装上 / 设置启用 / promote 落盘）。
-    /// 只有磁盘包能挂那五个能否决流程的钩子；判据是来源，不是 `source_path`
-    /// ——会话里 define 的包也能带 `source_path`。
+    /// 这个包是不是从插件目录装载的。只有这样的包能挂那五个能否决流程的钩子；
+    /// 程序侧 define 的会话包打不开。
     disk_backed: bool,
+    /// 这次运行登记了什么（reload 回执、`cordis_inspect` 读它）。
+    surface: super::registry::SurfaceCell,
+    /// 最近和这颗插件打过交道的主会话页（钩子载荷、工具调用里认出来的）。定时器
+    /// 这类不在任何一轮里的回调 `host.followup` 时送到这里。
+    last_page: Arc<Mutex<Option<Context>>>,
+    /// 这次运行发过卡片：停的时候要把它们的按钮摘掉（卡片本身留着）。
+    cards_owned: std::sync::atomic::AtomicBool,
+    /// 每一页上次被这颗插件叫醒的时刻：一页 5 秒内最多叫醒一次。
+    last_wake: Mutex<HashMap<String, std::time::Instant>>,
+    timers: std::sync::atomic::AtomicUsize,
+    /// 持久存储的文件；`None` = 程序侧 define 的包，只在内存里。
+    store_path: Option<PathBuf>,
+    store: Mutex<Option<serde_json::Map<String, Value>>>,
     engine: Arc<Engine>,
     ast: AST,
     disposers: Mutex<Vec<cordis::Disposable>>,
@@ -408,6 +488,7 @@ impl Host {
             .provide(&name, bag)
             .map_err(|e| eval_err(e.to_string()))?;
         self.own(provided)?;
+        self.note(|s| super::registry::Surface::push(&mut s.provides, &name));
         if let Some(bags) = self.inner.ctx.get::<RhaiBags>(RHAI_BAGS) {
             self.own(bags.insert(name, self.inner.plugin_id.clone()))?;
         }
@@ -442,14 +523,26 @@ impl Host {
             .ok_or_else(|| eval_err("register_tool needs execute as a function".into()))?;
         let engine = self.inner.engine.clone();
         let ast = self.inner.ast.clone();
+        let last_page_outer = self.inner.last_page.clone();
         let body: ToolBody = Arc::new(move |call| {
             let engine = engine.clone();
             let ast = ast.clone();
             let execute = execute.clone();
+            let last_page = last_page_outer.clone();
             Box::pin(async move {
                 let arguments = call.arguments.clone();
+                // 脚本跑在阻塞线程上，task-local 的「当前页」跟不过去。在这里抓住，
+                // 进线程再挂上：脚本里的 `host.call_tool` / HTTP 确认才会落到发起
+                // 调用的那一页，而不是插件 fiber 所在的根（GUI 里那一页多半没人看）。
+                let page = crate::tools::registry::exec_ctx();
+                remember_page(&last_page);
                 let content = match tokio::task::spawn_blocking(move || {
-                    call_fnptr(&engine, &ast, &execute, json_str_to_dynamic(&arguments))
+                    let run =
+                        || call_fnptr(&engine, &ast, &execute, json_str_to_dynamic(&arguments));
+                    match page {
+                        Some(page) => crate::tools::registry::with_exec_ctx(&page, run),
+                        None => run(),
+                    }
                 })
                 .await
                 {
@@ -475,6 +568,7 @@ impl Host {
             )
             .map_err(|e| eval_err(e.to_string()))?;
         self.own(d)?;
+        self.note(|s| super::registry::Surface::push(&mut s.tools, &name));
         // `view` 写在工具上 = 给自己登记卡片视图。登记不上 apply 就失败，整个作用域
         // 回滚，刚挂上的工具跟着卸下（`register_tool_with_a_taken_view_leaves_no_tool_behind`）。
         if let Some(view) = view {
@@ -549,6 +643,7 @@ impl Host {
             .get("send")
             .and_then(|d| d.clone().try_cast::<bool>())
             .unwrap_or(kind == ExtraSlashKind::Prompt);
+        let noted = command.trim().trim_start_matches('/').to_string();
         let d = slash
             .register(SlashEntry {
                 command,
@@ -560,6 +655,7 @@ impl Host {
             })
             .map_err(|e| eval_err(e.to_string()))?;
         self.own(d)?;
+        self.note(|s| super::registry::Surface::push(&mut s.slash, &noted));
         Ok(())
     }
 
@@ -577,7 +673,9 @@ impl Host {
         let d = settings
             .register(&self.inner.plugin_id, schema)
             .map_err(|e| eval_err(e.to_string()))?;
-        self.own(d)
+        self.own(d)?;
+        self.note(|s| s.settings = true);
+        Ok(())
     }
 
     fn setting(&mut self, key: ImmutableString) -> Result<Dynamic, Box<rhai::EvalAltResult>> {
@@ -670,20 +768,21 @@ impl Host {
             on_key,
         });
         let d = slots
-            .register(id, handler)
+            .register(id.clone(), handler)
             .map_err(|e| eval_err(e.to_string()))?;
         self.own(d)?;
+        self.note(|s| super::registry::Surface::push(&mut s.slots, &id));
         Ok(())
     }
 
     /// `register_slot` 的 `web: "panel.html"`：插件目录里的一个文件（不许绝对路径、`..`、
-    /// 也不许经软链跑出插件目录）。只有磁盘插件（`source_path`）有目录。
+    /// 也不许经软链跑出插件目录）。只有磁盘插件有目录。
     fn web_file(&self, rel: &str) -> Result<PathBuf, String> {
         let dir = self
             .inner
             .plugin_dir
             .as_ref()
-            .ok_or("web 面板只能用在磁盘插件里（用 source_path 定义，HTML 放在插件目录）")?;
+            .ok_or("web 面板只能用在磁盘插件里（HTML 放在 .dock/plugins/<id>/ 里）")?;
         let rel_path = Path::new(rel.trim());
         if rel.trim().is_empty()
             || rel_path.is_absolute()
@@ -743,8 +842,373 @@ impl Host {
             name: name.to_string(),
             arguments,
         };
-        let text = block_on_tool(tools.as_ref(), call)?;
+        let text = block_on_tool(&self.inner.ctx, tools.as_ref(), call)?;
         Ok(text.into())
+    }
+
+    fn followup(
+        &mut self,
+        text: ImmutableString,
+    ) -> Result<ImmutableString, Box<rhai::EvalAltResult>> {
+        self.deliver_followup(None, text.to_string())
+    }
+
+    fn followup_to(
+        &mut self,
+        identity: ImmutableString,
+        text: ImmutableString,
+    ) -> Result<ImmutableString, Box<rhai::EvalAltResult>> {
+        self.deliver_followup(Some(identity.to_string()), text.to_string())
+    }
+
+    /// 送进那一页的信箱（和后台任务跑完通知同一个信箱）：那一页在跑就在下一步带上，
+    /// 闲着的主会话页就叫醒它开一轮。一页 5 秒内最多叫醒一次，多出来的排着等下一轮——
+    /// 一颗写坏的插件不能把一个会话叫成连轴转。
+    fn deliver_followup(
+        &self,
+        identity: Option<String>,
+        text: String,
+    ) -> Result<ImmutableString, Box<rhai::EvalAltResult>> {
+        const WAKE_GAP: std::time::Duration = std::time::Duration::from_secs(5);
+        const MAX_CHARS: usize = 16_000;
+        let text = text.trim();
+        if text.is_empty() {
+            return err("host.followup needs non-empty text".to_string());
+        }
+        if text.chars().count() > MAX_CHARS {
+            return err(format!("host.followup text is over {MAX_CHARS} characters"));
+        }
+        let page = identity
+            .map(|i| i.trim().to_string())
+            .filter(|i| !i.is_empty())
+            .or_else(|| {
+                let (id, _) = exec_identity();
+                (!id.is_empty()).then_some(id)
+            })
+            .or_else(|| {
+                self.inner
+                    .last_page
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .and_then(|c| c.get::<crate::session::log::Sessions>(crate::names::SESSIONS))
+                    .map(|s| s.identity().to_string())
+            })
+            .ok_or_else(|| {
+                eval_err(
+                    "host.followup: no page to send to — call it from a tool or hook, or pass the \
+                     identity from a hook payload"
+                        .into(),
+                )
+            })?;
+        let subs = self
+            .inner
+            .ctx
+            .get::<crate::tools::task::Subagents>(crate::names::SUBAGENTS)
+            .ok_or_else(|| {
+                eval_err("subagents is not mounted; host.followup has no mailbox".into())
+            })?;
+        let wakes = cordis_base::types::is_main_identity(&page) && {
+            let mut last = self.inner.last_wake.lock().unwrap();
+            let now = std::time::Instant::now();
+            match last.get(&page) {
+                Some(at) if now.duration_since(*at) < WAKE_GAP => false,
+                _ => {
+                    last.insert(page.clone(), now);
+                    true
+                }
+            }
+        };
+        subs.notify_from_plugin(&page, &self.inner.plugin_id, text.to_string(), wakes);
+        Ok(if wakes { "woke" } else { "queued" }.into())
+    }
+
+    fn every_int(&mut self, seconds: rhai::INT, f: FnPtr) -> Result<(), Box<rhai::EvalAltResult>> {
+        self.timer(seconds as f64, f, true)
+    }
+
+    fn every_float(
+        &mut self,
+        seconds: rhai::FLOAT,
+        f: FnPtr,
+    ) -> Result<(), Box<rhai::EvalAltResult>> {
+        self.timer(seconds, f, true)
+    }
+
+    fn after_int(&mut self, seconds: rhai::INT, f: FnPtr) -> Result<(), Box<rhai::EvalAltResult>> {
+        self.timer(seconds as f64, f, false)
+    }
+
+    fn after_float(
+        &mut self,
+        seconds: rhai::FLOAT,
+        f: FnPtr,
+    ) -> Result<(), Box<rhai::EvalAltResult>> {
+        self.timer(seconds, f, false)
+    }
+
+    /// 定时器归这次运行：插件停了、reload 换版了，任务跟着取消。回调一次跑完才排下一次，
+    /// 不会叠着跑。
+    fn timer(
+        &mut self,
+        seconds: f64,
+        f: FnPtr,
+        repeat: bool,
+    ) -> Result<(), Box<rhai::EvalAltResult>> {
+        const MAX_TIMERS: usize = 16;
+        let floor = if repeat { 5.0 } else { 1.0 };
+        if !seconds.is_finite() || seconds < floor {
+            return err(format!(
+                "host.{} needs at least {floor} seconds",
+                if repeat { "every" } else { "after" }
+            ));
+        }
+        // Timers may span days (unlike blocking hooks), but not more than a month.
+        // Convert before taking a timer slot or spawning: a rejected value has no side effects.
+        const MAX_TIMER_SECONDS: f64 = 30.0 * 24.0 * 60.0 * 60.0;
+        let invalid_period = || {
+            eval_err(format!(
+                "host.{} 的间隔不能超过 2592000 秒（30 天）",
+                if repeat { "every" } else { "after" }
+            ))
+        };
+        let period =
+            std::time::Duration::try_from_secs_f64(seconds).map_err(|_| invalid_period())?;
+        if seconds > MAX_TIMER_SECONDS {
+            return Err(invalid_period());
+        }
+        if self
+            .inner
+            .timers
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            >= MAX_TIMERS
+        {
+            return err(format!("a plugin run can hold at most {MAX_TIMERS} timers"));
+        }
+        let handle = tokio::runtime::Handle::try_current().map_err(|e| eval_err(e.to_string()))?;
+        let engine = self.inner.engine.clone();
+        let ast = self.inner.ast.clone();
+        let plugin_id = self.inner.plugin_id.clone();
+        let task = handle.spawn(async move {
+            let mut next = tokio::time::Instant::now() + period;
+            loop {
+                tokio::time::sleep_until(next).await;
+                let (engine, ast, f, plugin_id) =
+                    (engine.clone(), ast.clone(), f.clone(), plugin_id.clone());
+                let _ = tokio::task::spawn_blocking(move || {
+                    if let Err(e) = call_fnptr_raw(&engine, &ast, &f, Dynamic::UNIT) {
+                        eprintln!("[cordis:{plugin_id}] timer: {e}");
+                    }
+                })
+                .await;
+                if !repeat {
+                    break;
+                }
+                next = tokio::time::Instant::now() + period;
+            }
+        });
+        let abort = task.abort_handle();
+        self.own(cordis::Disposable::from_fn(move || abort.abort()))
+    }
+
+    fn llm(
+        &mut self,
+        prompt: ImmutableString,
+    ) -> Result<ImmutableString, Box<rhai::EvalAltResult>> {
+        self.ask_model(None, prompt.to_string())
+    }
+
+    fn llm_map(&mut self, spec: Map) -> Result<ImmutableString, Box<rhai::EvalAltResult>> {
+        let prompt =
+            map_str(&spec, "prompt").ok_or_else(|| eval_err("host.llm needs prompt".into()))?;
+        self.ask_model(map_str(&spec, "system"), prompt)
+    }
+
+    /// 用**这一页**的模型问一句（同侧记结论那条路：隔离出一份不落日志的会话）。
+    /// 不带工具；阻塞调用方。
+    fn ask_model(
+        &self,
+        system: Option<String>,
+        prompt: String,
+    ) -> Result<ImmutableString, Box<rhai::EvalAltResult>> {
+        const MAX_PROMPT: usize = 256 * 1024;
+        if prompt.trim().is_empty() {
+            return err("host.llm needs a non-empty prompt".to_string());
+        }
+        if prompt.len() + system.as_deref().map_or(0, str::len) > MAX_PROMPT {
+            return err("host.llm prompt is over 256KiB".to_string());
+        }
+        let llm = self
+            .inner
+            .ctx
+            .get::<crate::llm::sampler::Llm>(crate::names::LLM)
+            .ok_or_else(|| eval_err("llm is not mounted".into()))?;
+        let page = crate::tools::registry::exec_ctx().unwrap_or_else(|| self.inner.ctx.clone());
+        let iso = page.isolate(crate::names::SESSIONS);
+        let request = cordis_base::types::PromptRequest {
+            system: system.unwrap_or_else(|| "You are a precise assistant. Answer briefly.".into()),
+            history: vec![LogEvent::User(prompt.into())],
+            tools: Vec::new(),
+        };
+        let handle = tokio::runtime::Handle::try_current().map_err(|e| eval_err(e.to_string()))?;
+        let output = tokio::task::block_in_place(|| {
+            handle.block_on(llm.stream_observed(&iso, request, |_| {}))
+        });
+        if let Some(error) = output.error {
+            return err(format!("host.llm: {error}"));
+        }
+        Ok(output.text.trim().to_string().into())
+    }
+
+    fn with_store<R>(&self, f: impl FnOnce(&mut serde_json::Map<String, Value>) -> R) -> R {
+        let mut guard = self.inner.store.lock().unwrap();
+        let map = guard.get_or_insert_with(|| {
+            self.inner
+                .store_path
+                .as_ref()
+                .and_then(|p| std::fs::read_to_string(p).ok())
+                .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+                .and_then(|v| v.as_object().cloned())
+                .unwrap_or_default()
+        });
+        f(map)
+    }
+
+    fn load(&mut self, key: ImmutableString) -> Dynamic {
+        self.with_store(|m| {
+            m.get(key.as_str())
+                .map(json_to_dynamic)
+                .unwrap_or(Dynamic::UNIT)
+        })
+    }
+
+    fn save(
+        &mut self,
+        key: ImmutableString,
+        value: Dynamic,
+    ) -> Result<(), Box<rhai::EvalAltResult>> {
+        let json = dynamic_to_json(&value).map_err(eval_err)?;
+        self.write_store(|m| {
+            m.insert(key.to_string(), json);
+        })
+    }
+
+    fn forget(&mut self, key: ImmutableString) -> Result<(), Box<rhai::EvalAltResult>> {
+        self.write_store(|m| {
+            m.remove(key.as_str());
+        })
+    }
+
+    /// 改完整份写回（先写临时文件再改名，写一半崩了也不留半截 JSON）。超过 1MiB 拒绝，
+    /// 内存里的也不改。
+    fn write_store(
+        &self,
+        change: impl FnOnce(&mut serde_json::Map<String, Value>),
+    ) -> Result<(), Box<rhai::EvalAltResult>> {
+        const MAX_STATE: usize = 1024 * 1024;
+        self.with_store(|map| {
+            let mut next = map.clone();
+            change(&mut next);
+            let text = serde_json::to_string(&next).map_err(|e| eval_err(e.to_string()))?;
+            if text.len() > MAX_STATE {
+                return err("plugin state is over 1MiB; store less (or write a file)".to_string());
+            }
+            if let Some(path) = self.inner.store_path.as_ref() {
+                write_atomic(path, &text).map_err(eval_err)?;
+            }
+            *map = next;
+            Ok(())
+        })
+    }
+
+    fn turn_cards(
+        &self,
+    ) -> Result<Arc<crate::host::turn_cards::TurnCards>, Box<rhai::EvalAltResult>> {
+        self.inner
+            .ctx
+            .get::<crate::host::turn_cards::TurnCards>(crate::names::TURN_CARDS)
+            .ok_or_else(|| eval_err("turnCards is not mounted; this host has no card slot".into()))
+    }
+
+    fn card(&mut self, spec: Map) -> Result<ImmutableString, Box<rhai::EvalAltResult>> {
+        let cards = self.turn_cards()?;
+        let page = main_exec_page()
+            .or_else(|| self.inner.last_page.lock().unwrap().clone())
+            .ok_or_else(|| {
+                eval_err(
+                    "host.card: no main page yet — call it from a tool or hook (or after one ran)"
+                        .into(),
+                )
+            })?;
+        let parsed = card_spec(&spec, None).map_err(eval_err)?;
+        let handler = spec
+            .get("on_action")
+            .cloned()
+            .and_then(|d| d.try_cast::<FnPtr>())
+            .map(|f| {
+                let engine = self.inner.engine.clone();
+                let ast = self.inner.ast.clone();
+                let last_page = self.inner.last_page.clone();
+                let page = page.clone();
+                let h: crate::host::turn_cards::CardHandler = Arc::new(move |action: &str| {
+                    *last_page.lock().unwrap() = Some(page.clone());
+                    let v = crate::tools::registry::with_exec_ctx(&page, || {
+                        call_fnptr_raw(&engine, &ast, &f, Dynamic::from(action.to_string()))
+                    })?;
+                    Ok((!v.is_unit()).then(|| dynamic_to_display(v)))
+                });
+                h
+            });
+        let id = cards
+            .post(
+                &page,
+                &self.inner.plugin_id,
+                map_str(&spec, "id").as_deref(),
+                parsed,
+                handler,
+            )
+            .map_err(eval_err)?;
+        if !self
+            .inner
+            .cards_owned
+            .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            let plugin_id = self.inner.plugin_id.clone();
+            let cards = cards.clone();
+            self.own(cordis::Disposable::from_fn(move || {
+                cards.detach_plugin(&plugin_id)
+            }))?;
+        }
+        Ok(id.into())
+    }
+
+    fn update_card(
+        &mut self,
+        id: ImmutableString,
+        spec: Map,
+    ) -> Result<(), Box<rhai::EvalAltResult>> {
+        let cards = self.turn_cards()?;
+        let mut error = None;
+        cards
+            .update(
+                &self.inner.plugin_id,
+                id.as_str(),
+                |current| match card_spec(&spec, Some(current)) {
+                    Ok(next) => *current = next,
+                    Err(e) => error = Some(e),
+                },
+            )
+            .map_err(eval_err)?;
+        match error {
+            Some(e) => err(e),
+            None => Ok(()),
+        }
+    }
+
+    fn remove_card(&mut self, id: ImmutableString) -> Result<(), Box<rhai::EvalAltResult>> {
+        self.turn_cards()?
+            .remove(&self.inner.plugin_id, id.as_str())
+            .map_err(eval_err)
     }
 
     fn on(
@@ -753,24 +1217,29 @@ impl Host {
         handler: FnPtr,
     ) -> Result<(), Box<rhai::EvalAltResult>> {
         let name = event.to_string();
-        match name.as_str() {
+        self.on_event(&name, handler)?;
+        self.note(|s| super::registry::Surface::push(&mut s.hooks, &name));
+        Ok(())
+    }
+
+    fn on_event(&mut self, name: &str, handler: FnPtr) -> Result<(), Box<rhai::EvalAltResult>> {
+        match name {
             SESSION_EVENT => self.on_session_event(handler),
+            SESSION_ENTRY => self.on_session_entry(handler),
             STEP_START => self.on_step_start(handler),
             TURN_END => self.on_turn_end(handler),
             PRE_STEP | PROMPT_ASSEMBLE | TOOLS_PRE_EXECUTE | TOOLS_EXECUTE | LLM_STREAM => {
                 // 这五个钩子能**否决**一次工具调用、能改系统提示、能拒掉一整轮 ——
-                // 只给磁盘来源的插件（插件目录装上 / 设置里启用 / 审批过的
-                // `cordis_promote` 落盘）。会话里 `cordis_define` 的包打不开：否则
-                // 模型能给自己开闸门、能改自己的系统提示 = 自我提权。
+                // 只给从插件目录装载的插件（启动 / 开项目时自动装、设置里启用、
+                // 用户批准过的 `cordis_plugin reload`）。程序侧 define 的会话包打不开。
                 if !self.inner.disk_backed {
                     return err(format!(
-                        "host.on({name:?}) is only available to disk plugins (installed from a \
-                         plugins dir, enabled in settings, or persisted by an approved \
-                         cordis_promote); a package defined in this session cannot register it \
-                         (passing source_path does not change that)"
+                        "host.on({name:?}) is only available to plugins loaded from a plugins \
+                         directory (.dock/plugins/<id>/ via cordis_plugin reload or autoload); a \
+                         package defined programmatically cannot register it"
                     ));
                 }
-                match name.as_str() {
+                match name {
                     PRE_STEP => self.on_pre_step(handler),
                     PROMPT_ASSEMBLE => self.on_prompt(handler),
                     TOOLS_PRE_EXECUTE => self.on_tool_call(handler),
@@ -779,7 +1248,7 @@ impl Host {
                 }
             }
             _ => err(format!(
-                "host.on supports {SESSION_EVENT:?}, {STEP_START:?}, {TURN_END:?}, {PRE_STEP:?}, \
+                "host.on supports {SESSION_EVENT:?}, {SESSION_ENTRY:?}, {STEP_START:?}, {TURN_END:?}, {PRE_STEP:?}, \
                  {PROMPT_ASSEMBLE:?}, {TOOLS_PRE_EXECUTE:?}, {TOOLS_EXECUTE:?} and \
                  {LLM_STREAM:?} (got {name:?})"
             )),
@@ -923,6 +1392,7 @@ impl Host {
                 payload.insert("called".into(), next.called.clone().into());
                 payload.insert("name".into(), next.name().into());
                 payload.insert("arguments".into(), next.arguments().into());
+                payload.insert("args".into(), json_str_to_dynamic(next.arguments()));
                 payload.insert("identity".into(), next.identity.clone().into());
                 payload.insert("main".into(), next.is_main_session().into());
                 if let Some(v) = script(payload) {
@@ -930,10 +1400,12 @@ impl Host {
                         next.deny(reason);
                     } else if let Some((name, arguments)) = hook_rewrite(&v) {
                         next.rewrite(name, arguments);
+                    } else if let Some(reason) = hook_field(&v, "ask") {
+                        next.ask(format!("{reason}（插件 {plugin_id}）"));
                     } else {
                         eprintln!(
                             "[cordis:{plugin_id}] host.on(tools/pre-execute): handler must return () | \
-                             #{{ deny }} | #{{ rewrite }}"
+                             #{{ deny }} | #{{ ask }} | #{{ rewrite }}"
                         );
                     }
                 }
@@ -960,6 +1432,12 @@ impl Host {
                 payload.insert("call_id".into(), next.call_id.clone().into());
                 payload.insert("content".into(), next.content.clone().into());
                 payload.insert("is_error".into(), next.is_error.into());
+                let arguments = crate::tools::registry::call_arguments().unwrap_or_default();
+                payload.insert("args".into(), json_str_to_dynamic(&arguments));
+                payload.insert("arguments".into(), arguments.into());
+                let (identity, main) = exec_identity();
+                payload.insert("identity".into(), identity.into());
+                payload.insert("main".into(), main.into());
                 if let Some(v) = script(payload) {
                     if let Ok(text) = v.into_string() {
                         next.content = text;
@@ -1029,28 +1507,28 @@ impl Host {
         let engine = self.inner.engine.clone();
         let ast = self.inner.ast.clone();
         let plugin_id = self.inner.plugin_id.clone();
-        move |payload: Map| match call_fnptr_raw(
-            &engine,
-            &ast,
-            &handler,
-            Dynamic::from_map(payload),
-        ) {
-            Ok(v) if v.is_unit() => None,
-            // A string or nothing. Anything else would otherwise be stringified
-            // into the model's history by accident.
-            Ok(v) => match v.into_string() {
-                Ok(text) if !text.trim().is_empty() => Some(text),
-                Ok(_) => None,
-                Err(kind) => {
-                    eprintln!(
+        let last_page = self.inner.last_page.clone();
+        move |payload: Map| {
+            remember_page(&last_page);
+            let called = call_fnptr_raw(&engine, &ast, &handler, Dynamic::from_map(payload));
+            match called {
+                Ok(v) if v.is_unit() => None,
+                // A string or nothing. Anything else would otherwise be stringified
+                // into the model's history by accident.
+                Ok(v) => match v.into_string() {
+                    Ok(text) if !text.trim().is_empty() => Some(text),
+                    Ok(_) => None,
+                    Err(kind) => {
+                        eprintln!(
                         "[cordis:{plugin_id}] host.on: handler must return a string or (), got {kind}"
                     );
+                        None
+                    }
+                },
+                Err(e) => {
+                    eprintln!("[cordis:{plugin_id}] host.on: {e}");
                     None
                 }
-            },
-            Err(e) => {
-                eprintln!("[cordis:{plugin_id}] host.on: {e}");
-                None
             }
         }
     }
@@ -1066,17 +1544,16 @@ impl Host {
         let engine = self.inner.engine.clone();
         let ast = self.inner.ast.clone();
         let plugin_id = self.inner.plugin_id.clone();
-        move |payload: Map| match call_fnptr_raw(
-            &engine,
-            &ast,
-            &handler,
-            Dynamic::from_map(payload),
-        ) {
-            Ok(v) if v.is_unit() => None,
-            Ok(v) => Some(v),
-            Err(e) => {
-                eprintln!("[cordis:{plugin_id}] host.on: {e}");
-                None
+        let last_page = self.inner.last_page.clone();
+        move |payload: Map| {
+            remember_page(&last_page);
+            match call_fnptr_raw(&engine, &ast, &handler, Dynamic::from_map(payload)) {
+                Ok(v) if v.is_unit() => None,
+                Ok(v) => Some(v),
+                Err(e) => {
+                    eprintln!("[cordis:{plugin_id}] host.on: {e}");
+                    None
+                }
             }
         }
     }
@@ -1120,6 +1597,68 @@ impl Host {
         Ok(())
     }
 
+    /// `session/entry`：结构化的会话事件（[`entry_json`]）。和 `session/event` 一样
+    /// 异步、按发出顺序一条跑完再跑下一条，只观察。助手那一条来自采样收尾
+    /// （[`crate::LLM_FINISHED`]），带最终文本、工具调用和用量；流式 delta 不发。
+    fn on_session_entry(&mut self, handler: FnPtr) -> Result<(), Box<rhai::EvalAltResult>> {
+        use crate::session::log::{ChildLogEvent, LlmFinished, PageLogEvent};
+        let engine = self.inner.engine.clone();
+        let ast = self.inner.ast.clone();
+        let plugin_id = self.inner.plugin_id.clone();
+        let run = Arc::new(move |entry: Value| {
+            if let Err(e) = call_fnptr(&engine, &ast, &handler, json_to_dynamic(&entry)) {
+                eprintln!("[cordis:{plugin_id}] host.on(session/entry): {e}");
+            }
+        });
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                let run = run.clone();
+                handle.spawn(async move {
+                    while let Some(entry) = rx.recv().await {
+                        let run = run.clone();
+                        let _ = tokio::task::spawn_blocking(move || run(entry)).await;
+                    }
+                });
+            }
+            Err(_) => return err("session/entry needs a tokio runtime".to_string()),
+        }
+        let page_tx = tx.clone();
+        let page = self
+            .inner
+            .ctx
+            .on(crate::names::SESSION_PAGE_EVENT, move |e: &PageLogEvent| {
+                if let Some(entry) = entry_json(&e.event, &e.page, true, e.preamble) {
+                    let _ = page_tx.send(entry);
+                }
+            })
+            .map_err(|e| eval_err(e.to_string()))?;
+        self.own(page)?;
+        let child_tx = tx.clone();
+        let child = self
+            .inner
+            .ctx
+            .on(
+                crate::names::SESSION_CHILD_EVENT,
+                move |e: &ChildLogEvent| {
+                    if let Some(entry) = entry_json(&e.event, &e.child, false, false) {
+                        let _ = child_tx.send(entry);
+                    }
+                },
+            )
+            .map_err(|e| eval_err(e.to_string()))?;
+        self.own(child)?;
+        let finished = self
+            .inner
+            .ctx
+            .on(crate::names::LLM_FINISHED, move |f: &LlmFinished| {
+                let _ = tx.send(assistant_entry_json(f));
+            })
+            .map_err(|e| eval_err(e.to_string()))?;
+        self.own(finished)?;
+        Ok(())
+    }
+
     fn log(&mut self, message: ImmutableString) {
         eprintln!("[cordis:{}] {message}", self.inner.plugin_id);
     }
@@ -1145,6 +1684,11 @@ impl Host {
         )
         .map_err(eval_err)?;
         Ok(bytes)
+    }
+
+    /// 记一笔「这次运行登记了什么」。
+    fn note(&self, f: impl FnOnce(&mut super::registry::Surface)) {
+        f(&mut self.inner.surface.lock().unwrap());
     }
 
     fn own(&self, d: cordis::Disposable) -> Result<(), Box<rhai::EvalAltResult>> {
@@ -1267,6 +1811,93 @@ impl SlotHandler for RhaiSlot {
     }
 }
 
+/// `session/entry` 的一条（采样那条走 [`assistant_entry_json`]）。流式 delta、
+/// pre-step、组装好的提示不发。
+fn entry_json(ev: &LogEvent, identity: &str, main: bool, replay: bool) -> Option<Value> {
+    let mut entry = match ev {
+        LogEvent::User(msg) => serde_json::json!({ "kind": "user", "text": msg.to_string() }),
+        LogEvent::ToolExecute {
+            id,
+            name,
+            arguments,
+            content,
+            is_error,
+            ..
+        } => serde_json::json!({
+            "kind": "tool",
+            "name": name,
+            "call_id": id,
+            "arguments": arguments,
+            "args": serde_json::from_str::<Value>(arguments).unwrap_or(Value::Null),
+            "content": content,
+            "is_error": is_error,
+        }),
+        LogEvent::SystemReminder(text) => serde_json::json!({ "kind": "reminder", "text": text }),
+        LogEvent::Notice { kind, title, body } => serde_json::json!({
+            "kind": "notice", "level": kind.as_str(), "title": title, "body": body,
+        }),
+        LogEvent::TurnEnd(status) => serde_json::json!({
+            "kind": "turn-end",
+            "status": status.as_str(),
+            "error": match status {
+                cordis_base::types::TurnEndStatus::Failed(e) => Value::String(e.clone()),
+                _ => Value::Null,
+            },
+        }),
+        LogEvent::LlmStream(_) | LogEvent::PreStep | LogEvent::Prompt(_) => return None,
+    };
+    let obj = entry.as_object_mut()?;
+    obj.insert("identity".into(), identity.into());
+    obj.insert("main".into(), main.into());
+    obj.insert("replay".into(), replay.into());
+    Some(entry)
+}
+
+/// 一次采样收尾：最终文本、工具调用、用量、缓存命中率（cached / prompt）、费用。
+fn assistant_entry_json(f: &crate::session::log::LlmFinished) -> Value {
+    let out = &f.output;
+    let calls: Vec<Value> = out
+        .tool_calls
+        .iter()
+        .map(|c| {
+            serde_json::json!({
+                "name": c.name,
+                "arguments": c.arguments,
+                "args": serde_json::from_str::<Value>(&c.arguments).unwrap_or(Value::Null),
+            })
+        })
+        .collect();
+    let usage = f.usage.as_ref().map(|u| {
+        serde_json::json!({
+            "prompt_tokens": u.prompt_tokens,
+            "completion_tokens": u.completion_tokens,
+            "cached_prompt_tokens": u.cached_prompt_tokens,
+            "cache_creation_prompt_tokens": u.cache_creation_prompt_tokens,
+            "reasoning_tokens": u.reasoning_tokens,
+        })
+    });
+    let cache_hit = f
+        .usage
+        .as_ref()
+        .filter(|u| u.prompt_tokens > 0)
+        .map(|u| u.cached_prompt_tokens as f64 / u.prompt_tokens as f64);
+    serde_json::json!({
+        "kind": "assistant",
+        "identity": f.identity.as_ref(),
+        "main": f.main,
+        "replay": false,
+        "text": out.text,
+        "reasoning_chars": out.reasoning.chars().count(),
+        "tool_calls": calls,
+        "error": out.error,
+        "model": f.model,
+        "usage": usage,
+        "cache_hit": cache_hit,
+        "elapsed_ms": f.elapsed_ms,
+        "cost_usd": f.cost_usd_ticks.map(|t| t as f64 / 1e10),
+    })
+}
+
 fn event_line(ev: &LogEvent) -> Option<String> {
     let line = match ev {
         LogEvent::User(text) => format!("user\t{}", preview(text, 160)),
@@ -1302,6 +1933,99 @@ fn hook_deny(value: &Dynamic) -> Option<String> {
     let reason = map.get("deny")?.clone().into_string().ok()?;
     let trimmed = reason.trim().to_string();
     (!trimmed.is_empty()).then_some(trimmed)
+}
+
+/// 正在跑的主会话页记下来，给定时器之类没有当前页的 `host.followup` / `host.card` 用。
+fn remember_page(last_page: &Mutex<Option<Context>>) {
+    if let Some(page) = main_exec_page() {
+        *last_page.lock().unwrap() = Some(page);
+    }
+}
+
+/// 当前执行的那一页，且是主会话页（子代理的回合不算）。
+fn main_exec_page() -> Option<Context> {
+    crate::tools::registry::exec_ctx().filter(|c| {
+        c.get::<crate::session::log::Sessions>(crate::names::SESSIONS)
+            .is_some_and(|s| s.is_main())
+    })
+}
+
+/// 插件持久存储的文件：`$DOCK_HOME/plugin-state/<id>-<目录指纹>.json`。按插件目录区分，
+/// 不同项目里的同名插件各存各的。没有目录（程序侧 define）就不落盘。
+fn state_path(plugin_id: &str, plugin_dir: Option<&Path>) -> Option<PathBuf> {
+    use sha2::{Digest, Sha256};
+    let dir = plugin_dir?;
+    let canon = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    let digest = Sha256::digest(canon.to_string_lossy().as_bytes());
+    let short: String = digest.iter().take(4).map(|b| format!("{b:02x}")).collect();
+    Some(
+        cordis_base::config::dock_home()
+            .join("plugin-state")
+            .join(format!("{plugin_id}-{short}.json")),
+    )
+}
+
+fn write_atomic(path: &Path, text: &str) -> Result<(), String> {
+    let dir = path.parent().ok_or("bad state path")?;
+    std::fs::create_dir_all(dir).map_err(|e| format!("plugin state: {e}"))?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, text).map_err(|e| format!("plugin state: {e}"))?;
+    std::fs::rename(&tmp, path).map_err(|e| format!("plugin state: {e}"))
+}
+
+/// 脚本给的卡片字段 → [`CardSpec`]。`base` 是更新时的旧值：没给的字段留着。
+fn card_spec(
+    spec: &Map,
+    base: Option<&crate::host::turn_cards::CardSpec>,
+) -> Result<crate::host::turn_cards::CardSpec, String> {
+    let mut out = base.cloned().unwrap_or_default();
+    if let Some(title) = map_str(spec, "title") {
+        out.title = title;
+    }
+    if out.title.trim().is_empty() {
+        return Err("host.card needs a title".into());
+    }
+    if let Some(text) = map_str(spec, "text") {
+        out.text = text;
+    }
+    if let Some(tone) = map_str(spec, "tone") {
+        out.tone = tone;
+    }
+    if let Some(view) = spec.get("view").filter(|v| !v.is_unit()) {
+        out.view = Some(ViewNode::parse(&dynamic_to_json(view)?));
+    }
+    if let Some(actions) = spec.get("actions") {
+        let arr = actions
+            .clone()
+            .try_cast::<Array>()
+            .ok_or("card actions must be an array of #{ id, label }")?;
+        out.actions = arr
+            .into_iter()
+            .filter_map(|a| {
+                let m = a.try_cast::<Map>()?;
+                let id = map_str(&m, "id")?;
+                let label = map_str(&m, "label").unwrap_or_else(|| id.clone());
+                Some((id, label))
+            })
+            .collect();
+    }
+    Ok(out)
+}
+
+/// `#{ <key>: "text" }` 里的非空文本。
+fn hook_field(value: &Dynamic, key: &str) -> Option<String> {
+    let map = value.clone().try_cast::<Map>()?;
+    let text = map.get(key)?.clone().into_string().ok()?;
+    let trimmed = text.trim().to_string();
+    (!trimmed.is_empty()).then_some(trimmed)
+}
+
+/// 正在跑的这一轮是哪一页：`(identity, main)`。不在任何一轮里是 `("", false)`。
+pub(crate) fn exec_identity() -> (String, bool) {
+    crate::tools::registry::exec_ctx()
+        .and_then(|c| c.get::<crate::session::log::Sessions>(crate::names::SESSIONS))
+        .map(|s| (s.identity().to_string(), s.is_main()))
+        .unwrap_or_default()
 }
 
 /// A hook's redirect: `#{ rewrite: #{ name, arguments } }`.
@@ -1353,10 +2077,18 @@ fn call_fnptr_raw(
     }
 }
 
-fn block_on_tool(tools: &Tools, call: ToolCall) -> Result<String, Box<rhai::EvalAltResult>> {
+/// 脚本里的 `host.call_tool`。在**发起这次调用的那一页**上执行：权限确认、计划门、
+/// 会话身份都按那一页算。插件 fiber 挂在根上，拿根算会把确认框弹到第 1 页——GUI
+/// 里那一页多半没人看，调用就一直挂着。不在任何一轮里（面板按键、斜杠）才退回根。
+fn block_on_tool(
+    plugin_ctx: &Context,
+    tools: &Tools,
+    call: ToolCall,
+) -> Result<String, Box<rhai::EvalAltResult>> {
     let handle = tokio::runtime::Handle::try_current().map_err(|e| eval_err(e.to_string()))?;
     let tools = tools.clone();
-    let result = tokio::task::block_in_place(|| handle.block_on(tools.execute(call)));
+    let page = crate::tools::registry::exec_ctx().unwrap_or_else(|| plugin_ctx.clone());
+    let result = tokio::task::block_in_place(|| handle.block_on(tools.execute_on(&page, call)));
     Ok(result.content)
 }
 
@@ -1514,6 +2246,88 @@ mod tests {
         engine.eval::<Map>(src).unwrap()
     }
 
+    fn timer_host() -> Host {
+        Host {
+            inner: Arc::new(HostInner {
+                ctx: Context::new(),
+                plugin_id: "timer-test".into(),
+                plugin_dir: None,
+                disk_backed: false,
+                surface: Default::default(),
+                last_page: Arc::default(),
+                cards_owned: Default::default(),
+                last_wake: Default::default(),
+                timers: Default::default(),
+                store_path: None,
+                store: Default::default(),
+                engine: Arc::new(Engine::new()),
+                ast: AST::empty(),
+                disposers: Default::default(),
+                statuses: Default::default(),
+            }),
+        }
+    }
+
+    /// 调真正的宿主入口；旧版在超大 float 上 panic，integer 大值也会排一个无意义的任务。
+    #[tokio::test]
+    async fn timers_reject_huge_intervals_without_panicking_or_taking_slots() {
+        let mut host = timer_host();
+        let callback = FnPtr::new("unused").unwrap();
+        for repeat in [false, true] {
+            let name = if repeat { "every" } else { "after" };
+            let expected = format!("host.{name} 的间隔不能超过 2592000 秒（30 天）");
+            for seconds in [1e20, 1e308, 2592000.001] {
+                let error = if repeat {
+                    host.every_float(seconds, callback.clone())
+                } else {
+                    host.after_float(seconds, callback.clone())
+                }
+                .unwrap_err();
+                match *error {
+                    rhai::EvalAltResult::ErrorRuntime(value, _) => {
+                        assert_eq!(value.into_string().unwrap(), expected);
+                    }
+                    other => panic!("expected a script error, got {other:?}"),
+                }
+            }
+            let error = if repeat {
+                host.every_int(rhai::INT::MAX, callback.clone())
+            } else {
+                host.after_int(rhai::INT::MAX, callback.clone())
+            }
+            .unwrap_err();
+            match *error {
+                rhai::EvalAltResult::ErrorRuntime(value, _) => {
+                    assert_eq!(value.into_string().unwrap(), expected);
+                }
+                other => panic!("expected a script error, got {other:?}"),
+            }
+        }
+        assert_eq!(
+            host.inner.timers.load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        assert_eq!(host.inner.disposers.lock().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn timers_accept_minimum_fractional_and_maximum_intervals() {
+        let mut host = timer_host();
+        let callback = FnPtr::new("unused").unwrap();
+        for seconds in [5.0, 5.25, 2592000.0] {
+            host.every_float(seconds, callback.clone()).unwrap();
+        }
+        for seconds in [1.0, 1.25, 2592000.0] {
+            host.after_float(seconds, callback.clone()).unwrap();
+        }
+        assert_eq!(
+            host.inner.timers.load(std::sync::atomic::Ordering::Relaxed),
+            6
+        );
+        assert_eq!(host.inner.disposers.lock().unwrap().len(), 0);
+        host.inner.ctx.fiber().dispose().await.unwrap();
+    }
+
     #[test]
     fn omitted_parameters_are_empty_object_schema() {
         let spec = map_of("#{ name: \"x\" }");
@@ -1555,7 +2369,7 @@ mod tests {
     #[test]
     fn build_rhai_limited_honors_inline_ceiling() {
         let oversized = "x".repeat(MAX_INLINE_SOURCE + 1);
-        match build_rhai_limited("t", &oversized, MAX_INLINE_SOURCE, None, false) {
+        match build_rhai_limited("t", &oversized, MAX_INLINE_SOURCE, RunScope::default()) {
             Err(err) => assert!(err.contains("128KiB"), "{err}"),
             Ok(_) => panic!("expected oversized inline source to fail"),
         }
@@ -1564,28 +2378,38 @@ mod tests {
     const FLOW_HOOK_SOURCE: &str =
         r#"#{ inject: [], apply: |host| { host.on("tools/pre-execute", |c| { () }); } }"#;
 
-    /// 五个流程钩子只给**磁盘来源**的包：会话里 define 的包挂上去要报错 ——
-    /// 否则模型能给自己开闸门（拦自己的工具调用）、能改自己的系统提示。
+    /// 五个流程钩子只给**从插件目录装载**的包：程序侧 define 的会话包挂上去要报错。
     #[tokio::test]
     async fn flow_hooks_are_refused_for_a_session_package() {
         let ctx = Context::new();
-        let plugin = build_rhai_limited("t", FLOW_HOOK_SOURCE, MAX_INLINE_SOURCE, None, false)
-            .expect("source compiles");
+        let plugin = build_rhai_limited(
+            "t",
+            FLOW_HOOK_SOURCE,
+            MAX_INLINE_SOURCE,
+            RunScope::default(),
+        )
+        .expect("source compiles");
         let err = ctx
             .plugin(plugin, ())
             .unwrap()
             .wait()
             .await
             .expect_err("会话包不该挂上流程钩子");
-        assert!(err.to_string().contains("disk plugins"), "{err}");
+        assert!(err.to_string().contains("plugins directory"), "{err}");
     }
 
-    /// 磁盘来源的包（插件目录装上 / 设置启用 / promote 落盘）挂得上。
+    /// 从插件目录装载的包挂得上，而且账本上记着这个钩子。
     #[tokio::test]
     async fn flow_hooks_are_open_for_a_disk_package() {
         let ctx = Context::new();
-        let plugin = build_rhai_limited("t", FLOW_HOOK_SOURCE, MAX_INLINE_SOURCE, None, true)
+        let scope = RunScope {
+            disk_backed: true,
+            ..RunScope::default()
+        };
+        let surface = scope.surface.clone();
+        let plugin = build_rhai_limited("t", FLOW_HOOK_SOURCE, MAX_INLINE_SOURCE, scope)
             .expect("source compiles");
         ctx.plugin(plugin, ()).unwrap().wait().await.unwrap();
+        assert_eq!(surface.lock().unwrap().hooks, vec!["tools/pre-execute"]);
     }
 }

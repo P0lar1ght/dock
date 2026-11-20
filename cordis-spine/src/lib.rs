@@ -67,6 +67,7 @@ pub use error::{Error, Result};
 pub use host::gateway_port::{
     CompanionStatus, GatewayPort, GatewayRef, PairingBinding, PairingError, PairingPrompt,
 };
+pub use host::hooks_bridge::{describe as describe_hooks, hooks_bridge, hooks_command};
 pub use host::mcp_app_context::{
     mcp_app_context, page_key, record_app_context, AppContextUpdate, McpAppContext,
 };
@@ -90,6 +91,9 @@ pub use host::tabs::{
 };
 pub use host::tool_views::{effective_call, tool_views, ToolViewFn, ToolViewInput, ToolViews};
 pub use host::tui_slots::{tui_slots, SlotAction, SlotHandler, SlotInfo, SlotKeyResult, TuiSlots};
+pub use host::turn_cards::{
+    turn_cards, CardHandler, CardSpec, CardView, TurnCards, TurnCardsChanged,
+};
 pub use host::turn_changes::{
     turn_changes, unified_diff, FileChange, RevertOutcome, Snapshot, TurnChanges,
     TurnChangesChanged, TurnSummary,
@@ -105,15 +109,16 @@ pub use llm::sampler::{llm, Llm, LlmConfig, LlmMode, Sampler};
 pub use names::{
     AGENTS, AGENT_LOOP, AGENT_PRESETS, ASK, ASK_EVENT, AUTH, AUTH_CHANGED, BROWSER, COMPACT,
     COMPUTER, CONTEXT, CRON, DYNAMIC_CORDIS_RUNNER, GATEWAY, GATEWAY_PAIRING, GOAL, JOBS,
-    JOB_FINISHED, JOB_REPORTED, LLM, LLM_STREAM, LSP, MCP, MCP_APP_CONTEXT_STORE, MCP_APP_VIEWS,
-    MCP_APP_VIEW_CALL, MCP_ELICIT_EVENT, MEMORY, PERMISSIONS, PERMISSION_EVENT, PLAN_EVENT,
-    PLAN_MODE, PLUGIN_SETTINGS, PLUGIN_SETTINGS_CHANGED, PRE_STEP, PROMPT_ASSEMBLE, RHAI_BAGS,
-    ROSTER, SCHEDULE_CHANGED, SESSION, SESSIONS, SESSION_CHILD_EVENT, SESSION_COMPACTION,
-    SESSION_EVENT, SESSION_PAGE_EVENT, SESSION_PORT, SESSION_RESET, SESSION_TOOL_INPUT,
-    SESSION_TURN_END, SETTINGS, SKILLS, SLASH, STATUS_CHANGED, STATUS_ITEMS, STEP_START, SUBAGENTS,
-    SUBAGENT_CHANGED, SYSTEM_PROMPT, TABS, TABS_PAGE_OPENED, TODOS, TOOLS, TOOLS_EXECUTE,
-    TOOLS_PRE_EXECUTE, TOOL_VIEWS, TOOL_VIEWS_CHANGED, TUI_SLOTS, TUI_SLOTS_CHANGED, TURN,
-    TURN_CHANGES, TURN_CHANGES_CHANGED, TURN_END, USER_EDITS, WORKFLOWS, WORKFLOW_CHANGED,
+    JOB_FINISHED, JOB_REPORTED, LLM, LLM_FINISHED, LLM_STREAM, LSP, MCP, MCP_APP_CONTEXT_STORE,
+    MCP_APP_VIEWS, MCP_APP_VIEW_CALL, MCP_ELICIT_EVENT, MEMORY, PERMISSIONS, PERMISSION_EVENT,
+    PLAN_EVENT, PLAN_MODE, PLUGIN_SETTINGS, PLUGIN_SETTINGS_CHANGED, PRE_STEP, PROMPT_ASSEMBLE,
+    RHAI_BAGS, ROSTER, SCHEDULE_CHANGED, SESSION, SESSIONS, SESSION_CHILD_EVENT,
+    SESSION_COMPACTION, SESSION_EVENT, SESSION_PAGE_EVENT, SESSION_PORT, SESSION_RESET,
+    SESSION_TOOL_INPUT, SESSION_TURN_END, SETTINGS, SKILLS, SLASH, STATUS_CHANGED, STATUS_ITEMS,
+    STEP_START, SUBAGENTS, SUBAGENT_CHANGED, SYSTEM_PROMPT, TABS, TABS_PAGE_OPENED, TODOS, TOOLS,
+    TOOLS_EXECUTE, TOOLS_PRE_EXECUTE, TOOL_VIEWS, TOOL_VIEWS_CHANGED, TUI_SLOTS, TUI_SLOTS_CHANGED,
+    TURN, TURN_CARDS, TURN_CARDS_CHANGED, TURN_CHANGES, TURN_CHANGES_CHANGED, TURN_END, USER_EDITS,
+    WORKFLOWS, WORKFLOW_CHANGED,
 };
 pub use prompt::assemble::{system_prompt, PromptAssembly, PromptPart, SystemPrompt};
 pub use prompt::context_book::{context, own_sections, ContextBook};
@@ -133,8 +138,8 @@ pub use session::compaction::{
 };
 pub use session::cwd::{change_dir, current_cwd, session_cwd, ChangedDir};
 pub use session::log::{
-    sessions, ArchivedSession, ChildLogEvent, PageLogEvent, PageToolInput, PageTurnEnd, Sampling,
-    Sessions, Steer, TokenUsage, TurnEndStatus, ROOT_IDENTITY,
+    sessions, ArchivedSession, ChildLogEvent, LlmFinished, PageLogEvent, PageToolInput,
+    PageTurnEnd, Sampling, Sessions, Steer, TokenUsage, TurnEndStatus, ROOT_IDENTITY,
 };
 pub use session::persist::{
     count_subagents, first_user_title, load_subagent, load_subagents, sessions_cwd_dir,
@@ -157,10 +162,11 @@ pub use tools::cron::{
     RECURRING_TASK_TTL_DAYS, SCHEDULES_FILE,
 };
 pub use tools::dynamic_runner::{
-    builtins_lines, delete_secret, dynamic_runner, persist_root, plugin_roots, project_root,
-    secret_names, set_secret, DiskPluginView, DynEcho, DynNote, DynamicRunner, PersistScope,
-    PluginOrigin, PluginReference, PromoteReceipt, RhaiBag, RhaiBags, RunMode, SessionPluginView,
-    DYN_ECHO, DYN_ECHO_TOOL, DYN_NOTE, RHAI_FACTORY,
+    builtins_lines, delete_secret, dynamic_runner, find_disk, persist_root, plugin_roots,
+    project_root, secret_names, set_secret, DisableReceipt, DiskPluginView, DiskSpec, DynEcho,
+    DynNote, DynamicRunner, PersistScope, PluginOrigin, PluginReference, PluginSel, ReloadReceipt,
+    ReloadStatus, RhaiBag, RhaiBags, RunMode, SourceInput, Surface, DYN_ECHO, DYN_ECHO_TOOL,
+    DYN_NOTE, RHAI_FACTORY,
 };
 pub use tools::goal::{
     goal_command, goal_composer_fill, goal_continuation_directive, goal_instruction,

@@ -2340,7 +2340,7 @@ mod tests {
         // 浏览器走内置 MCP（`mcp_browser__*`，经 use_tool，不看允许名单）；名单里不再列 browser_*。
         assert!(!presets.allows("browser_open"));
         assert!(!presets.allows("report"));
-        assert!(!presets.allows("cordis_define"));
+        assert!(!presets.allows("cordis_plugin"));
         assert!(!presets.allows("scheduler_create"));
 
         presets.apply(MINIMAL_PRESET_ID).unwrap();
@@ -2349,7 +2349,7 @@ mod tests {
         assert!(!presets.allows("search_tool"));
         assert!(!presets.allows("use_tool"));
         assert!(!presets.allows("browser_open"));
-        assert!(!presets.allows("cordis_run"));
+        assert!(!presets.allows("cordis_plugin"));
 
         presets.apply(CORDIS_PRESET_ID).unwrap();
         assert!(presets.allows("cordis_inspect"));
@@ -2357,8 +2357,7 @@ mod tests {
         assert!(presets.allows("search_tool"));
         assert!(presets.allows("use_tool"));
         assert!(!presets.allows("browser_open"));
-        assert!(presets.allows("cordis_run"));
-        assert!(presets.allows("cordis_promote"));
+        assert!(presets.allows("cordis_plugin"));
         assert!(!presets.allows("scheduler_create"));
 
         presets.apply(WARDEN_PRESET_ID).unwrap();
@@ -2375,7 +2374,7 @@ mod tests {
         assert_eq!(presets.role_label("观").as_deref(), Some("观"));
         assert!(presets.subagent("jia").is_none());
         assert!(!presets.allows("write_file"));
-        assert!(!presets.allows("cordis_run"));
+        assert!(!presets.allows("cordis_plugin"));
     }
 
     /// `report` 并进了 `send_message`。用户自己写的角色 YAML 里还列着旧名时，
@@ -2682,7 +2681,7 @@ mod tests {
         assert!(got.tools.is_none());
         presets.apply("wide").unwrap();
         assert!(presets.allows("scheduler_create"));
-        assert!(presets.allows("cordis_define"));
+        assert!(presets.allows("cordis_plugin"));
     }
 
     #[test]
@@ -3390,7 +3389,7 @@ mod tests {
                 spec("web_search"),
                 spec("bash"),
                 spec("read_file"),
-                spec("cordis_define"),
+                spec("cordis_plugin"),
             ])
             .into_iter()
             .map(|s| s.name)
@@ -3529,11 +3528,14 @@ mod tests {
         assert!(presets.is_on_demand("canvas_create"));
         assert!(!presets.is_on_demand("web_search"));
         assert!(!presets.is_on_demand("search_tool"));
-        // `code` 不准调度 / cordis_*，按需名单也不列；`cordis` 准，列成按需。
+        // `code` 不准调度 / cordis_*，按需名单也不列。`cordis` 是写插件的预设：
+        // 那两颗是主业，常驻；别的低频工具照样按需。
         assert!(!presets.is_on_demand("scheduler_create"));
-        assert!(!presets.is_on_demand("cordis_run"));
+        assert!(!presets.is_on_demand("cordis_plugin"));
         presets.pin(CORDIS_PRESET_ID).unwrap();
-        assert!(presets.is_on_demand("cordis_run"));
+        assert!(!presets.is_on_demand("cordis_plugin"));
+        assert!(!presets.is_on_demand("cordis_inspect"));
+        assert!(presets.is_on_demand("canvas_create"));
         presets.pin(WARDEN_PRESET_ID).unwrap();
         assert!(!presets.is_on_demand("list_agents"));
     }

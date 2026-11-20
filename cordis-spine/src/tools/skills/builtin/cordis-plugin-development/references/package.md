@@ -2,43 +2,30 @@
 
 ## 目录
 
-插件目录名就是稳定的 `pluginId`（`[a-z][a-z0-9-]{1,31}`）：
+插件目录名就是插件 id（`[a-z][a-z0-9-]{1,31}`）：
 
 ```
-.dock/plugins/<id>/plugin.toml    项目级（覆盖同名用户级）
-.dock/plugins/<id>/source.rhai
+.dock/plugins/<id>/source.rhai    项目级（覆盖同名用户级）
+.dock/plugins/<id>/plugin.toml    可选
+.dock/plugins/<id>/panel.html     可选：web 面板（见 ui.md）
 ~/.dock/plugins/<id>/…            用户级，所有项目都加载
 ```
 
-`plugin.toml`：
+`plugin.toml` 每个键都可选；整个文件也可以没有（名字就用目录名）：
 
 ```toml
-name = "便签"
-purpose = "会话里的一张便签"
-factory = "rhai"
-enabled = true      # false = 启动时不自动跑
+name = "便签"                 # 给人看的名字，默认目录名
+purpose = "会话里的一张便签"    # 一句话用途，设置页和 /cordis 显示
+enabled = true                # false = 启动时不装；cordis_plugin reload 会改回 true
+
+[permissions]
+# 这些 host 的 http_request 不再逐次确认（批准加载插件时会列给用户看）。
+# 只写主机名：api.example.com 或 *.example.com（只配子域），不许光一个 *。
+http = ["api.github.com"]
 ```
 
-启动时自动加载，不弹权限确认（工作区信任）。`/cordis` 列出磁盘层和会话层。
-
-## `cordis_define` 字段
-
-- `plugin`：`{ kind: "new", idPrefix }`（3–6 个小写字母，宿主发 `prefix-N`）
-  或 `{ kind: "existing", pluginId }`（给已有插件追加一个 Package）。
-- `name`、`purpose`：给人看的名字和用途。
-- `factory`：自定义行为一律 `"rhai"`。
-- `source_path` **或** `source`，二选一：
-
-| 输入 | 什么时候用 | 上限 | 存法 |
-| --- | --- | --- | --- |
-| `source_path` | 默认 | 1 MiB | 只记路径，`run` / `update` 时重读文件 |
-| `source` | 一两行的小样 | 128 KiB | 存在 Package 里 |
-
-`source_path` 必须落在 `.dock/plugins/<id>/` 或 `~/.dock/plugins/<id>/` 下，
-不能带 `..`。项目根是调用工具的那个会话的工作目录。
-
-`define` 会编译并求值一次顶层（拿到那张 map），**不调 `apply`**、不弹确认、
-不动 `currentPackageId`。语法错不会发 id。
+认不得的键不挡加载，但 reload 回执会提醒（`[permission]` 少个 s 这种错不会被静默吞掉）。
+写好用 `cordis_plugin reload <id>` 装上；`source.rhai` 上限 1 MiB。
 
 ## 脚本外形
 
@@ -56,8 +43,9 @@ enabled = true      # false = 启动时不自动跑
 - `apply` 必须是函数，`run` 时才执行。
 - 顶层可以先写 `fn helper(x) { … }`，再写这张 map。
   顶层 `fn` **不捕获**外面的变量，要用 `host` 就当参数传进去。
-- 顶层不能调 `http_request` / `host.secret` / 编解码函数：define 期的引擎没有它们。
+- 顶层不能调 `http_request` / `host.secret` / 编解码函数：编译检查时的引擎没有它们。
   放进 `apply` 或 `execute` 里。
+- reload 时先编译并求值一次顶层（拿到那张 map），再调 `apply`。
 
 ## `inject` 是启动闸门，不是授权
 
@@ -91,16 +79,19 @@ apply: |host| {
 
 - 闭包按引用共享，改了大家都看得见。
 - `host.provide(name, map)` 只是把一份快照挂出去给别的包读，`host.get` 拿到的是拷贝，写不回去。
-- 状态只活在这次 Run 里；`update` / `stop` / 重启都会清掉。
+- 状态只活在这次运行里；reload / disable / 重启都会清掉。
   要跨重启，写文件或用设置卡（`ui.md`）。
 
 ## 预置工厂
 
-`echo` / `note` / `hold` / `slash` 是固定的 Rust 实现，用来教学和回归，不写业务逻辑：
+`plugin.toml` 里写 `factory = "…"` 可以不用 Rhai，换成固定的 Rust 实现。只有一个
+实用：`slash`——只加一条 `/命令`：
 
-- `echo`：挂 `dynEcho`，注册 `dyn_echo` 工具。
-- `note`：挂一个内存字符串 `dynNote`。
-- `hold`：`inject` 一个没人提供的名字，演示 `pending`。
-- `slash`：加一条 `/命令`；`command` / `kind` / `text` 写在 `cordis_define` 参数里。
+```toml
+factory = "slash"
+command = "standup"
+kind = "prompt"          # prompt | overlay | slot | tool
+text = "写站会：{args}"
+```
 
-拿不准有哪些就 `cordis_inspect what: "factories"`，别编。
+`echo` / `note` / `hold` 只用来教学和回归，不写业务逻辑。其余一律 Rhai（默认）。

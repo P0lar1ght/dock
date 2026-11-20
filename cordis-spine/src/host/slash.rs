@@ -569,10 +569,6 @@ pub fn slash_entry_from_define(v: &Value, purpose: &str) -> Result<SlashEntry, S
     })
 }
 
-pub fn contrib_fields_present(v: &Value) -> bool {
-    v.get("command").is_some() || v.get("kind").is_some() || v.get("text").is_some()
-}
-
 /// 挂 `"slash"` 表，并登记 `/help`（列出表里的全部命令）。
 pub fn slash() -> Plugin {
     plugin("slash", Inject::new(), |ctx, _: &()| {

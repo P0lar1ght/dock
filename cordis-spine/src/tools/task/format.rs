@@ -105,6 +105,9 @@ pub(super) fn format_parent_notice(notice: &super::store::ParentNotice) -> Strin
             text
         }
         ParentNotice::JobDone { text, .. } => text.clone(),
+        ParentNotice::Plugin { plugin, text } => {
+            format!("插件 {plugin} 送来的消息（插件自动发的，不是用户发的消息）：\n{text}")
+        }
         ParentNotice::TurnEnd {
             id,
             subagent_type,

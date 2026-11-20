@@ -301,6 +301,24 @@ pub struct ChildLogEvent {
     pub event: Arc<LogEvent>,
 }
 
+/// [`crate::LLM_FINISHED`] 的载荷：哪一页（或哪个子代理）刚收尾的一次采样——最终的
+/// 输出（`llm/stream` 改写之后的）、上游报的用量和费用。流式 delta 不发这个；一次
+/// 采样只发一次。插件做成本 / 缓存命中统计、复盘每一步，读这一份。
+#[derive(Clone, Debug)]
+pub struct LlmFinished {
+    pub identity: Arc<str>,
+    pub main: bool,
+    pub output: Arc<cordis_base::types::LlmOutput>,
+    /// 发给上游的模型 slug；上游没报用量时为空。
+    pub model: String,
+    /// 上游没报用量时为 `None`。
+    pub usage: Option<CallUsage>,
+    /// 这一轮开始到这次采样收尾的毫秒数。
+    pub elapsed_ms: Option<u64>,
+    /// 上游报的或按单价估的费用（USD ticks，1e10 = 1 美元）。
+    pub cost_usd_ticks: Option<i64>,
+}
+
 impl Sessions {
     pub fn new(ctx: Context) -> Self {
         Self::with_identity(ctx, ROOT_IDENTITY, true)
@@ -1301,7 +1319,7 @@ impl Sessions {
         let mut events = self.events.lock().unwrap();
         let Some(LogEvent::LlmStream(out)) = events.last_mut() else {
             drop(events);
-            self.commit_pending_call();
+            let _ = self.commit_pending_call();
             return;
         };
         // 流式 delta 先写下原文。调用方给出非空文本时以它为准，这样 `llm/stream`
@@ -1346,8 +1364,34 @@ impl Sessions {
         drop(events);
         self.anchor_context();
         self.bump_events_rev();
-        self.commit_pending_call();
+        let call = self.commit_pending_call();
+        let finished = match &event {
+            LogEvent::LlmStream(out) => Some(Arc::new(out.clone())),
+            _ => None,
+        };
         self.emit_session(event);
+        if let Some(output) = finished {
+            let (model, usage, cost_usd_ticks) = match call {
+                Some((model, usage, cost)) => (model, Some(usage), cost),
+                None => (String::new(), None, None),
+            };
+            self.ctx.emit(
+                crate::names::LLM_FINISHED,
+                LlmFinished {
+                    identity: self.identity.clone(),
+                    main: self.is_main(),
+                    output,
+                    model,
+                    usage,
+                    elapsed_ms: self
+                        .turn_started
+                        .lock()
+                        .unwrap()
+                        .map(|t| t.elapsed().as_millis() as u64),
+                    cost_usd_ticks,
+                },
+            );
+        }
         self.persist_live();
     }
 
@@ -1374,10 +1418,9 @@ impl Sessions {
         *self.context_anchor.lock().unwrap()
     }
 
-    fn commit_pending_call(&self) {
-        let Some(pending) = self.pending_call.lock().unwrap().take() else {
-            return;
-        };
+    /// 把这次采样记进账本；返回（模型 slug、用量、费用）给 [`LlmFinished`]。
+    fn commit_pending_call(&self) -> Option<(String, CallUsage, Option<i64>)> {
+        let pending = self.pending_call.lock().unwrap().take()?;
         let model = if pending.model.trim().is_empty() {
             "unknown"
         } else {
@@ -1396,6 +1439,12 @@ impl Sessions {
             .lock()
             .unwrap()
             .record_main_loop_call(model, &pending.usage, duration_ms, cost);
+        let ticks = match cost {
+            cordis_base::usage::CallCost::Reported(t)
+            | cordis_base::usage::CallCost::Estimated(t) => Some(t),
+            _ => None,
+        };
+        Some((model.to_string(), pending.usage, ticks))
     }
 
     pub fn kinds(&self) -> Vec<&'static str> {

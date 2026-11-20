@@ -27,8 +27,7 @@ fn gated_builtin(tool: &str) -> bool {
             | "scheduler_create"
             | "kill_task"
             | "monitor"
-            | "cordis_run"
-            | "cordis_promote"
+            | "cordis_plugin"
     )
 }
 
@@ -77,16 +76,14 @@ mod tests {
         assert!(needs_permission("write_file"));
         assert!(!needs_permission("read_file"));
         assert!(!needs_permission("list_dir"));
-        assert!(needs_permission("cordis_run"));
-        assert!(needs_permission("cordis_promote"));
+        assert!(needs_permission("cordis_plugin"));
         assert!(!needs_permission("cordis_inspect"));
         assert!(needs_permission("mcp_browser__browser_evaluate"));
         assert!(!needs_permission("mcp_browser__browser_snapshot"));
         assert!(!needs_permission("mcp_browser__browser_network_requests"));
         // 进程内的 browser_* 已经没了：同名的裸工具不再自动过门。
         assert!(!needs_permission("browser_evaluate"));
-        assert!(blocked_in_plan("cordis_run"));
-        assert!(blocked_in_plan("cordis_promote"));
+        assert!(blocked_in_plan("cordis_plugin"));
         assert!(!blocked_in_plan("cordis_inspect"));
         assert!(blocked_in_plan("mcp_browser__browser_evaluate"));
         assert!(!blocked_in_plan("mcp_browser__browser_console_messages"));

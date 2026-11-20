@@ -19,7 +19,7 @@ mod control;
 pub mod coordinator;
 mod coordinator_state;
 mod execute;
-mod format;
+pub(crate) mod format;
 mod runner;
 mod store;
 mod tool_error;
@@ -404,6 +404,11 @@ impl Subagents {
     /// `wakes` 才叫醒那一页开一轮。见 [`crate::job_notify`]。
     pub fn notify_job_done(&self, page: &str, job_id: &str, text: String, wakes: bool) {
         self.store.push_job_done(page, job_id, text, wakes);
+    }
+
+    /// 插件送来的话进 `page` 的信箱（`host.followup`）；`wakes` 才叫醒那一页开一轮。
+    pub fn notify_from_plugin(&self, page: &str, plugin: &str, text: String, wakes: bool) {
+        self.store.push_plugin_notice(page, plugin, text, wakes);
     }
 
     /// 撤掉还没送到的 `job_id` 跑完通知：模型已经用 `job` 读到了结果。

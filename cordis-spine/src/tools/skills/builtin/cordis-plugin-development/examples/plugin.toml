@@ -1,5 +1,8 @@
-# .dock/plugins/<id>/plugin.toml —— 目录名就是 pluginId
+# .dock/plugins/<id>/plugin.toml —— 目录名就是插件 id。每个键都可选。
 name = "Demo"
 purpose = "File-backed rhai sample"
-factory = "rhai"
 enabled = true
+
+[permissions]
+# http_request 到这些 host 不再逐次确认。只写主机名；*.x 只配子域。
+http = ["api.example.com"]

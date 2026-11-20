@@ -1,8 +1,7 @@
 // 最小的插件：一颗不带参数的工具。
-// cordis_define { plugin: { kind: "new", idPrefix: "demo" }, name: "Demo",
-//                 purpose: "ping", factory: "rhai",
-//                 source_path: ".dock/plugins/demo/source.rhai" }
-// → cordis_run mode "run" → cordis_call { name: "demo_ping" }
+// 拷到 .dock/plugins/demo/source.rhai
+// → cordis_plugin { action: "reload", id: "demo" }
+// → use_tool { tool_name: "demo_ping", tool_input: {} }
 #{
     inject: ["tools"],
     apply: |host| {

@@ -4,18 +4,13 @@
 
 | 档 | 事件 | 谁能用 |
 | --- | --- | --- |
-| 观察 + 插提醒 | `session/event`、`agent/step-start`、`agent/turn-end` | 任何插件 |
-| 拦流程 | `agent/pre-step`、`system-prompt/assemble`、`tools/pre-execute`、`tools/execute`、`llm/stream` | **只给磁盘来源插件** |
+| 观察 + 插提醒 | `session/event`、`session/entry`、`agent/step-start`、`agent/turn-end` | 任何插件 |
+| 拦流程 | `agent/pre-step`、`system-prompt/assemble`、`tools/pre-execute`、`tools/execute`、`llm/stream` | 从插件目录装载的插件 |
 
-「磁盘来源插件」= 插件目录装上 / 设置里启用 / 审批过的 `cordis_promote` 落盘。
-会话里 `cordis_define` 的包**打不开**后五个：否则模型能给自己开闸门（拦自己后续的
-工具调用）、能改自己的系统提示 —— 那是自我提权。挂了会报一句 `only available to
-disk plugins`。
-
-判据是**这个包是不是从磁盘加载的**，不是它有没有传 `source_path`：会话里 define
-的包也能带 `source_path`（工具说明里还推荐这么写），拿它当判据等于把闸门开着。
-要试这五个钩子，走 `cordis_promote` 落盘 —— 它会立刻从磁盘 autostart，不用重启
-dock；下次启动也会自动加载。
+插件目录里的插件（启动 / 开项目时自动装、设置里启用、`cordis_plugin reload`）都能挂
+后五个；门是「加载这个插件」本身：reload 要用户确认，确认框里列着它挂了哪些钩子。
+程序侧直接 define 的包（测试、内部用）打不开，会报 `only available to plugins loaded
+from a plugins directory`。
 
 ## 通用三事件
 
@@ -41,6 +36,22 @@ host.on("session/event", |line| {
 - 只观察，不是拦截。
 - 回调里不要再写 `Sessions`。
 
+### `session/entry` —— 结构化的会话事件
+
+和 `session/event` 一样异步、按顺序、只观察，但给的是 map，并且带页身份：
+
+| `kind` | 字段 |
+| --- | --- |
+| `user` | `text` |
+| `assistant` | `text`、`tool_calls`（`[#{ name, arguments, args }]`）、`error`、`model`、`usage`（`#{ prompt_tokens, completion_tokens, cached_prompt_tokens, cache_creation_prompt_tokens, reasoning_tokens }` 或 `()`）、`cache_hit`（0–1）、`elapsed_ms`、`cost_usd` |
+| `tool` | `name`、`call_id`、`arguments`、`args`、`content`、`is_error` |
+| `reminder` | `text` |
+| `notice` | `level`、`title`、`body` |
+| `turn-end` | `status`、`error` |
+
+每条都有 `identity`、`main`、`replay`（打开旧会话时回放的那些是 `true`，统计时跳过）。
+`assistant` 一次采样只来一条（采样收尾时），流式中途不发。做成本 / 缓存命中统计、复盘每一步用它。
+
 ### `agent/step-start`
 
 - `step` 从 0 数，turn-end 续跑时继续累加；所以「每回合一次」的状态在 `step == 0` 时重置。
@@ -51,7 +62,7 @@ host.on("session/event", |line| {
 - 用户已经排了下一条消息时，宿主**整个跳过**这个钩子（所以 `queued_followups` 在这里总是 `false`）。
 - 子代理的回合也会调：提醒落在那个子代理自己的记录里。只管主会话就看 `main`。
 
-## 五个流程钩子（磁盘插件）
+## 五个流程钩子
 
 ### `agent/pre-step` —— 拒掉一整轮
 
@@ -86,8 +97,9 @@ host.on("system-prompt/assemble", |p| {
 
 ### `tools/pre-execute` —— 拦一次工具调用
 
-载荷 `#{ called, name, arguments, identity, main }`（`called` 是模型写的名字，
-`name` 是改道后真正要跑的那个）。
+载荷 `#{ called, name, arguments, args, identity, main }`（`called` 是模型写的名字，
+`name` 是改道后真正要跑的那个；`arguments` 是原始 JSON 文本，`args` 是解析好的 map，
+直接 `c.args?.command`）。
 
 ```rhai
 host.on("tools/pre-execute", |c| {
@@ -101,17 +113,20 @@ host.on("tools/pre-execute", |c| {
 | --- | --- |
 | `()` | 没意见 |
 | `#{ deny: "理由" }` | 拒绝这次调用，理由回到模型 |
+| `#{ ask: "理由" }` | 要用户点头才跑：**自动批准、「始终允许」都不算数**，确认框里写着理由；拒了模型看到「权限被拒绝（插件要求确认：理由）」 |
 | `#{ rewrite: #{ name, arguments } }` | 改道到另一颗工具（`arguments` 可以是字符串或 map） |
 
 规矩：
 
 - **拒绝是单调的**：先拒的赢，后来的处理器不能把它翻案。拒绝之后再改道无效。
+  `ask` 也一样：第一个理由生效；任何处理器拒了，`ask` 就作废。
 - 改道之后按**新名字**重过允许名单、计划门、权限门 —— 改道不能绕过门。
 - 拒绝发生在权限门**之前**：脚本不让跑的东西，模型连问都不会问用户。
 
 ### `tools/execute` —— 事后改结果
 
-载荷 `#{ name, call_id, content, is_error }`。
+载荷 `#{ name, call_id, arguments, args, content, is_error, identity, main }`：带着**这次调用的参数**，
+判断「刚跑完的是哪条命令 / 改了哪个文件」不用在 pre-execute 里自己记一份。
 
 ```rhai
 host.on("tools/execute", |r| {
@@ -149,7 +164,7 @@ host.on("llm/stream", |o| {
 - 抛错 = 没意见（记日志，回合照常）。返回类型不对（该字符串的返回了 map 等）也当没意见。
 - 链由宿主往下传，脚本吞不掉；脚本也不能自己往会话里写，只能返回文字由循环写入。
 - 内置的优先：`agent/step-start` 上 `tool-todo`（10）、`tool-goal`（20）排在脚本（50）前面。`agent/turn-end` 上 `tool-goal`（20）的续跑先于脚本；`tool-todo` 在回合末只要求「记账」（再采一步、只给 `todo_write`、然后收尾），任何续跑——包括脚本返回的字符串——都排在记账前面，记账在续跑停下后才轮到。
-- 停掉插件（`cordis_stop`）会连监听一起摘掉。
+- reload 换版或 `cordis_plugin disable` 会连监听一起摘掉。
 
 ## 实测踩过的坑
 
@@ -160,9 +175,7 @@ host.on("llm/stream", |o| {
   `sub_string(start, len)`，**Rhai 没有 `slice`**。
 - **钩子作用于所有工具结果**，包括 `cordis_inspect` 这类诊断工具。调试时先按
   `r.name` 缩小范围，否则你自己的诊断输出会被替换掉，看不出问题在哪。
-- **改磁盘源文件后，要重启 _current_ 那个包**：`cordis_inspect what:"permanent"` 看
-  `current` 的包 id，`cordis_run` 用它重启才会重读磁盘文件。传别的包 id 是
-  **回滚**到那个旧版本（promote 时的内存快照），不是重读 —— 很容易以为「改了没用」。
+- **改了源文件要再 reload**：reload 读的是那一刻的快照，之后的改动不会自己生效。
 - **waterfall 链不能被掐断**：宿主插件的监听若不把控制权交给下一环，排在它后面的
   监听者（包括脚本钩子）全都拿不到这次结果 —— 表现同样是「钩子不生效」，而且不
   报错。

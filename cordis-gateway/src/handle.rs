@@ -491,6 +491,7 @@ fn listen_events(inner: &Arc<GatewayInner>) {
     listen_subagents(inner);
     listen_workflows(inner);
     listen_turn_changes(inner);
+    listen_turn_cards(inner);
     // 某一页的实时日志被整份换掉（终端 `/new` / 恢复会话，或网关自己的
     // `thread/start`）：按它现在的会话重建投影，`threadId` 也跟着换。
     let for_reset = inner.clone();
@@ -703,6 +704,35 @@ fn listen_turn_changes(inner: &Arc<GatewayInner>) {
                     let changes =
                         crate::handlers::turn_changes::changes_json(&turn_id, summary.as_ref());
                     t.turn_changes_updated(&turn_id, changes);
+                }
+            });
+        },
+    );
+}
+
+/// 插件卡片的变化推成那一页上的 `turn/cards/updated`；那一页关了就不推。
+fn listen_turn_cards(inner: &Arc<GatewayInner>) {
+    let for_cards = inner.clone();
+    let _ = inner.ctx.on(
+        cordis_spine::TURN_CARDS_CHANGED,
+        move |changed: &cordis_spine::TurnCardsChanged| {
+            let Some(page) = pages(&for_cards)
+                .into_iter()
+                .find(|p| p.identity == *changed.page)
+            else {
+                return;
+            };
+            let Some(service) = for_cards
+                .ctx
+                .get::<cordis_spine::TurnCards>(cordis_spine::TURN_CARDS)
+            else {
+                return;
+            };
+            let cards = service.at(&page.identity, changed.ordinal);
+            with_transcript(&for_cards, &page.identity, Some(page.thread_id()), |t| {
+                if let Some(turn_id) = t.turn_id_at(changed.ordinal) {
+                    let cards = crate::handlers::turn_cards::cards_json(&cards);
+                    t.turn_cards_updated(&turn_id, cards);
                 }
             });
         },

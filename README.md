@@ -63,7 +63,7 @@ Cordis 的设计见论文 [_A Programming Paradigm for Spatiotemporal Composabil
 - 内核不写死任何行为：循环本身也是插件，换采样、换界面、换工具集都不动主干
 - 一张 `"tools"` 表：内置工具、MCP 工具、你写的插件工具走同一张表，模型看到的永远是一份统一名册
 - 七个扩展点：`agent/pre-step`、`agent/step-start`、`agent/turn-end`、`llm/stream`、`tools/pre-execute`、`tools/execute`、`system-prompt/assemble` —— 采样前改写、工具执行前拦截、提示词按段增删
-- 运行时热插：模型可以在对话里用 `cordis_define` / `cordis_run` 现场定义并加载插件，写成 `.dock/plugins` 即永久生效
+- 运行时热插：插件就是 `.dock/plugins/<id>/` 目录，模型写好文件用 `cordis_plugin` 热装、改了再热换；新版跑不起来时上一版照跑
 - 插件能带界面：注册的面板、状态项、工具卡视图在 TUI 和桌面端同时存在
 
 ### 🎛 高度自定义

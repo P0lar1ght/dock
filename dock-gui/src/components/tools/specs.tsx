@@ -526,11 +526,28 @@ const SIMPLE: Record<string, (args: Record<string, unknown>, out: string) => Spe
   }),
   workflow: (a) => ({ icon: Workflow, verb: "Workflow", detail: [str(a.action), str(a.name)].filter(Boolean).join(" "), body: (o, x) => <GenericBody args={x} output={o} /> }),
 };
-// Cordis：define 带 Rhai 源码（按 Rust 高亮，语法够像）；run / stop 回 JSON 状态；inspect 是一段说明文字。
+// Cordis：cordis_plugin 回一段中文回执（第一行是结论）；inspect 是一段说明文字。
+// define / run / call / stop / promote / undefine 已经退役，规格留着给历史会话里的旧调用渲染。
+SIMPLE.cordis_plugin = (a, out) => {
+  const failed = /没跑起来|^错误/.test(out);
+  const disabled = /^已停用/.test(out);
+  return {
+    icon: Puzzle,
+    verb: str(a.action) === "disable" ? "Disable" : "Reload",
+    detail: str(a.id) || firstString(a),
+    note: out ? <Badge tone={failed ? "red" : disabled ? "gray" : "green"}>{failed ? "失败" : disabled ? "已停用" : "运行中"}</Badge> : undefined,
+    body: (o) => <Plain lines={o.split("\n")} />,
+  };
+};
 for (const name of ["cordis_call", "cordis_promote", "cordis_stop", "cordis_undefine"]) {
   SIMPLE[name] = (a) => ({ icon: Puzzle, verb: titleCase(name.replace("cordis_", "")), detail: str(a.pluginId) || str(a.name) || firstString(a), body: (o, x) => <GenericBody args={x} output={o} /> });
 }
-SIMPLE.cordis_inspect = (a) => ({ icon: Puzzle, verb: "Inspect", detail: str(a.path) || str(a.pluginId) || "插件树", body: (o) => <Plain lines={o.split("\n")} tone="ink" /> });
+SIMPLE.cordis_inspect = (a) => ({
+  icon: Puzzle,
+  verb: "Inspect",
+  detail: str(a.plugin) || str(a.what) || str(a.pluginId) || str(a.path) || "插件",
+  body: (o) => <Plain lines={o.split("\n")} tone="ink" />,
+});
 SIMPLE.cordis_define = (a, out) => ({
   icon: Puzzle,
   verb: "Define",

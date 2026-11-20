@@ -1,9 +1,13 @@
 //! Process-local dynamic Plugin registry and identity mints.
 //! Copied contract from DSH `cordis-host-runner/registry.ts`: define never
 //! mounts; packages are immutable; ids are `{prefix}-{n}` / `pkg-{n}` / `run-{n}`.
+//!
+//! 磁盘插件的每次 reload 都是一个新 Package：源码在那一刻拍成快照存进来，之后
+//! 改文件不影响它——回滚到上一版才真的是上一版。
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use cordis::{Fiber, FiberState};
 use indexmap::IndexMap;
@@ -53,7 +57,7 @@ impl RunMode {
             "run" => Ok(Self::Run),
             "update" => Ok(Self::Update),
             other => Err(format!(
-                "cordis_run mode must be \"run\" or \"update\", got {other:?}"
+                "run mode must be \"run\" or \"update\", got {other:?}"
             )),
         }
     }
@@ -76,11 +80,46 @@ pub struct Package {
     pub inject: Vec<String>,
     pub tools: Vec<String>,
     pub contrib: Option<SlashEntry>,
-    /// Inline Rhai source (≤128KiB). Mutually exclusive with [`Self::source_path`].
+    /// Rhai 源码。磁盘插件是 reload 那一刻读到的快照（≤1MiB），程序侧 define
+    /// 的是传进来的原文（≤128KiB）。
     pub source: Option<String>,
-    /// Canonical path under a plugin root; re-read on run/update (≤1MiB).
-    pub source_path: Option<PathBuf>,
+    /// 磁盘插件的目录：`register_slot` 的 `web` 文件只能在这里面，inspect 也报它。
+    pub dir: Option<PathBuf>,
+    /// `plugin.toml` 的 `[permissions] http`：这些 host 的请求不再逐次确认
+    /// （批准加载插件时已经列给用户看过）。
+    pub http_allow: Vec<String>,
 }
+
+/// 一次运行实际登记了什么。Rhai `host.*` 每登记一样就记一笔，reload 回执和
+/// `cordis_inspect` 都从这里读——模型不用猜「刚才那版到底挂上了哪些工具」。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Surface {
+    pub tools: Vec<String>,
+    pub slash: Vec<String>,
+    pub slots: Vec<String>,
+    pub hooks: Vec<String>,
+    pub provides: Vec<String>,
+    pub settings: bool,
+}
+
+impl Surface {
+    pub fn is_empty(&self) -> bool {
+        self.tools.is_empty()
+            && self.slash.is_empty()
+            && self.slots.is_empty()
+            && self.hooks.is_empty()
+            && self.provides.is_empty()
+            && !self.settings
+    }
+
+    pub(crate) fn push(list: &mut Vec<String>, name: &str) {
+        if !list.iter().any(|n| n == name) {
+            list.push(name.to_string());
+        }
+    }
+}
+
+pub type SurfaceCell = Arc<Mutex<Surface>>;
 
 #[derive(Clone, Debug)]
 pub struct Run {
@@ -89,6 +128,7 @@ pub struct Run {
     pub fiber: Option<Fiber>,
     pub inject: Vec<String>,
     pub provides: Vec<String>,
+    pub surface: SurfaceCell,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -128,7 +168,7 @@ impl PersistScope {
             "" | "project" => Ok(Self::Project),
             "user" => Ok(Self::User),
             other => Err(format!(
-                "cordis_promote scope must be \"project\" or \"user\", got {other:?}"
+                "scope must be \"project\" or \"user\", got {other:?}"
             )),
         }
     }
@@ -158,6 +198,9 @@ pub struct PluginRec {
     pub next_package_id: Option<String>,
     pub run: Option<Run>,
     pub latest: Option<Attempt>,
+    /// 最近一次 reload 失败的原因（成功一次就清掉）。失败后自动回到上一版时，
+    /// `latest` 记的是回滚那次成功的启动，原因只能留在这里。
+    pub reload_error: Option<String>,
 }
 
 pub struct Registry {
@@ -285,7 +328,8 @@ pub fn package_from_factory(
         tools: info.tools.iter().map(|s| s.to_string()).collect(),
         contrib,
         source: None,
-        source_path: None,
+        dir: None,
+        http_allow: Vec::new(),
     }
 }
 
@@ -294,8 +338,9 @@ pub fn package_from_rhai(
     name: String,
     purpose: String,
     inject: Vec<String>,
-    source: Option<String>,
-    source_path: Option<PathBuf>,
+    source: String,
+    dir: Option<PathBuf>,
+    http_allow: Vec<String>,
 ) -> Package {
     Package {
         package_id,
@@ -306,8 +351,9 @@ pub fn package_from_rhai(
         inject,
         tools: Vec::new(),
         contrib: None,
-        source,
-        source_path,
+        source: Some(source),
+        dir,
+        http_allow,
     }
 }
 

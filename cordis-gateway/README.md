@@ -162,10 +162,8 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 | `mcp/login { name }` | HTTP 服务器的浏览器 OAuth，等授权完才回 |
 | `cua/status` / `cua/action` | cua-driver 状态机；`install` / `grant` 在后台跑，进度靠轮询 `cua/status` |
 | `browser/status` | 内置浏览器状态 + 有头偏好 |
-| `plugin/list` | 永久插件（用户级 + 每个已知项目，按根分组、按目录认）+ 动态插件（带定义它的会话） |
-| `plugin/enable` / `plugin/delete { path }` | 按插件目录启停 / 删除；目录必须在某个插件根下 |
-| `plugin/promote { id, scope }` | 动态插件写成永久：`user` 或定义它的会话的项目 |
-| `plugin/discard { id }` | 丢掉一个动态插件 |
+| `plugin/list` | 插件目录（用户级 + 每个已知项目，按根分组、按目录认），带运行状态与最近的错误 |
+| `plugin/enable` / `plugin/delete { path }` | 按插件目录启停 / 删除；启用 = 读最新文件重载，失败回到上一版；目录必须在某个插件根下 |
 | `skill/list` | 每层发现的技能，被同名遮住的标 `shadowed` |
 | `secret/list` / `secret/set` / `secret/delete` | `$DOCK_HOME/secrets.json`（0600） |
 | `pairing/list` / `pairing/resolve` / `pairing/revoke` / `pairing/accept` | `dock serve` 没有 TUI：网页配对在 GUI 里批；`accept` 不落盘 |
@@ -794,6 +792,9 @@ bash 里改的不算。轮次用投影里的 `turnId`（和 `item/user_message` 
 | `turn/changes/diff { threadId, turnId }` | 这一轮的统一 diff `{ diff }`（路径相对会话目录） |
 | `turn/changes/revert { threadId, turnId }` | 只认受信连接。撤销这一轮：`{ restored, conflicts: [{ path, reason }], changes }` |
 | 推送 `turn/changes/updated { turnId, changes }` | 这一轮又改了 / 撤销了；只推不记，`seq` 为 0 |
+| `turn/cards/list { threadId }` | 插件挂在各轮回答下面的卡片 `{ turns: [{ turnId, cards }] }`（见 `docs/PLUGIN-VIEWS.md`「回答下面的卡片」） |
+| `turn/cards/action { threadId, cardId, action }` | 只认受信连接。点卡片上的按钮：在那一页上跑插件的回调，`{ toast }` |
+| 推送 `turn/cards/updated { turnId, cards }` | 这一轮的卡片变了（发了、改了、摘了、插件停了）；整轮换掉，只推不记 |
 
 - `Changes`：`turnId`、`files: [{ path, absPath, status, added, removed, skipped? }]`、`added`、`removed`、`reverted`。
   - `status`：`added` / `modified` / `deleted`；`skipped`：没存原文的原因（超过 1MB、不是文本），行数不算、撤销不了；

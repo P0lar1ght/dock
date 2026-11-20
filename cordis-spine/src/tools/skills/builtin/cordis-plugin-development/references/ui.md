@@ -1,7 +1,7 @@
 # 界面：斜杠、面板、视图、工具卡、设置卡、状态栏
 
 每一类都要在 `inject` 里声明对应名字（见 `package.md` 的表）。
-注册的东西都归这次 Run 的 fiber，停包或 `update` 时一起撤掉。
+注册的东西都归这次运行，reload 换版或 `cordis_plugin disable` 时一起撤掉。
 
 ## 斜杠 `host.register_slash` — `inject: "slash"`
 
@@ -97,3 +97,34 @@ host.clear_status("memo-count");
 - `tone`：`default` `muted` `accent` `success` `warning` `danger`。
 - `surface`：点击时打开的面板 id。`tooltip` 可选。
 - `text` 要短，客户端只截断不改写。
+
+## 回答下面的卡片 `host.card` — 不用 `inject`
+
+MCP 做不到的一块：插件能在**任何**一轮下面挂一张卡（回合结束时、定时器里、工具里都行）。
+
+```rhai
+host.on("agent/turn-end", |e| {
+    if !e.main { return (); }
+    host.card(#{
+        id: "tests",                       // 同一轮再发一次同 id = 原地更新
+        title: "改了 Rust 文件，还没跑测试",
+        text: "src/lib.rs",
+        tone: "warning",                   // default / muted / accent / success / warning / danger
+        view: #{ type: "kv", items: [#{ label: "文件", value: 1 }] },   // 可选，视图树同面板
+        actions: [#{ id: "run", label: "跑测试" }],
+        on_action: |action| {
+            host.followup("用户点了「跑测试」");   // 回调在卡片那一页上跑
+            "已经让 agent 去跑了"                  // 回字符串 = 给用户弹个提示
+        }
+    });
+    ()
+});
+host.update_card("tests", #{ title: "测试过了", tone: "success", actions: [] });
+host.remove_card("tests");
+```
+
+- GUI 画在那一轮回答下面；终端在发的时候记一条通知（只给人看，跟着会话落盘）。
+- 卡片只在内存里：页关了、Dock 重启就没了。插件停了 / 换版了卡片留着，按钮失效。
+- 只能挂在主会话页：在钩子、工具里调，或者之前已经有一轮跑过（定时器里用的是最近那一页）。
+- 一页最多 50 张，多了丢最早的。
+

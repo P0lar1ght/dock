@@ -91,6 +91,8 @@ pub const SESSION_EVENT: &str = "session/event";
 /// [`crate::PageLogEvent`]）。`session/event` 不分 realm、载荷也不带身份，任何一页
 /// 说话根上都收得到；要按页区分的监听者（网关的线程投影）订这一条。
 pub const SESSION_PAGE_EVENT: &str = "session/page-event";
+/// 一次采样收尾（最终输出 + 用量 + 费用），载荷 [`crate::LlmFinished`]。主会话和子代理都发。
+pub const LLM_FINISHED: &str = "llm/finished";
 /// 一页的一轮跑完了（成功、出错、被取消都算），载荷 [`crate::PageTurnEnd`]。
 /// 流式事件本身分不出「这一段是不是最后一段」，要知道一轮何时结束的监听者
 /// （网关的 `turn/completed`）订这一条。
@@ -119,6 +121,10 @@ pub const WORKFLOW_CHANGED: &str = "workflow/changed";
 pub const TURN_CHANGES: &str = "turn-changes";
 /// 一页某一轮的文件改动变了（又改了、撤销了），载荷 [`crate::TurnChangesChanged`]。
 pub const TURN_CHANGES_CHANGED: &str = "turn-changes/changed";
+/// 插件挂在一轮回答下面的卡片，见 [`crate::TurnCards`]。
+pub const TURN_CARDS: &str = "turnCards";
+/// 一页某一轮的卡片变了，载荷 [`crate::TurnCardsChanged`]。
+pub const TURN_CARDS_CHANGED: &str = "turn-cards/changed";
 /// 定时任务（`"cron"`）变了：增删改、触发、或读到别的 Dock 进程的改动。载荷 `()`；
 /// 现状在监听里 `Cron::list` 现取。`cordis-app` 的定时任务驱动每秒对一次账再发。
 pub const SCHEDULE_CHANGED: &str = "schedule/changed";

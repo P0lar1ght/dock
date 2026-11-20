@@ -10,6 +10,13 @@
 
 ### 变更
 
+- **写插件改成「插件就是一个目录」，对齐 DSH 的 Plugin Manager**：模型侧只剩两颗工具——只读的 `cordis_inspect` 和管理插件目录的 `cordis_plugin`（`reload` / `disable`）。`cordis_define` / `cordis_run` / `cordis_call` / `cordis_stop` / `cordis_promote` 退役。本机 13 个用过这组工具的会话里，一次修改要 define → run → call 三次调用、来回 8–10 轮；插件 id 跟着分裂（`cyberspace` → `cyber-2`，磁盘上留下项目级和用户级两份）；define 接受的路径 run 又拒绝。DSH 撤掉同一套工具的理由是「生成代码工具在普通已安装组合包之外引入了第二套插件生命周期」。
+  - 流程：用文件工具写 `.dock/plugins/<id>/source.rhai`（`plugin.toml` 可选）→ `cordis_plugin reload <id>` → 用 `use_tool` 调新工具验证。改了文件就再 reload。
+  - reload 把那一刻的文件拍成快照跑起来；**新版跑不起来时自动回到上一版继续跑**，用户手上的工具不会因为改坏一行一起消失。回执列出这一版登记的工具 / 斜杠 / 面板 / 钩子，最后一行告诉模型下一步怎么验证或怎么修。
+  - 确认按插件记：「始终允许」只放行这一个插件，迭代它不用每次点；确认框列出它挂的钩子和声明的 HTTP host。
+  - `plugin.toml` 每个键都可选（没有这个文件也行，名字取目录名），新增 `[permissions] http = ["api.example.com", "*.example.com"]`：声明过的 host 不再逐次确认。认不得的键 reload 时会提醒。
+  - 创造模式里这两颗工具常驻（以前要先 `search_tool` 再 `use_tool`），人设改成「先交付能跑的小版本、用真能力验证」。
+  - 网关去掉 `plugin/promote`、`plugin/discard` 和 `plugin/list` 的 `session` 字段；设置页去掉「动态插件」一栏，已装载的插件多一个「重新加载」按钮。
 - **`/code-review` 精简成「一个审查员 + 一个核实员」，快很多**：以前一次审查起 8–11 个子代理（范围、五个角度的审查员、去重、核实），五个审查员各自把同一份 diff 翻页重读。本机记录里一次 19 个文件、两百来行的 PR 跑了 108 分钟（一个审查员跑了 111 次 `git diff` / `git show`），跑得最久的审查员还交不回结果，那个角度直接没审到。
   - 现在默认「标准」档：一个审查员自己定范围、把改动打一次读一遍、按一份准则（正确性、安全、性能、测试、项目规约）审，再由一个核实员一次核完。「快速」档（`/code-review 快速` 或 `level: "quick"`）只审不核实。
   - 报告多一行档位和「整体判断」（能不能合）；核实员没交回结果时发现照列、标「未核实」，不再整份丢掉。
@@ -47,6 +54,9 @@
 
 ### 修复
 
+- **hooks / 插件定时器遇到超大秒数不再 panic**：hooks 在项目确认前解析 `timeout: 1e20` / `1e308` 时改用可失败的转换，最多 24 小时；正数超限或换算后不足 1 纳秒的命令跳过并记警告。`host.every` / `host.after` 最多 30 天，超限返回脚本错误，不占定时器名额。不改项目 hooks 的信任流程。
+
+- **插件里的确认框弹在发起调用的那一页**：插件脚本里 `host.call_tool`（比如调 `bash`）和 `http_request` 的确认以前取插件所在的根页，桌面 GUI 里那一页没人看，调用一直挂着（实测会话里 `bash git status` 挂了 307 秒、调 FOFA 挂了 95 秒，用户反馈「卡住了，没有弹框」）。现在落在发起调用的会话页上。
 - **只认 session 的 HTTP MCP 服务器连得上、过期了能接上**（如 Yaklang / Yakit 的 MCP）：这类服务器对没带 `Mcp-Session-Id` 的请求回 HTTP 400 + `-32602 Missing session ID`，以前握手把这个错误原样甩出来，一个工具都列不出；现在退回 initialize 拿 session。session 过期（比如 Yakit 重启）它回 `-32602 Invalid session ID` 而不是 404，以前此后每次调用都失败到重连为止；现在同 404 一样重新握手、重发一次。顺带修了一个让重新握手白做的老问题：服务器不给 GET 流时，重新握手拿到的新 session id 会被悄悄丢掉，一直带着作废的那个发请求。
 - **重开会话后「已编辑 N 个文件」卡不再消失**：每轮改动的记录按「这一轮那条用户消息的时刻」认轮次，活会话里是微秒，会话从盘上读回来（Dock 重启、桌面端重新打开）时只到秒，对不上就被当成撤回作废，连同盘上的 `turn_changes/<序号>.json` 一起删掉，之后也撤销不了。现在读回来的会话按秒认；活会话照旧精确比，撤回后同一秒里再发一条也分得开。已经被删掉的记录找不回来。
 - **只回了推理的一步不再当成回复收尾**：模型偶尔会回一个只有思考、正文和工具调用都空的采样（比如把工具调用写进了推理通道）。以前它被当成「答完了」：todo 清单还开着就插一步记账，模型记完账这一轮就结束，聊天框里什么都没有，用户只能自己发一句「继续」。现在只有正文非空的回复才算收尾。只有推理的一步会先落一条提醒说明上一步什么都没交出来，再重采；连着 3 次都这样就按失败收尾并写明原因（滚动区标「已停下」，不标「请求失败」）。
@@ -68,6 +78,19 @@
 
 ### 新增
 
+- **插件能改 agent 本身的行为了——MCP 做不到的那一面**：MCP 要等模型来调，插件包在模型外面，每一次调用、每一轮都会经过它。这次把插件宿主补齐，写插件不再只是「加一颗工具」：
+  - `tools/pre-execute` 能返回 `#{ ask: "理由" }`：这次调用要用户点头才跑，**自动批准和「始终允许」都不算数**。适合「`git push` 要我确认」这类规矩。
+  - `tools/execute` 钩子带上了这次调用的参数（`args`），判断「刚跑完的是哪条命令」不用再自己记。
+  - 新钩子 `session/entry`：结构化的会话事件，带页身份；助手那一条来自采样收尾，带最终文本、工具调用、模型、用量、缓存命中率和费用——成本 / 缓存统计插件靠它。
+  - `host.followup(text)`：插件主动找 agent。那一页在跑就在下一步带上，闲着就叫醒它开一轮（一页 5 秒内最多叫醒一次）。配合新的定时器 `host.every` / `host.after`，插件能定时看 CI、看 PR、看监控，出事了叫 agent 来处理。
+  - `host.llm(prompt)`：用这一页的模型问一句（不带工具、不进会话），做复审、分类、摘要。
+  - `host.load` / `host.save`：跨 reload 和重启的小存储（`$DOCK_HOME/plugin-state/`，不写进项目）。
+  - `host.card(...)`：在一轮回答下面挂一张卡片——标题、正文、视图树、按钮，按钮点了在那一页上跑插件的回调。GUI 画在回答下面（新协议 `turn/cards/list` / `action` + 推送 `turn/cards/updated`，能力位 `turnCards`），终端发卡时记一条通知。
+  - 技能 `cordis-plugin-development` 改成以行为插件为主线（「以后每次…」「不许…」「改完必须…」就是在要它，写进记忆只是建议），带三个有测试的例子：`guard.rhai`（项目规约守门）、`done-check.rhai`（改了 `.rs` 没跑测试不许收尾 + 「跑测试」卡片）、`trim-output.rhai`（去 ANSI、超长输出只留头尾）。创造模式人设同步。
+- **Claude Code / Codex 的 hooks 配置直接能用**：新内置插件 `hooks-bridge` 跑 command hook，语义对齐 Claude Code / Codex（以及 DSH 的两个桥接）：`SessionStart`、`UserPromptSubmit`、`PreToolUse`、`PostToolUse`、`Stop` / `SubagentStop`；退出码 2 拦下、stderr 是理由；JSON 回答里的 `permissionDecision`（`deny` / `ask` / `allow`）、`additionalContext`、`decision: block`；多条取最严。matcher 按 Claude 的工具名（`Bash`、`Edit`…）或 Dock 的都认。
+  - `~/.dock/hooks.json` 和项目 `.dock/hooks.json` 一直读；Claude Code（`~/.claude/settings.json`、项目 `.claude/settings{,.local}.json`）和 Codex（`~/.codex/hooks.json`、项目 `.codex/hooks.json`）在用户级 `~/.dock/config.toml` 写 `[hooks] claude_code = true` / `codex = true` 才读——项目配置开不了这两个开关。
+  - **项目里的 hooks 文件第一次跑之前要你点头**（列出要跑的命令；自动批准不算数），按内容指纹记在 `$DOCK_HOME/hooks-trust.json`，文件一改就重新问。克隆来的仓库自带的 hooks 不会悄悄在本机跑。
+  - `allow` 不会绕过 Dock 的权限门；hook 坏了（非 2 的退出码、超时、起不来）只记一句，不拦。新命令 `/hooks` 列出生效的配置。详见 `docs/HOOKS.md`。
 - **MCP App 面板跟着模型实时操作**：模型一开始写带界面工具（MCP Apps）的参数，桌面端右侧面板就打开或切过去，参数边写边交给界面（规范的 `tool-input-partial`），不用等参数写完。
   - 内置白板边写边画半透明草稿，「Agent」光标停在正在画的地方、镜头跟着走；改 / 删 / 排版类先高亮要动的图形；结果到了同一帧换成真的。
   - 要上游把工具参数逐段流过来才看得到（如 `deepseek-flash`）；把参数攒成一整块才发的端点退回原来的效果。

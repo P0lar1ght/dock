@@ -418,6 +418,7 @@ pub struct PreExecute {
     name: String,
     arguments: String,
     denied: Option<String>,
+    asked: Option<String>,
 }
 
 impl PreExecute {
@@ -433,6 +434,7 @@ impl PreExecute {
             name,
             arguments: arguments.into(),
             denied: None,
+            asked: None,
         }
     }
 
@@ -482,6 +484,25 @@ impl PreExecute {
     /// The refusal reason, if any handler denied the call.
     pub fn denial(&self) -> Option<&str> {
         self.denied.as_deref()
+    }
+
+    /// Require the user's explicit go-ahead before this call runs — even under
+    /// auto-approve and "always allow". `reason` is shown in the prompt.
+    ///
+    /// Same monotonic rule as [`Self::deny`]: the first reason stands, and a
+    /// denial (from any handler, before or after) wins over an ask.
+    pub fn ask(&mut self, reason: impl Into<String>) {
+        if self.asked.is_none() {
+            self.asked = Some(reason.into());
+        }
+    }
+
+    /// Why a handler wants the user asked, unless the call is denied outright.
+    pub fn ask_reason(&self) -> Option<&str> {
+        if self.denied.is_some() {
+            return None;
+        }
+        self.asked.as_deref()
     }
 
     /// True for the user-facing session (root or any tab). Subagents are `child-*`.

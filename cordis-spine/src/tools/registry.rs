@@ -21,6 +21,7 @@ use cordis_base::types::{PreExecute, ToolCall, ToolResult, ToolSpec};
 
 tokio::task_local! {
     static EXEC_CTX: Context;
+    static CALL_ARGUMENTS: String;
 }
 
 /// 这颗工具被本会话的能力档位挡住了吗？
@@ -420,8 +421,10 @@ impl Tools {
 
     pub async fn execute_on(&self, exec: &Context, call: ToolCall) -> ToolResult {
         if self.outside_allowlist(exec, &call.name) {
+            let arguments = call.arguments.clone();
             return finish(
                 exec,
+                &arguments,
                 ToolResult {
                     call_id: call.id,
                     name: call.name,
@@ -448,9 +451,12 @@ impl Tools {
         // `ToolResult.name` 一律报**实际（将要）跑的那颗**，改道后就是新名字。回喂
         // 模型的 tool 消息只带 `tool_call_id`（见 `llm/http`），名字是给 UI 和日志
         // 看的——那里要看见的正是「真跑的是什么」。
+        // 之后每个出口都按「实际要跑的」参数交给 `tools/execute`（改道 / 改参之后的）。
+        let hook_args = pre.arguments().to_string();
         if let Some(reason) = pre.denial() {
             return finish(
                 exec,
+                &hook_args,
                 ToolResult {
                     call_id: call.id,
                     name: pre.name().to_string(),
@@ -463,6 +469,7 @@ impl Tools {
         if pre.redirected() && self.outside_allowlist(exec, pre.name()) {
             return finish(
                 exec,
+                &hook_args,
                 ToolResult {
                     call_id: call.id,
                     name: pre.name().to_string(),
@@ -472,6 +479,41 @@ impl Tools {
                 },
             );
         }
+        // 插件要人点头（`tools/pre-execute` 返回 ask）：自动批准、「始终允许」都不算数，
+        // 和只读场景里的 bash 一样走严格确认。问过了就不再走下面的普通权限门——同一次
+        // 调用不问两遍；计划门照查。没有权限服务（没人能点头）就当拒绝。
+        let plugin_cleared = match pre.ask_reason() {
+            None => false,
+            Some(reason) => {
+                let approved = match exec.get::<Permissions>(PERMISSIONS) {
+                    Some(perms) => {
+                        let (key, summary) = permission_request(exec, pre.name(), pre.arguments());
+                        let summary = format!("插件要求确认：{reason}\n{summary}");
+                        perms
+                            .request_strict(&key, &summary, subagent_of(exec))
+                            .await
+                    }
+                    None => false,
+                };
+                if !approved {
+                    return finish(
+                        exec,
+                        &hook_args,
+                        ToolResult {
+                            call_id: call.id,
+                            name: pre.name().to_string(),
+                            content: format!(
+                                "{}（插件要求确认：{reason}）",
+                                cordis_base::types::PERMISSION_DENIED_TOOL_RESULT
+                            ),
+                            is_error: true,
+                            ..Default::default()
+                        },
+                    );
+                }
+                true
+            }
+        };
         // `call_id` 不动：模型按它配对 tool_call 与结果，改了这一轮就对不上。
         let call = ToolCall {
             id: call.id,
@@ -485,7 +527,8 @@ impl Tools {
             let bash_cleared =
                 if call.name == "bash" && crate::tools::read_only::in_read_only_scene(exec) {
                     let command = crate::tools::read_only::bash_command(&call.arguments);
-                    let approved = cordis_base::read_only_shell::is_read_only_command(&command)
+                    let approved = plugin_cleared
+                        || cordis_base::read_only_shell::is_read_only_command(&command)
                         || match exec.get::<Permissions>(PERMISSIONS) {
                             Some(perms) => {
                                 let summary = permission_summary(&call.name, &call.arguments);
@@ -498,6 +541,7 @@ impl Tools {
                     if !approved {
                         return finish(
                             exec,
+                            &hook_args,
                             ToolResult {
                                 call_id: call.id,
                                 name: call.name,
@@ -525,6 +569,7 @@ impl Tools {
                     if !plan_file_edit {
                         return finish(
                             exec,
+                            &hook_args,
                             ToolResult {
                                 call_id: call.id,
                                 name: call.name,
@@ -544,15 +589,17 @@ impl Tools {
                         &plan_expected,
                     )
             });
-            if acp::needs_permission(&call.name) && !plan_file_edit && !bash_cleared {
+            if acp::needs_permission(&call.name)
+                && !plan_file_edit
+                && !bash_cleared
+                && !plugin_cleared
+            {
                 if let Some(perms) = exec.get::<Permissions>(PERMISSIONS) {
-                    let summary = permission_summary(&call.name, &call.arguments);
-                    if !perms
-                        .request_from(&call.name, &summary, subagent_of(exec))
-                        .await
-                    {
+                    let (key, summary) = permission_request(exec, &call.name, &call.arguments);
+                    if !perms.request_from(&key, &summary, subagent_of(exec)).await {
                         return finish(
                             exec,
+                            &hook_args,
                             ToolResult {
                                 call_id: call.id,
                                 name: call.name,
@@ -579,7 +626,7 @@ impl Tools {
             return EXEC_CTX
                 .scope(exec.clone(), async move {
                     let result = body(call).await;
-                    finish(&exec, result)
+                    finish(&exec, &hook_args, result)
                 })
                 .await;
         }
@@ -594,7 +641,7 @@ impl Tools {
         } else {
             self.dispatch_local(exec, call).await
         };
-        finish(exec, result)
+        finish(exec, &hook_args, result)
     }
 
     async fn dispatch_local(&self, exec: &Context, call: ToolCall) -> ToolResult {
@@ -632,11 +679,22 @@ impl Tools {
 
 /// 所有结果的出口。工具没表态失败时按 [`tool_output_looks_failed`] 补一次（唯一
 /// 的兜底点，客户端不再各自猜）；放在 `tools/execute` 之前，插件看得到这个标记。
-fn finish(ctx: &Context, mut result: ToolResult) -> ToolResult {
+///
+/// `tools/execute` 的载荷是 [`ToolResult`]（wire 类型，不带参数）。这次调用的参数
+/// 经 [`call_arguments`] 交给同步跑的监听器——插件要判断「刚跑完的是哪条命令」
+/// 就靠它，不必在 `tools/pre-execute` 里自己记一份再按名字对。
+fn finish(ctx: &Context, arguments: &str, mut result: ToolResult) -> ToolResult {
     if !result.is_error {
         result.is_error = cordis_base::types::tool_output_looks_failed(&result.content);
     }
-    ctx.waterfall(TOOLS_EXECUTE, result.clone(), move || result)
+    CALL_ARGUMENTS.sync_scope(arguments.to_string(), || {
+        ctx.waterfall(TOOLS_EXECUTE, result.clone(), move || result)
+    })
+}
+
+/// 正在跑 `tools/execute` 的这次调用的参数（JSON 文本）；不在那条链里是 `None`。
+pub(crate) fn call_arguments() -> Option<String> {
+    CALL_ARGUMENTS.try_with(|a| a.clone()).ok()
 }
 
 /// Human-readable permission prompt body.
@@ -649,6 +707,16 @@ fn subagent_of(exec: &Context) -> Option<String> {
     exec.get::<crate::session::log::Sessions>(SESSIONS)
         .filter(|s| !s.is_main())
         .map(|s| s.identity().to_string())
+}
+
+/// 权限请求的键（「始终允许 / 始终拒绝」按它记）和给用户看的摘要。大多数工具
+/// 按工具名记；`cordis_plugin` 按插件记——迭代同一个插件不用每次点，换一个插件
+/// 还会再问，摘要里列着它挂的钩子和声明的 HTTP host。
+fn permission_request(exec: &Context, name: &str, arguments: &str) -> (String, String) {
+    if name == crate::tools::tool_cordis::PLUGIN {
+        return crate::tools::tool_cordis::permission_request(exec, arguments);
+    }
+    (name.to_string(), permission_summary(name, arguments))
 }
 
 fn permission_summary(name: &str, arguments: &str) -> String {

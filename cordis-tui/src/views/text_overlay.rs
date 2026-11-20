@@ -653,7 +653,7 @@ mod tests {
     fn intro_sentences_are_not_sections() {
         assert_eq!(
             classify(
-                "会话插件只在当前进程：cordis_define → cordis_run。写成永久：cordis_promote。",
+                "启动时自动装上；改了文件让 agent 用 cordis_plugin reload 重载，停用写 enabled = false。",
                 true
             ),
             Kind::Body
@@ -707,11 +707,11 @@ mod tests {
         assert!(has_fg(&line, "[project]", t.gray_bright), "{line:?}");
         assert!(has_fg(&line, "(运行中)", t.accent_success), "{line:?}");
         let body = style_line(
-            "写成永久：cordis_promote。目录 .dock/plugins/<id>/",
+            "改了文件用 cordis_plugin 重载。目录 .dock/plugins/<id>/",
             Kind::Body,
             &t,
         );
-        assert!(has_fg(&body, "cordis_promote", t.command), "{body:?}");
+        assert!(has_fg(&body, "cordis_plugin", t.command), "{body:?}");
         assert!(has_fg(&body, ".dock/plugins/<id>/", t.path), "{body:?}");
     }
 

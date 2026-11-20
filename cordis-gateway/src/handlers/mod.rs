@@ -22,6 +22,7 @@ pub mod surface;
 pub mod thread;
 pub mod tool_view;
 pub mod turn;
+pub mod turn_cards;
 pub mod turn_changes;
 pub mod vcs;
 pub mod workflow;

@@ -1,5 +1,7 @@
-//! Read-only live fiber / service / tool / temporary directory.
+//! Read-only plugin / service / tool / hook directory for `cordis_inspect`.
 //! Intersects named lookups with what is actually mounted. No generated JSDoc catalog.
+
+use std::path::PathBuf;
 
 use cordis::Context;
 
@@ -28,7 +30,8 @@ use crate::tools::browser::Browser;
 use crate::tools::computer::Computer;
 use crate::tools::cron::Cron;
 use crate::tools::dynamic_runner::{
-    builtins_lines, DynamicRunner, PluginOrigin, RhaiBags, SnapshotRow,
+    builtins_lines, find_disk, DiskPluginView, DynamicRunner, PersistScope, RhaiBags,
+    PERSIST_SESSION,
 };
 use crate::tools::goal::Goal;
 use crate::tools::jobs::Jobs;
@@ -46,116 +49,158 @@ pub fn render_inspect(
     ctx: &Context,
     runner: &DynamicRunner,
     tools: &Tools,
-    session_id: &str,
-    what: Option<&str>,
+    roots: &[(PersistScope, PathBuf)],
+    what: &str,
 ) -> String {
-    let mut sections = Vec::new();
-    let all = what.is_none();
-    if all || what == Some("services") {
-        sections.push(section("services", describe_services(ctx, runner)));
+    match what {
+        "plugins" => section("plugins", describe_plugins(runner, roots)),
+        "services" => section("services", describe_services(ctx, runner)),
+        "tools" => section("tools", describe_tools(tools)),
+        "builtins" => section("builtins", builtins_lines()),
+        "events" => section("events", describe_events()),
+        "slots" => section("slots", describe_slots(ctx)),
+        other => format!(
+            "错误：不认得 what {other:?}；可选 plugins、services、tools、builtins、events、slots"
+        ),
     }
-    if all || what == Some("fibers") {
-        sections.push(section("fibers", describe_fibers(runner, session_id)));
-    }
-    if all || what == Some("tools") {
-        sections.push(section("tools", describe_tools(tools)));
-    }
-    if all || what == Some("temporary") {
-        sections.push(section("temporary", describe_temporary(runner, session_id)));
-    }
-    if all || what == Some("permanent") {
-        sections.push(section("permanent", describe_permanent(runner)));
-    }
-    if all || what == Some("factories") {
-        sections.push(section("factories", describe_factories(runner)));
-    }
-    if all || what == Some("builtins") {
-        sections.push(section("builtins", builtins_lines()));
-    }
-    if all || what == Some("events") {
-        sections.push(section("events", describe_events()));
-    }
-    if all || what == Some("slots") {
-        sections.push(section("slots", describe_slots(ctx)));
-    }
-    if sections.is_empty() {
-        return format!(
-            "unknown inspect what:{what:?}; use services, fibers, tools, temporary, permanent, factories, builtins, events, or slots"
-        );
-    }
-    sections.join("\n\n")
 }
 
-/// One Plugin, or one Package of it. Listing *every* Plugin is `what:
-/// "temporary"` / `"permanent"` — that is why `cordis_inspect_self` could fold
-/// into `cordis_inspect` without losing a question anyone asks.
-pub fn render_plugin(
-    runner: &DynamicRunner,
-    session_id: &str,
-    plugin_id: &str,
-    package_id: Option<&str>,
-) -> Result<String, String> {
-    match package_id {
-        None => {
-            let row = runner.inspect_plugin(session_id, plugin_id)?;
-            let mut lines = vec!["mode: plugin".into(), plugin_line(&row)];
-            for pkg in &row.packages {
-                let is_current = row.current_package_id.as_deref() == Some(&pkg.package_id);
-                let is_next = row.next_package_id.as_deref() == Some(&pkg.package_id);
-                lines.push(format!(
-                    "  - {}: {} factory={} current={} next={} — {}",
-                    pkg.package_id, pkg.name, pkg.factory, is_current, is_next, pkg.purpose
-                ));
+/// 不带参数时的概览：插件在哪、各自什么状态，再加一行「还能查什么」。和 DSH 的
+/// `cordis_inspect` 一样先给目录、再按需查细节——整份 services / builtins 动辄上百行，
+/// 不该每次都塞进上下文。
+pub fn render_overview(runner: &DynamicRunner, roots: &[(PersistScope, PathBuf)]) -> String {
+    let mut out = vec![section("plugins", describe_plugins(runner, roots))];
+    out.push(
+        "more: cordis_inspect plugin \"<id>\" for one plugin; what: services | tools | builtins | events | slots for the reference sections."
+            .into(),
+    );
+    out.join("\n\n")
+}
+
+fn describe_plugins(runner: &DynamicRunner, roots: &[(PersistScope, PathBuf)]) -> Vec<String> {
+    let mut lines: Vec<String> = roots
+        .iter()
+        .map(|(scope, root)| format!("root {}: {}", scope.as_str(), root.display()))
+        .collect();
+    let views = runner.disk_plugins_in(roots);
+    if views.is_empty() {
+        lines.push(
+            "(no plugins yet — write .dock/plugins/<id>/source.rhai, then cordis_plugin reload <id>)"
+                .into(),
+        );
+        return lines;
+    }
+    for v in views {
+        lines.push(format!(
+            "- {} [{}] {} — {}{}",
+            v.id,
+            v.scope.as_str(),
+            state_label(&v),
+            v.name,
+            if v.purpose.is_empty() {
+                String::new()
+            } else {
+                format!(": {}", v.purpose)
             }
-            Ok(lines.join("\n"))
+        ));
+        if let Some(err) = &v.error {
+            lines.push(format!("    error: {}", first_line(err)));
         }
-        Some(package_id) => {
-            let (row, pkg) = runner.inspect_package(session_id, plugin_id, package_id)?;
-            let active = row
-                .active_run
-                .as_ref()
-                .filter(|r| r.package_id == package_id);
-            let mut lines = vec![
-                "mode: package".into(),
-                plugin_line(&row),
-                format!("packageId: {}", pkg.package_id),
-                format!("name: {}", pkg.name),
-                format!("purpose: {}", pkg.purpose),
-                format!("factory: {}", pkg.factory),
-            ];
-            if let Some(c) = &pkg.contrib {
-                lines.push(format!(
-                    "slash: /{} kind={} send={} — {}",
-                    c.command,
-                    c.kind.as_str(),
-                    c.send,
-                    c.description
-                ));
-            }
-            if let Some(path) = &pkg.source_path {
-                lines.push(format!("source_path: {}", path.display()));
-            } else if let Some(source) = &pkg.source {
-                lines.push("source:".into());
-                lines.push(source.clone());
-            }
-            match active {
-                Some(run) => {
-                    lines.push(format!(
-                        "runtime: fiber={} state={} provides={} waitingFor={}",
-                        run.fiber_name.as_deref().unwrap_or("none"),
-                        run.fiber_state.as_deref().unwrap_or("none"),
-                        join_or(&run.provides, "none"),
-                        join_or(&run.waiting_for, "none"),
-                    ));
-                }
-                None => lines.push("runtime: stopped".into()),
-            }
-            if let Some(err) = row.latest.as_ref().and_then(|a| a.host_error.as_ref()) {
-                lines.push(format!("hostError: {err}"));
-            }
-            Ok(lines.join("\n"))
+        if let Some(other) = &v.shadowed_by {
+            lines.push(format!("    shadowed by {}", other.display()));
         }
     }
+    lines
+}
+
+fn state_label(v: &DiskPluginView) -> &'static str {
+    if v.running && v.error.is_some() {
+        "running (last reload failed)"
+    } else if v.running {
+        "running"
+    } else if v.error.is_some() {
+        "failed"
+    } else if !v.enabled {
+        "disabled"
+    } else if v.shadowed_by.is_some() {
+        "shadowed"
+    } else {
+        "not loaded"
+    }
+}
+
+fn first_line(text: &str) -> &str {
+    text.lines().next().unwrap_or(text)
+}
+
+/// 一个插件：目录、开关、正在跑的那一版登记了什么、声明的 HTTP host、最近的错误。
+/// 源码不在这里——就在目录里，用 read_file 读。
+pub fn render_plugin(
+    runner: &DynamicRunner,
+    roots: &[(PersistScope, PathBuf)],
+    id: &str,
+) -> Result<String, String> {
+    let (spec, shadowed) = find_disk(id, None, roots)?;
+    let view = runner
+        .disk_plugins_in(roots)
+        .into_iter()
+        .find(|v| v.id == spec.id && v.scope == spec.scope);
+    let row = runner.inspect_plugin(PERSIST_SESSION, &spec.id).ok();
+    let loaded_here = view.as_ref().is_some_and(|v| v.loaded);
+    let mut lines = vec![
+        format!("plugin: {}", spec.id),
+        format!("dir: {} ({})", spec.path.display(), spec.scope.as_str()),
+        format!("name: {}", spec.name),
+    ];
+    if !spec.purpose.is_empty() {
+        lines.push(format!("purpose: {}", spec.purpose));
+    }
+    if spec.factory != crate::tools::dynamic_runner::RHAI_FACTORY {
+        lines.push(format!("factory: {}", spec.factory));
+    }
+    if let Some(path) = &spec.source_path {
+        lines.push(format!("source: {}", path.display()));
+    }
+    lines.push(format!("enabled: {}", spec.enabled));
+    let status = view.as_ref().map(state_label).unwrap_or("not loaded");
+    lines.push(format!("status: {status}"));
+    if let Some(run) = row
+        .as_ref()
+        .filter(|_| loaded_here)
+        .and_then(|r| r.active_run.as_ref())
+    {
+        lines.push(format!(
+            "version: {} ({})",
+            run.package_id, run.plugin_run_id
+        ));
+        lines.push(format!("registered: {}", super::surface_line(&run.surface)));
+        if !run.waiting_for.is_empty() {
+            lines.push(format!("waiting for: {}", run.waiting_for.join(", ")));
+        }
+    }
+    if !spec.http_allow.is_empty() {
+        lines.push(format!(
+            "http without asking: {}",
+            spec.http_allow.join(", ")
+        ));
+    }
+    if let Some(err) = view.as_ref().and_then(|v| v.error.as_ref()) {
+        lines.push(format!("last error: {err}"));
+    }
+    if let Some(v) = view.as_ref().filter(|v| v.shadowed_by.is_some()) {
+        lines.push(format!(
+            "note: another plugin named {} is loaded from {}; this directory is not loaded",
+            v.id,
+            v.shadowed_by.as_ref().unwrap().display()
+        ));
+    }
+    if let Some(other) = shadowed {
+        lines.push(format!("note: {} is shadowed by this one", other.display()));
+    }
+    for w in &spec.warnings {
+        lines.push(format!("warning: {w}"));
+    }
+    Ok(lines.join("\n"))
 }
 
 /// The three named services a Rhai `host` actually has methods for. Everything
@@ -278,6 +323,7 @@ fn probe_spine(ctx: &Context) -> Vec<String> {
     push_live::<Roster>(&mut lines, ctx, ROSTER);
     push_live::<LoopHandle>(&mut lines, ctx, AGENT_LOOP);
     push_live::<RhaiBags>(&mut lines, ctx, RHAI_BAGS);
+    push_live::<crate::host::turn_cards::TurnCards>(&mut lines, ctx, crate::names::TURN_CARDS);
     lines
 }
 
@@ -285,36 +331,6 @@ fn push_live<T: Send + Sync + 'static>(names: &mut Vec<String>, ctx: &Context, n
     if ctx.get::<T>(name).is_some() {
         names.push(name.to_string());
     }
-}
-
-fn describe_fibers(runner: &DynamicRunner, session_id: &str) -> Vec<String> {
-    let rows = runner.live_fibers(session_id);
-    if rows.is_empty() {
-        return vec![
-            "(no dynamic fibers; run a Package to mount a host half under cordis-dynamic)".into(),
-        ];
-    }
-    rows.into_iter()
-        .map(|row| {
-            let mut line = format!("- {} [{}]", row.name, row.state);
-            if let Some(id) = row.plugin_id {
-                line.push_str(&format!(" pluginId={id}"));
-            }
-            if let Some(id) = row.package_id {
-                line.push_str(&format!(" packageId={id}"));
-            }
-            if let Some(id) = row.plugin_run_id {
-                line.push_str(&format!(" run={id}"));
-            }
-            if !row.provides.is_empty() {
-                line.push_str(&format!(" provides: {}", row.provides.join(", ")));
-            }
-            if !row.waiting_for.is_empty() {
-                line.push_str(&format!(" waiting for: {}", row.waiting_for.join(", ")));
-            }
-            line
-        })
-        .collect()
 }
 
 fn describe_tools(tools: &Tools) -> Vec<String> {
@@ -327,84 +343,18 @@ fn describe_tools(tools: &Tools) -> Vec<String> {
     }
 }
 
-fn describe_temporary(runner: &DynamicRunner, session_id: &str) -> Vec<String> {
-    let rows: Vec<_> = runner
-        .snapshot(session_id)
-        .into_iter()
-        .filter(|r| matches!(r.origin, PluginOrigin::Session))
-        .collect();
-    if rows.is_empty() {
-        return vec!["No session-local Plugins. Definitions live only in this process's memory, so a restart clears them. Lasting plugins: cordis_promote or .dock/plugins/<id>/.".into()];
-    }
-    describe_plugin_rows(&rows)
-}
-
-fn describe_permanent(runner: &DynamicRunner) -> Vec<String> {
-    let disk = crate::tools::dynamic_runner::plugin_roots();
-    let specs = {
-        // scan is in persist; overlay_listing already formats for humans.
-        // Compact inspect: list live persist rows plus disk scan via listing lines.
-        runner.overlay_listing_from("*", &disk)
-    };
-    if specs.trim().is_empty() {
-        return vec!["(no disk plugins)".into()];
-    }
-    specs.lines().map(|s| s.to_string()).collect()
-}
-
-fn describe_plugin_rows(rows: &[SnapshotRow]) -> Vec<String> {
-    let mut lines = Vec::new();
-    for row in rows {
-        lines.push(plugin_line(row));
-        for pkg in &row.packages {
-            let active = row
-                .active_run
-                .as_ref()
-                .filter(|r| r.package_id == pkg.package_id);
-            match active {
-                Some(run) => lines.push(format!(
-                    "    - {}: {} [{}] factory={} — {}; provides: {}; waiting for: {}",
-                    pkg.package_id,
-                    pkg.name,
-                    run.fiber_state.as_deref().unwrap_or("running"),
-                    pkg.factory,
-                    pkg.purpose,
-                    join_or(&run.provides, "none"),
-                    join_or(&run.waiting_for, "none"),
-                )),
-                None => lines.push(format!(
-                    "    - {}: {} (factory={}) — {}",
-                    pkg.package_id, pkg.name, pkg.factory, pkg.purpose
-                )),
-            }
-        }
-    }
-    lines
-}
-
 fn describe_events() -> Vec<String> {
     vec![
-        "- session/event — session log after append. host.on(\"session/event\", |line| { ... })".into(),
-        "    line is user\\t… / assistant\\t… / tool\\tname / reminder\\t… (pre-step and prompt are skipped)".into(),
-        "    handler runs asynchronously; it must not intercept tools/execute or other waterfalls".into(),
+        "host.on(name, |payload| { ... }) — a throw or a non-matching return counts as no opinion; the chain always continues.".into(),
+        "- session/event (observe) — line: user\\t… / assistant\\t… / tool\\tname / reminder\\t…; runs after append, in order".into(),
+        "- agent/step-start — #{ step, identity, main }; return a string to inject a <system-reminder> before this sample, or ()".into(),
+        "- agent/turn-end — #{ text, rounds, ended_with_text, queued_followups, identity, main }; return a string to keep working, or ()".into(),
+        "- agent/pre-step — #{ user, identity, main }; return #{ deny: \"reason\" } to refuse the turn".into(),
+        "- system-prompt/assemble — #{ tools }; return a string to add one section".into(),
+        "- tools/pre-execute — #{ called, name, arguments, identity, main }; return #{ deny: \"…\" } or #{ rewrite: #{ name, arguments } } (rewritten calls pass the permission gate again)".into(),
+        "- tools/execute — #{ name, call_id, content, is_error }; return a string to replace the content".into(),
+        "- llm/stream — #{ text, tool_calls }; return a string to replace the assistant text".into(),
     ]
-}
-
-fn describe_factories(runner: &DynamicRunner) -> Vec<String> {
-    runner
-        .factories()
-        .iter()
-        .map(|f| {
-            format!(
-                "- {} — {}; provides: {}; inject: {}; tools: {}",
-                f.id,
-                f.purpose,
-                join_or_static(f.provides, "none"),
-                join_or_static(f.inject, "none"),
-                join_or_static(f.tools, "none"),
-            )
-        })
-        .collect()
 }
 
 fn describe_slots(ctx: &Context) -> Vec<String> {
@@ -427,36 +377,6 @@ fn describe_slots(ctx: &Context) -> Vec<String> {
         .collect()
 }
 
-fn plugin_line(row: &SnapshotRow) -> String {
-    let current = row.current_package_id.as_deref().unwrap_or("none");
-    let next = row.next_package_id.as_deref().unwrap_or("none");
-    let active = match &row.active_run {
-        Some(run) => format!("; active: {} as {}", run.package_id, run.plugin_run_id),
-        None => "; stopped".into(),
-    };
-    format!(
-        "- Plugin {} ({}); current: {current}; next: {next}{active}",
-        row.plugin_id,
-        row.origin.label()
-    )
-}
-
 fn section(title: &str, lines: Vec<String>) -> String {
     format!("{title}:\n{}", lines.join("\n"))
-}
-
-fn join_or(items: &[String], empty: &str) -> String {
-    if items.is_empty() {
-        empty.into()
-    } else {
-        items.join(", ")
-    }
-}
-
-fn join_or_static(items: &[&str], empty: &str) -> String {
-    if items.is_empty() {
-        empty.into()
-    } else {
-        items.join(", ")
-    }
 }

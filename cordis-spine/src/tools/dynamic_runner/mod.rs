@@ -1,6 +1,12 @@
 //! Named `"dynamicCordisRunner"` service: immutable packages, one active run
 //! per Plugin, host halves hung under `cordis-dynamic` via `ctx.plugin` /
 //! `fiber.dispose`.
+//!
+//! 模型侧只有一条生命周期：插件就是 `.dock/plugins/<id>/` 目录，`cordis_plugin
+//! reload` 把目录读成一个新 Package 跑起来（[`DynamicRunner::reload_disk`]）。
+//! 这里的 `define` / `run` / `stop` 是程序侧 API（测试、磁盘装载、设置页），
+//! 不再有模型工具直接调它们——和 DSH 退役 define/run 模型工具的理由一样：
+//! 两套生命周期让模型在「会话插件」和「磁盘插件」之间来回搬，id 也跟着分裂。
 
 mod factories;
 mod lifecycle;
@@ -59,29 +65,32 @@ pub use factories::{
     DynEcho, DynNote, FactoryInfo, DYN_ECHO, DYN_ECHO_TOOL, DYN_NOTE, RHAI_FACTORY,
 };
 pub use persist::{
-    persist_root, plugin_roots, project_root, DiskPluginView, PromoteReceipt, SessionPluginView,
+    declared_hooks, find_disk, persist_root, plugin_roots, project_root, DisableReceipt,
+    DiskPluginView, DiskSpec, ReloadReceipt, ReloadStatus, PERSIST_SESSION,
 };
-pub use registry::{Attempt, AttemptStatus, Package, PersistScope, PluginOrigin, RunMode};
+
+/// 模型能看到的「源码太大」提示（`every_cordis_name_in_model_text_is_a_live_tool` 查它）。
+#[cfg(test)]
+pub(crate) fn rhai_host_inline_too_large() -> &'static str {
+    rhai_host::INLINE_TOO_LARGE
+}
+pub use registry::{Attempt, AttemptStatus, Package, PersistScope, PluginOrigin, RunMode, Surface};
 pub use rhai_host::{builtins_lines, RhaiBag, RhaiBags};
 pub use rhai_secret::{delete_secret, secret_names, set_secret};
 
-#[cfg(test)]
-pub(crate) use persist::PROMOTE_SESSION_COLLISION_HINT;
-
+use registry::SurfaceCell;
 use rhai_host::{MAX_FILE_SOURCE, MAX_INLINE_SOURCE};
 
-/// Rhai body for `cordis_define`: inline string or path under a plugin root.
+/// Rhai 源码从哪来。
 #[derive(Clone, Debug)]
 pub enum SourceInput {
+    /// 程序侧 define 传进来的原文（≤128KiB）。
     Inline(String),
-    Path(String),
-    /// Already-resolved path (disk autoload / promote). 每次读之前仍然重新校验，
-    /// 免得 define 之后被换成软链溜出去；`dir` 是授权边界，`None` 表示按全局
-    /// plugin roots 判。
-    #[doc(hidden)]
-    ResolvedPath {
-        path: std::path::PathBuf,
-        dir: Option<std::path::PathBuf>,
+    /// 磁盘插件 reload / 装载时读到的快照（≤1MiB）。之后改文件不影响这个包。
+    Snapshot {
+        text: String,
+        dir: std::path::PathBuf,
+        http_allow: Vec<String>,
     },
 }
 
@@ -149,6 +158,7 @@ pub struct SnapshotRow {
     pub packages: Vec<Package>,
     pub active_run: Option<RunView>,
     pub latest: Option<Attempt>,
+    pub reload_error: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -159,13 +169,15 @@ pub struct RunView {
     pub fiber_state: Option<String>,
     pub provides: Vec<String>,
     pub waiting_for: Vec<String>,
+    /// 这次运行实际登记的工具 / 斜杠 / 面板 / 钩子。
+    pub surface: Surface,
 }
 
 pub(crate) struct Inner {
     pub(crate) registry: Registry,
     group: Option<Fiber>,
     /// When set, Lead waits here after recording in-flight and before start_fresh
-    /// so tests can overlap a second `cordis_run` on the same triple.
+    /// so tests can overlap a second `run` on the same triple.
     start_hold: Option<watch::Sender<bool>>,
 }
 
@@ -239,10 +251,7 @@ impl DynamicRunner {
         let name = name.trim();
         let purpose = purpose.trim();
         if name.is_empty() {
-            return Err("cordis_define needs a non-empty `name`".into());
-        }
-        if purpose.is_empty() {
-            return Err("cordis_define needs a non-empty `purpose`".into());
+            return Err("define needs a non-empty `name`".into());
         }
         let info = lookup_factory(factory.trim()).ok_or_else(|| {
             let known = list_factories()
@@ -265,7 +274,7 @@ impl DynamicRunner {
         let prepared_rhai = if info.id == RHAI_FACTORY {
             Some(prepare_rhai_source(source)?)
         } else if source.is_some() {
-            return Err("source / source_path are only for factory \"rhai\"".into());
+            return Err("source is only for factory \"rhai\"".into());
         } else {
             None
         };
@@ -275,10 +284,7 @@ impl DynamicRunner {
             DefineTarget::New { id_prefix } => {
                 let prefix = id_prefix.trim();
                 if !valid_prefix(prefix) {
-                    return Err(
-                        "cordis_define `plugin.idPrefix` must contain 3–6 lowercase English letters"
-                            .into(),
-                    );
+                    return Err("`idPrefix` must contain 3–6 lowercase English letters".into());
                 }
                 let plugin_id = inner.registry.mint_plugin_id(prefix);
                 inner.registry.add(PluginRec {
@@ -290,6 +296,7 @@ impl DynamicRunner {
                     next_package_id: None,
                     run: None,
                     latest: None,
+                    reload_error: None,
                 });
                 plugin_id
             }
@@ -315,6 +322,7 @@ impl DynamicRunner {
                     next_package_id: None,
                     run: None,
                     latest: None,
+                    reload_error: None,
                 });
                 plugin_id
             }
@@ -330,8 +338,9 @@ impl DynamicRunner {
                 name.into(),
                 purpose.into(),
                 prepared.inject,
-                prepared.inline,
-                prepared.path,
+                prepared.source,
+                prepared.dir,
+                prepared.http_allow,
             )
         } else {
             package_from_factory(
@@ -450,16 +459,41 @@ impl DynamicRunner {
     ) -> Result<RunReceipt, String> {
         let info = lookup_factory(&plan.factory)
             .ok_or_else(|| format!("factory {} is no longer registered", plan.factory))?;
+        // 每次启动一本新账：失败的那次登记了一半的东西已经随 fiber 回滚，不该留在账上。
+        let surface: SurfaceCell = Default::default();
         let built = if plan.factory == RHAI_FACTORY {
-            let (source, limit) = resolve_plan_source(&plan)?;
+            let source = plan
+                .source
+                .as_deref()
+                .ok_or("rhai package is missing source")?;
+            let limit = if plan.dir.is_some() {
+                MAX_FILE_SOURCE
+            } else {
+                MAX_INLINE_SOURCE
+            };
             // 插件目录：web 面板的 HTML 只能放在这里面。
-            let plugin_dir = plan
-                .source_path
-                .as_ref()
-                .and_then(|p| p.canonicalize().ok())
-                .and_then(|p| p.parent().map(std::path::Path::to_path_buf));
-            rhai_host::build_rhai_limited(plugin_id, &source, limit, plugin_dir, plan.disk_backed)?
+            let plugin_dir = plan.dir.as_ref().and_then(|p| p.canonicalize().ok());
+            rhai_host::build_rhai_limited(
+                plugin_id,
+                source,
+                limit,
+                rhai_host::RunScope {
+                    plugin_dir,
+                    disk_backed: plan.disk_backed,
+                    http_allow: plan.http_allow.clone(),
+                    surface: surface.clone(),
+                },
+            )?
         } else {
+            {
+                let mut s = surface.lock().unwrap();
+                for tool in info.tools {
+                    Surface::push(&mut s.tools, tool);
+                }
+                if let Some(c) = plan.contrib.as_ref() {
+                    Surface::push(&mut s.slash, &c.command);
+                }
+            }
             info.build(plugin_id, plan.contrib.as_ref())
         };
         self.start_fresh(
@@ -470,6 +504,7 @@ impl DynamicRunner {
             built,
             plan.inject,
             plan.provides,
+            surface,
         )
         .await
     }
@@ -680,6 +715,7 @@ impl DynamicRunner {
         built: Plugin,
         inject: Vec<String>,
         provides: Vec<String>,
+        surface: SurfaceCell,
     ) -> Result<RunReceipt, String> {
         let previous = {
             let mut inner = self.inner.lock().unwrap();
@@ -722,6 +758,7 @@ impl DynamicRunner {
                             fiber: Some(fiber),
                             inject: inject.clone(),
                             provides: provides_live.clone(),
+                            surface,
                         });
                         rec.current_package_id = Some(package_id.to_string());
                         rec.next_package_id = None;
@@ -810,13 +847,12 @@ struct Plan {
     factory: String,
     contrib: Option<SlashEntry>,
     source: Option<String>,
-    source_path: Option<std::path::PathBuf>,
-    /// `source_path` 的授权边界（磁盘插件是它自己的目录；`None` 走全局 roots）。
-    source_dir: Option<std::path::PathBuf>,
-    /// 这个包是不是**从磁盘来的**（插件目录装上 / 设置里启用 / promote 落盘）。
-    /// 只有这样的包能挂那五个能否决流程的钩子 —— 判据是来源，不是它有没有
-    /// 传 `source_path`：会话里 define 的包也能带 `source_path`，拿它当判据
-    /// 等于让模型给自己开闸门。
+    /// 磁盘插件的目录（web 面板文件的边界）。
+    dir: Option<std::path::PathBuf>,
+    http_allow: Vec<String>,
+    /// 这个包是不是**从磁盘来的**（启动 / 开项目时装载、设置里启用、批准过的
+    /// `cordis_plugin reload`）。只有这样的包能挂那五个能否决流程的钩子 ——
+    /// 程序侧 define 的会话包打不开。
     disk_backed: bool,
     inject: Vec<String>,
     provides: Vec<String>,
@@ -874,8 +910,8 @@ fn resolve_plan(
         factory: pkg.factory.clone(),
         contrib: pkg.contrib.clone(),
         source: pkg.source.clone(),
-        source_path: pkg.source_path.clone(),
-        source_dir: persist::origin_source_dir(&rec.origin).map(|p| p.to_path_buf()),
+        dir: pkg.dir.clone(),
+        http_allow: pkg.http_allow.clone(),
         disk_backed: matches!(rec.origin, PluginOrigin::Disk { .. }),
         inject: pkg.inject.clone(),
         provides: pkg.provides.clone(),
@@ -900,6 +936,7 @@ fn snapshot_row(ctx: &Context, rec: &PluginRec) -> SnapshotRow {
                 .cloned()
                 .collect(),
             waiting_for: waiting,
+            surface: run.surface.lock().unwrap().clone(),
         }
     });
     SnapshotRow {
@@ -910,6 +947,7 @@ fn snapshot_row(ctx: &Context, rec: &PluginRec) -> SnapshotRow {
         packages: rec.packages.values().cloned().collect(),
         active_run,
         latest: rec.latest.clone(),
+        reload_error: rec.reload_error.clone(),
     }
 }
 
@@ -966,54 +1004,37 @@ fn valid_prefix(prefix: &str) -> bool {
 
 struct PreparedRhai {
     inject: Vec<String>,
-    inline: Option<String>,
-    path: Option<std::path::PathBuf>,
+    source: String,
+    dir: Option<std::path::PathBuf>,
+    http_allow: Vec<String>,
 }
 
 /// Compile-check Rhai at define time.
 fn prepare_rhai_source(source: Option<SourceInput>) -> Result<PreparedRhai, String> {
-    let input = source
-        .ok_or_else(|| "factory \"rhai\" needs `source` or `source_path` (not both)".to_string())?;
+    let input = source.ok_or_else(|| "factory \"rhai\" needs source".to_string())?;
     match input {
         SourceInput::Inline(src) => {
             let meta = rhai_host::preflight(&src)?;
             Ok(PreparedRhai {
                 inject: meta.inject,
-                inline: Some(src),
-                path: None,
+                source: src,
+                dir: None,
+                http_allow: Vec::new(),
             })
         }
-        SourceInput::Path(raw) => {
-            let path = persist::resolve_source_path(&raw)?;
-            let text = persist::read_source_file(&path, MAX_FILE_SOURCE, None)?;
+        SourceInput::Snapshot {
+            text,
+            dir,
+            http_allow,
+        } => {
             let meta = rhai_host::preflight_limited(&text, MAX_FILE_SOURCE)?;
             Ok(PreparedRhai {
                 inject: meta.inject,
-                inline: None,
-                path: Some(path),
+                source: text,
+                dir: Some(dir),
+                http_allow,
             })
         }
-        SourceInput::ResolvedPath { path, dir } => {
-            let text = persist::read_source_file(&path, MAX_FILE_SOURCE, dir.as_deref())?;
-            let meta = rhai_host::preflight_limited(&text, MAX_FILE_SOURCE)?;
-            Ok(PreparedRhai {
-                inject: meta.inject,
-                inline: None,
-                path: Some(path),
-            })
-        }
-    }
-}
-
-fn resolve_plan_source(plan: &Plan) -> Result<(String, usize), String> {
-    match (&plan.source, &plan.source_path) {
-        (Some(s), None) => Ok((s.clone(), MAX_INLINE_SOURCE)),
-        (None, Some(p)) => Ok((
-            persist::read_source_file(p, MAX_FILE_SOURCE, plan.source_dir.as_deref())?,
-            MAX_FILE_SOURCE,
-        )),
-        (Some(_), Some(_)) => Err("rhai package has both source and source_path".into()),
-        (None, None) => Err("rhai package is missing source".into()),
     }
 }
 
