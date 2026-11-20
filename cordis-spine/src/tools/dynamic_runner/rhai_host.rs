@@ -878,29 +878,6 @@ impl Host {
         if text.chars().count() > MAX_CHARS {
             return err(format!("host.followup text is over {MAX_CHARS} characters"));
         }
-        let page = identity
-            .map(|i| i.trim().to_string())
-            .filter(|i| !i.is_empty())
-            .or_else(|| {
-                let (id, _) = exec_identity();
-                (!id.is_empty()).then_some(id)
-            })
-            .or_else(|| {
-                self.inner
-                    .last_page
-                    .lock()
-                    .unwrap()
-                    .as_ref()
-                    .and_then(|c| c.get::<crate::session::log::Sessions>(crate::names::SESSIONS))
-                    .map(|s| s.identity().to_string())
-            })
-            .ok_or_else(|| {
-                eval_err(
-                    "host.followup: no page to send to — call it from a tool or hook, or pass the \
-                     identity from a hook payload"
-                        .into(),
-                )
-            })?;
         let subs = self
             .inner
             .ctx
@@ -908,6 +885,39 @@ impl Host {
             .ok_or_else(|| {
                 eval_err("subagents is not mounted; host.followup has no mailbox".into())
             })?;
+        let anchor = self.anchor_page();
+        // 指定了 identity 也只能落在 `anchor` 那棵会话树里（这一页和它的子代理）：插件是
+        // 进程级装的，钩子载荷里带着各页的 identity，不收住的话一张卡片 / 一个定时器就能
+        // 往同一进程里别的会话塞话并叫醒它；拼错、过期的 id 也会一直留在信箱里。
+        let page = match identity
+            .map(|i| i.trim().to_string())
+            .filter(|i| !i.is_empty())
+        {
+            None => anchor.ok_or_else(|| {
+                eval_err(
+                    "host.followup: no page to send to — call it from a tool, hook or card \
+                     action, or from a timer after one of those has run on a page"
+                        .into(),
+                )
+            })?,
+            Some(target) => {
+                let parent = |id: &str| subs.snapshot(id).map(|s| s.parent);
+                let same_tree = anchor.as_deref().is_some_and(|a| {
+                    a == target || {
+                        let root = session_root(a, parent);
+                        root.is_some() && root == session_root(&target, parent)
+                    }
+                });
+                if !same_tree {
+                    return err(format!(
+                        "host.followup can only reach the session tree it is running for ({}): \
+                         that page and its subagents. {target:?} is not in it",
+                        anchor.as_deref().unwrap_or("no page")
+                    ));
+                }
+                target
+            }
+        };
         let wakes = cordis_base::types::is_main_identity(&page) && {
             let mut last = self.inner.last_wake.lock().unwrap();
             let now = std::time::Instant::now();
@@ -921,6 +931,25 @@ impl Host {
         };
         subs.notify_from_plugin(&page, &self.inner.plugin_id, text.to_string(), wakes);
         Ok(if wakes { "woke" } else { "queued" }.into())
+    }
+
+    /// 这段插件代码正在替哪一页跑：发起调用的那一页（工具、钩子、卡片按钮）；正在处理的
+    /// 那条 `session/entry` 的页；都不是（定时器）就是最近一次跑过钩子的那一页。
+    fn anchor_page(&self) -> Option<String> {
+        let (id, _) = exec_identity();
+        if !id.is_empty() {
+            return Some(id);
+        }
+        if let Some(id) = ENTRY_PAGE.with(|p| p.borrow().clone()) {
+            return Some(id);
+        }
+        self.inner
+            .last_page
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|c| c.get::<crate::session::log::Sessions>(crate::names::SESSIONS))
+            .map(|s| s.identity().to_string())
     }
 
     fn every_int(&mut self, seconds: rhai::INT, f: FnPtr) -> Result<(), Box<rhai::EvalAltResult>> {
@@ -1606,6 +1635,12 @@ impl Host {
         let ast = self.inner.ast.clone();
         let plugin_id = self.inner.plugin_id.clone();
         let run = Arc::new(move |entry: Value| {
+            // 处理器不在任何一轮里跑：记下这一条是哪一页的，`host.followup` 才知道在替谁跑。
+            let page = entry
+                .get("identity")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let _entry_page = EntryPage::enter(page);
             if let Err(e) = call_fnptr(&engine, &ast, &handler, json_to_dynamic(&entry)) {
                 eprintln!("[cordis:{plugin_id}] host.on(session/entry): {e}");
             }
@@ -1933,6 +1968,41 @@ fn hook_deny(value: &Dynamic) -> Option<String> {
     let reason = map.get("deny")?.clone().into_string().ok()?;
     let trimmed = reason.trim().to_string();
     (!trimmed.is_empty()).then_some(trimmed)
+}
+
+thread_local! {
+    /// 正在处理的那条 `session/entry` 属于哪一页（或哪个子代理），见 [`EntryPage`]。
+    static ENTRY_PAGE: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// 在这个线程上跑一条 `session/entry` 的处理器期间，标着它是哪一页的；出作用域（含
+/// panic 展开）就撤掉，下一条不会误认。
+struct EntryPage(Option<String>);
+
+impl EntryPage {
+    fn enter(page: Option<String>) -> Self {
+        Self(ENTRY_PAGE.with(|p| p.replace(page)))
+    }
+}
+
+impl Drop for EntryPage {
+    fn drop(&mut self) {
+        let prev = self.0.take();
+        ENTRY_PAGE.with(|p| *p.borrow_mut() = prev);
+    }
+}
+
+/// 一个页身份所在会话树的根（主会话页）：子代理顺着 `parent` 往上找，认不得的是 `None`。
+fn session_root(identity: &str, parent: impl Fn(&str) -> Option<String>) -> Option<String> {
+    let mut id = identity.to_string();
+    // 子代理最多套几层是有限的；防一个坏的 parent 链转圈。
+    for _ in 0..32 {
+        if cordis_base::types::is_main_identity(&id) {
+            return Some(id);
+        }
+        id = parent(&id)?;
+    }
+    None
 }
 
 /// 正在跑的主会话页记下来，给定时器之类没有当前页的 `host.followup` / `host.card` 用。
@@ -2326,6 +2396,26 @@ mod tests {
         );
         assert_eq!(host.inner.disposers.lock().unwrap().len(), 0);
         host.inner.ctx.fiber().dispose().await.unwrap();
+    }
+
+    /// `host.followup(identity, …)` 认的会话树：子代理（含套娃的）归到派它的主会话页；
+    /// 认不得的、parent 链转圈的都不算在任何一棵树里。
+    #[test]
+    fn session_root_follows_subagent_parents_to_the_page() {
+        let parents: std::collections::HashMap<&str, &str> = [
+            ("a1", "main#2"),
+            ("a2", "a1"),
+            ("loop1", "loop2"),
+            ("loop2", "loop1"),
+        ]
+        .into();
+        let parent = |id: &str| parents.get(id).map(|p| p.to_string());
+        assert_eq!(session_root("main#2", parent).as_deref(), Some("main#2"));
+        assert_eq!(session_root("main", parent).as_deref(), Some("main"));
+        assert_eq!(session_root("a1", parent).as_deref(), Some("main#2"));
+        assert_eq!(session_root("a2", parent).as_deref(), Some("main#2"));
+        assert_eq!(session_root("ghost", parent), None);
+        assert_eq!(session_root("loop1", parent), None);
     }
 
     #[test]

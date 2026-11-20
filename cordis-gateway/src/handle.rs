@@ -522,6 +522,7 @@ fn listen_events(inner: &Arc<GatewayInner>) {
             handle.reset_page(&page);
             crate::handlers::settings::boot_project_plugins(
                 &handle,
+                page.ctx.clone(),
                 cordis_spine::session_cwd(&page.ctx),
             );
         });

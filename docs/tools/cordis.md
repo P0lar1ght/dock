@@ -19,8 +19,16 @@ define 和 run 校验的路径也不一样。历史会话里的这些调用照�
 插件运行时：热挂体走 `ctx.plugin` / `fiber.dispose`，挂在 `cordis-dynamic` 组 fiber 下。
 
 - **启动与开项目**：`install_app` 装上用户级和进程 cwd 的项目级插件；桌面 GUI 打开某个
-  项目的会话时，网关装上那个项目的 `.dock/plugins`（同名已装的跳过）。都不走权限确认，
-  fail-open。
+  项目的会话时，网关装上那个项目的 `.dock/plugins`（同名已装的跳过）。fail-open。
+- **项目插件要点头**：项目自带的插件（克隆来的仓库里的 `.dock/plugins/<id>/`）和同仓库的
+  `.dock/hooks.json` 一样，第一次加载前在打开它的那一页上问（TUI 启动时是第 1 页），确认框
+  列着插件目录、钩子、HTTP host；**自动批准和「始终允许」都不算数**。点了头按「插件目录 +
+  `plugin.toml` / `source.rhai` 的内容指纹」记在 `$DOCK_HOME/plugins-trust.json`，下次打开
+  不再问，文件一改（比如 `git pull`）就重新问；这个进程里拒过的不再问。信任过的先全部装上，
+  再逐个问没信任过的；确认期间文件又被改了就不认这次点头。`cordis_plugin reload`（过了权限门）
+  和设置页「立即加载」/ 启用就是用户批准的加载，顺手记下那一刻的内容。没确认过的在
+  `plugin/list` 里 `untrusted: true`，设置页标「待确认」，`cordis_inspect` 写着要用户点头。
+  空闲页上的这条确认和别的轮外询问一样，在投影里自己占一轮。用户级的不问。
 - **reload**（`DynamicRunner::reload_disk`）：把那一刻的 `source.rhai` 读成一个不可变的
   新 Package 跑起来；在跑的那版先整个卸掉再起新版。新版起不来就自动回到上一版继续跑，
   原因留在 `reload_error` 里给 `cordis_inspect` 和设置页看，下一次成功才清掉。
@@ -64,8 +72,11 @@ reload 回执会提醒。
 - 回执是中文：结论一行、`登记：` 一行、HTTP 声明、被盖住的同名目录、`plugin.toml` 警告，
   最后一行 `下一步：`——成功时教怎么验证（有工具就给 `use_tool` 的写法），失败时按报错
   类型给一条修法。失败的 reload `is_error = true`。
-- **确认按插件记**：键是 `cordis_plugin <id>`，「始终允许」只放行这一个插件，迭代它不用
-  每次点；换一个插件还会问。摘要写着插件目录、`host.on("…")` 的钩子名、声明的 HTTP host。
+- **确认按插件和它批的东西记**：摘要写着插件目录、`host.on("…")` 的钩子名、声明的 HTTP
+  host——批准加载，批的就是这些。所以 reload 的键是 `cordis_plugin <id>` 再带上这两样的
+  指纹（`#` 加 8 位十六进制，`DiskGrants::fingerprint`，与书写顺序无关）：「始终允许」之后
+  只改代码照旧免问，多挂一个钩子、多声明一个 host 就换了键、要再问一次。两样都没有的、
+  以及 `disable`，键就是 `cordis_plugin <id>`。换一个插件还会问。
 
 ## 宿主能力（MCP 做不到的那一面）
 
@@ -77,7 +88,7 @@ MCP 要等模型来调；插件包在模型外面，每一次调用、每一轮�
 | 拦 / 要确认一次调用 | `host.on("tools/pre-execute")` 返回 `#{ deny }` / `#{ ask }` / `#{ rewrite }` | `ask`：自动批准、「始终允许」都不算数（`PreExecute::ask`，单调，deny 优先）；载荷带解析好的 `args` |
 | 事后改结果 | `host.on("tools/execute")` | 载荷带这次调用的 `arguments` / `args`（注册表把参数经 task-local 交给同步跑的监听器）和 `identity` / `main` |
 | 结构化会话事件 | `host.on("session/entry")` | `user` / `assistant` / `tool` / `reminder` / `notice` / `turn-end`，带页身份；`assistant` 来自采样收尾事件 `llm/finished`（`LlmFinished`：最终输出 + 用量 + 缓存命中 + 费用） |
-| 主动找 agent | `host.followup(text)` / `host.followup(identity, text)` | 进那一页的信箱（`ParentNotice::Plugin`，同后台任务跑完通知）：在跑就下一步带上，闲着的主会话页叫醒开一轮；一页 5 秒内最多叫醒一次 |
+| 主动找 agent | `host.followup(text)` / `host.followup(identity, text)` | 进那一页的信箱（`ParentNotice::Plugin`，同后台任务跑完通知）：在跑就下一步带上，闲着的主会话页叫醒开一轮；一页 5 秒内最多叫醒一次。默认送给「这段代码在替谁跑」的那一页：发起调用的页（工具、钩子、卡片按钮）→ 正在处理的 `session/entry` 那一页 → 最近一次跑过钩子的页（定时器）。指定 `identity` 也只能落在那一页的会话树里（它自己和它派出的子代理，顺着 `parent` 认），别的会话、认不得的 id 报错——插件是进程级装的，不能往同一进程里别的会话塞话 |
 | 定时器 | `host.every(秒, f)` / `host.after(秒, f)` | `every` ≥5 秒、`after` ≥1 秒，都支持小数秒且 ≤2592000 秒（30 天）；超限返回脚本错误，不占名额；一次运行最多 16 个，随运行取消 |
 | 问模型一句 | `host.llm(prompt)` / `host.llm(#{ system, prompt })` | 这一页的模型，不带工具，不进会话日志、不计入 `/usage`，阻塞调用方 |
 | 小存储 | `host.load` / `host.save` / `host.forget` | `$DOCK_HOME/plugin-state/<id>-<目录指纹>.json`，≤1 MiB，跨 reload 和重启 |

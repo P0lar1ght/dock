@@ -68,12 +68,16 @@ if token == () {
 
 ```rhai
 host.followup("CI 红了：main 上 build #812 失败，看一下日志");   // 返回 "woke" 或 "queued"
-host.followup(identity, "…");                                    // 指定送到哪一页（钩子载荷里有 identity）
+host.followup(identity, "…");                                    // 指定送到这棵会话树里的哪一页（钩子载荷里有 identity）
 ```
 
 - 送进那一页的信箱（和后台任务跑完通知同一个）：那一页**在跑**就在下一步带上；
   **闲着**的主会话页就叫醒它开一轮——不用用户再发话。
 - 一页 5 秒内最多叫醒一次，多出来的排着等下一轮（返回 `"queued"`）。
+- 不带 identity：送给这段代码正在替它跑的那一页（工具 / 钩子 / 卡片按钮的那一页；
+  `session/entry` 处理器里是那一条的页；定时器里是最近一次跑过钩子的页）。
+- 带 identity：只能是那一页自己或它派出的子代理；别的会话、认不得的 id 会报错
+  （`can only reach the session tree…`）。
 - 不传 identity：发起这次脚本的那一页；定时器里调就是这颗插件最近打过交道的那一页。
 - 模型看到的是「插件 X 送来的消息（不是用户发的消息）」。
 

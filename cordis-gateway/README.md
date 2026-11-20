@@ -162,7 +162,7 @@ ticket 由 `PairingStore::issue_trusted` 签出：不要求绑定、不经 TUI �
 | `mcp/login { name }` | HTTP 服务器的浏览器 OAuth，等授权完才回 |
 | `cua/status` / `cua/action` | cua-driver 状态机；`install` / `grant` 在后台跑，进度靠轮询 `cua/status` |
 | `browser/status` | 内置浏览器状态 + 有头偏好 |
-| `plugin/list` | 插件目录（用户级 + 每个已知项目，按根分组、按目录认），带运行状态与最近的错误 |
+| `plugin/list` | 插件目录（用户级 + 每个已知项目，按根分组、按目录认），带运行状态与最近的错误；项目自带、还没点过头的插件 `untrusted: true`（`plugin/enable` 就是同意） |
 | `plugin/enable` / `plugin/delete { path }` | 按插件目录启停 / 删除；启用 = 读最新文件重载，失败回到上一版；目录必须在某个插件根下 |
 | `skill/list` | 每层发现的技能，被同名遮住的标 `shadowed` |
 | `secret/list` / `secret/set` / `secret/delete` | `$DOCK_HOME/secrets.json`（0600） |

@@ -13,7 +13,8 @@
 - **写插件改成「插件就是一个目录」，对齐 DSH 的 Plugin Manager**：模型侧只剩两颗工具——只读的 `cordis_inspect` 和管理插件目录的 `cordis_plugin`（`reload` / `disable`）。`cordis_define` / `cordis_run` / `cordis_call` / `cordis_stop` / `cordis_promote` 退役。本机 13 个用过这组工具的会话里，一次修改要 define → run → call 三次调用、来回 8–10 轮；插件 id 跟着分裂（`cyberspace` → `cyber-2`，磁盘上留下项目级和用户级两份）；define 接受的路径 run 又拒绝。DSH 撤掉同一套工具的理由是「生成代码工具在普通已安装组合包之外引入了第二套插件生命周期」。
   - 流程：用文件工具写 `.dock/plugins/<id>/source.rhai`（`plugin.toml` 可选）→ `cordis_plugin reload <id>` → 用 `use_tool` 调新工具验证。改了文件就再 reload。
   - reload 把那一刻的文件拍成快照跑起来；**新版跑不起来时自动回到上一版继续跑**，用户手上的工具不会因为改坏一行一起消失。回执列出这一版登记的工具 / 斜杠 / 面板 / 钩子，最后一行告诉模型下一步怎么验证或怎么修。
-  - 确认按插件记：「始终允许」只放行这一个插件，迭代它不用每次点；确认框列出它挂的钩子和声明的 HTTP host。
+  - 确认按插件记：「始终允许」只放行这一个插件，迭代它不用每次点；确认框列出它挂的钩子和声明的 HTTP host。批的就是这些，所以插件多挂一个钩子、多声明一个 HTTP host（之后对它免逐次确认）会再问一次，只改代码照旧免问。
+  - **项目自带的插件第一次加载前要你点头**：克隆来的仓库里的 `.dock/plugins/<id>/` 能改流程、免确认出网、花模型额度、叫醒会话，以前打开项目就直接跑，同仓库的 `.dock/hooks.json` 却要先点头。现在和项目 hooks 一样，在打开它的那一页上问（列出插件目录、钩子、HTTP host；自动批准不算数），按「插件目录 + 文件内容指纹」记在 `$DOCK_HOME/plugins-trust.json`，下次打开不再问，文件一改（比如 `git pull`）就重新问；拒了的这次不再问，设置页里标着「待确认」，点「立即加载」就是同意。你让模型 `cordis_plugin reload` 过、或在设置页加载 / 启用过的那一版算点过头。用户目录 `~/.dock/plugins/` 的不问。
   - `plugin.toml` 每个键都可选（没有这个文件也行，名字取目录名），新增 `[permissions] http = ["api.example.com", "*.example.com"]`：声明过的 host 不再逐次确认。认不得的键 reload 时会提醒。
   - 创造模式里这两颗工具常驻（以前要先 `search_tool` 再 `use_tool`），人设改成「先交付能跑的小版本、用真能力验证」。
   - 网关去掉 `plugin/promote`、`plugin/discard` 和 `plugin/list` 的 `session` 字段；设置页去掉「动态插件」一栏，已装载的插件多一个「重新加载」按钮。
@@ -82,14 +83,14 @@
   - `tools/pre-execute` 能返回 `#{ ask: "理由" }`：这次调用要用户点头才跑，**自动批准和「始终允许」都不算数**。适合「`git push` 要我确认」这类规矩。
   - `tools/execute` 钩子带上了这次调用的参数（`args`），判断「刚跑完的是哪条命令」不用再自己记。
   - 新钩子 `session/entry`：结构化的会话事件，带页身份；助手那一条来自采样收尾，带最终文本、工具调用、模型、用量、缓存命中率和费用——成本 / 缓存统计插件靠它。
-  - `host.followup(text)`：插件主动找 agent。那一页在跑就在下一步带上，闲着就叫醒它开一轮（一页 5 秒内最多叫醒一次）。配合新的定时器 `host.every` / `host.after`，插件能定时看 CI、看 PR、看监控，出事了叫 agent 来处理。
+  - `host.followup(text)`：插件主动找 agent。那一页在跑就在下一步带上，闲着就叫醒它开一轮（一页 5 秒内最多叫醒一次）。配合新的定时器 `host.every` / `host.after`，插件能定时看 CI、看 PR、看监控，出事了叫 agent 来处理。`host.followup(identity, text)` 只能送到插件正在替它跑的那个会话（那一页和它的子代理）：插件是整个进程共用的，不能借钩子里看到的别的会话 id 往那边塞话、叫醒它。
   - `host.llm(prompt)`：用这一页的模型问一句（不带工具、不进会话），做复审、分类、摘要。
   - `host.load` / `host.save`：跨 reload 和重启的小存储（`$DOCK_HOME/plugin-state/`，不写进项目）。
   - `host.card(...)`：在一轮回答下面挂一张卡片——标题、正文、视图树、按钮，按钮点了在那一页上跑插件的回调。GUI 画在回答下面（新协议 `turn/cards/list` / `action` + 推送 `turn/cards/updated`，能力位 `turnCards`），终端发卡时记一条通知。
   - 技能 `cordis-plugin-development` 改成以行为插件为主线（「以后每次…」「不许…」「改完必须…」就是在要它，写进记忆只是建议），带三个有测试的例子：`guard.rhai`（项目规约守门）、`done-check.rhai`（改了 `.rs` 没跑测试不许收尾 + 「跑测试」卡片）、`trim-output.rhai`（去 ANSI、超长输出只留头尾）。创造模式人设同步。
 - **Claude Code / Codex 的 hooks 配置直接能用**：新内置插件 `hooks-bridge` 跑 command hook，语义对齐 Claude Code / Codex（以及 DSH 的两个桥接）：`SessionStart`、`UserPromptSubmit`、`PreToolUse`、`PostToolUse`、`Stop` / `SubagentStop`；退出码 2 拦下、stderr 是理由；JSON 回答里的 `permissionDecision`（`deny` / `ask` / `allow`）、`additionalContext`、`decision: block`；多条取最严。matcher 按 Claude 的工具名（`Bash`、`Edit`…）或 Dock 的都认。
   - `~/.dock/hooks.json` 和项目 `.dock/hooks.json` 一直读；Claude Code（`~/.claude/settings.json`、项目 `.claude/settings{,.local}.json`）和 Codex（`~/.codex/hooks.json`、项目 `.codex/hooks.json`）在用户级 `~/.dock/config.toml` 写 `[hooks] claude_code = true` / `codex = true` 才读——项目配置开不了这两个开关。
-  - **项目里的 hooks 文件第一次跑之前要你点头**（列出要跑的命令；自动批准不算数），按内容指纹记在 `$DOCK_HOME/hooks-trust.json`，文件一改就重新问。克隆来的仓库自带的 hooks 不会悄悄在本机跑。
+  - **项目里的 hooks 文件第一次跑之前要你点头**（列出要跑的命令和各自的超时；自动批准不算数），按内容指纹记在 `$DOCK_HOME/hooks-trust.json`，文件一改就重新问。克隆来的仓库自带的 hooks 不会悄悄在本机跑。
   - `allow` 不会绕过 Dock 的权限门；hook 坏了（非 2 的退出码、超时、起不来）只记一句，不拦。新命令 `/hooks` 列出生效的配置。详见 `docs/HOOKS.md`。
 - **MCP App 面板跟着模型实时操作**：模型一开始写带界面工具（MCP Apps）的参数，桌面端右侧面板就打开或切过去，参数边写边交给界面（规范的 `tool-input-partial`），不用等参数写完。
   - 内置白板边写边画半透明草稿，「Agent」光标停在正在画的地方、镜头跟着走；改 / 删 / 排版类先高亮要动的图形；结果到了同一帧换成真的。

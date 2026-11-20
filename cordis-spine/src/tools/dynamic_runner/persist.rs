@@ -14,8 +14,10 @@ use serde_json::json;
 use super::registry::{PersistScope, PluginOrigin, Surface};
 use super::{AttemptStatus, DefineReceipt, DefineTarget, DynamicRunner, RunMode, SourceInput};
 use crate::host::slash::{slash_entry_from_define, SlashEntry};
+use crate::names::PERMISSIONS;
 use crate::tools::dynamic_runner::factories::RHAI_FACTORY;
 use crate::tools::dynamic_runner::rhai_host::{FILE_TOO_LARGE, MAX_FILE_SOURCE};
+use cordis::Context;
 use cordis_base::config::dock_home;
 
 /// Session id of autoloaded disk plugins. Visible to every chat session.
@@ -172,6 +174,69 @@ pub fn declared_hooks(source: &str) -> Vec<String> {
         }
     }
     out
+}
+
+/// 批准加载一个磁盘插件，批的是这些：源码里挂的钩子（[`declared_hooks`]）和
+/// `[permissions] http`（之后对这些 host 免逐次确认）。批准框照它列，「始终允许」按它的
+/// [`Self::fingerprint`] 记：只改代码不动这两样，迭代不用每次点；多挂一个钩子、多声明
+/// 一个 host 就是扩大权限，要再问一次。
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct DiskGrants {
+    pub hooks: Vec<String>,
+    pub http: Vec<String>,
+}
+
+impl DiskGrants {
+    /// 现在磁盘上的样子（源文件读不到就当没有钩子）。
+    pub fn of(spec: &DiskSpec) -> Self {
+        let hooks = spec
+            .source_path
+            .as_ref()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .map(|src| declared_hooks(&src))
+            .unwrap_or_default();
+        Self {
+            hooks,
+            http: spec.http_allow.clone(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.hooks.is_empty() && self.http.is_empty()
+    }
+
+    /// 8 位十六进制；两样都空的没有指纹。和书写顺序无关。
+    pub fn fingerprint(&self) -> Option<String> {
+        use sha2::{Digest, Sha256};
+        if self.is_empty() {
+            return None;
+        }
+        let sorted = |items: &[String]| {
+            let mut v = items.to_vec();
+            v.sort();
+            v.dedup();
+            v.join("\n")
+        };
+        let text = format!(
+            "hooks\0{}\0http\0{}",
+            sorted(&self.hooks),
+            sorted(&self.http)
+        );
+        let digest = Sha256::digest(text.as_bytes());
+        Some(digest.iter().take(4).map(|b| format!("{b:02x}")).collect())
+    }
+
+    /// 批准框里的附加行（每样一行，前面带换行）；两样都空的是空串。
+    pub fn describe(&self) -> String {
+        let mut out = String::new();
+        if !self.hooks.is_empty() {
+            out.push_str(&format!("\n钩子：{}", self.hooks.join("、")));
+        }
+        if !self.http.is_empty() {
+            out.push_str(&format!("\nHTTP 免逐次确认：{}", self.http.join("、")));
+        }
+        out
+    }
 }
 
 /// 读插件目录里的源文件：规范化后必须还在这个插件目录里（不许经软链读到别处），
@@ -465,38 +530,149 @@ pub struct DisableReceipt {
     pub was_running: bool,
 }
 
+/// 项目插件的信任按「插件目录（规范化后）+ 内容指纹」记：`plugin.toml` 和 `source.rhai`
+/// 一起算，改了哪个都要重新点头——和项目 hooks 文件一样。插件自己的存储在
+/// `$DOCK_HOME/plugin-state/`，不在目录里，跑起来不会把自己的指纹改掉。
+fn trust_key(spec: &DiskSpec) -> (PathBuf, String) {
+    let read = |p: &Path| std::fs::read_to_string(p).unwrap_or_default();
+    let manifest = read(&spec.path.join("plugin.toml"));
+    let source = spec.source_path.as_deref().map(read).unwrap_or_default();
+    let dir = spec
+        .path
+        .canonicalize()
+        .unwrap_or_else(|_| spec.path.clone());
+    let digest = crate::host::hooks_bridge::trust::digest(&format!(
+        "plugin.toml\0{manifest}\0source.rhai\0{source}"
+    ));
+    (dir, digest)
+}
+
 impl DynamicRunner {
-    pub async fn boot_disk(&self) {
-        self.boot_disk_from(&plugin_roots()).await;
+    /// 用户级的不问（用户自己的目录）；项目级的看现在这份内容点过头没有。
+    pub fn disk_plugin_trusted(&self, spec: &DiskSpec) -> bool {
+        if spec.scope == PersistScope::User {
+            return true;
+        }
+        let (dir, digest) = trust_key(spec);
+        crate::host::hooks_bridge::trust::is_trusted_at(&self.trust_store(), &dir, &digest)
     }
 
-    pub async fn boot_disk_from(&self, roots: &[(PersistScope, PathBuf)]) {
+    /// 记下用户批准加载了这个项目插件现在这份内容。
+    fn remember_disk_trust(&self, spec: &DiskSpec) {
+        if spec.scope == PersistScope::User {
+            return;
+        }
+        self.remember_trust_key(spec, &trust_key(spec));
+    }
+
+    fn remember_trust_key(&self, spec: &DiskSpec, (dir, digest): &(PathBuf, String)) {
+        let store = self.trust_store();
+        if let Err(e) = crate::host::hooks_bridge::trust::remember_at(&store, dir, digest) {
+            eprintln!("[cordis] 记不下插件 {} 的信任：{e}", spec.id);
+        }
+    }
+
+    /// 启动时装上用户级和进程 cwd 那个项目的插件。没确认过的项目插件在根页上问（TUI 的
+    /// 第 1 页）。
+    pub async fn boot_disk(&self) {
+        let page = self.ctx.clone();
+        self.boot_disk_on(&page, &plugin_roots()).await;
+    }
+
+    /// 装上这些根下的插件。用户级的直接装；项目级的现在这份内容要点过头（见
+    /// [`Self::disk_plugin_trusted`]）——一个克隆来的仓库自带的 `.dock/plugins/<id>/` 能改流程、
+    /// 免确认出网、花模型额度、叫醒会话，和同仓库的 `.dock/hooks.json` 一样，第一次跑之前
+    /// 要用户点头。信任过的先全部装上，再在 `page` 上一个一个问没信任过的（「始终允许」、
+    /// 自动批准都不替它点头）。同一份内容这个进程里只问一次：问着的时候别的页再开同一个
+    /// 项目不重复弹，拒绝过的不再问，要用就去设置页启用。
+    pub async fn boot_disk_on(&self, page: &Context, roots: &[(PersistScope, PathBuf)]) {
+        let mut untrusted = Vec::new();
         for spec in scan(roots) {
+            if spec.enabled && !self.disk_plugin_trusted(&spec) {
+                untrusted.push(spec);
+            } else {
+                self.boot_one(&spec).await;
+            }
+        }
+        for spec in untrusted {
             if self.inner.lock().unwrap().registry.get(&spec.id).is_some() {
                 continue;
             }
-            match self.install_disk(&spec) {
-                Ok(defined) => {
-                    if !spec.enabled {
-                        continue;
-                    }
-                    if let Err(e) = self
-                        .run(
-                            PERSIST_SESSION,
-                            &defined.plugin_id,
-                            &defined.package_id,
-                            RunMode::Run,
-                        )
-                        .await
-                    {
-                        eprintln!(
-                            "[cordis] disk plugin {} defined but did not start: {e}",
-                            spec.id
-                        );
-                    }
+            // 批的是问的那一刻的内容：确认框开着时文件又被改了，就不认这次点头（下次打开再问）。
+            let asked = trust_key(&spec);
+            if self.ask_disk_trust(page, &spec, &asked).await {
+                if trust_key(&spec) != asked {
+                    eprintln!("[cordis] 项目插件 {} 在确认期间被改过，这次不加载", spec.id);
+                    continue;
                 }
-                Err(e) => eprintln!("[cordis] disk plugin {}: {e}", spec.id),
+                self.remember_trust_key(&spec, &asked);
+                self.boot_one(&spec).await;
             }
+        }
+    }
+
+    async fn ask_disk_trust(
+        &self,
+        page: &Context,
+        spec: &DiskSpec,
+        key: &(PathBuf, String),
+    ) -> bool {
+        if !self.trust_asked.lock().unwrap().insert(key.clone()) {
+            return false;
+        }
+        let Some(perms) = page.get::<crate::host::permissions::Permissions>(PERMISSIONS) else {
+            eprintln!(
+                "[cordis] 项目插件 {}（{}）还没确认过，这里问不了，先不加载",
+                spec.id,
+                spec.path.display()
+            );
+            return false;
+        };
+        let summary = format!(
+            "加载项目自带的插件 {}（{}）：以宿主权限运行它的代码，对所有会话生效。这个项目的插件还没确认过，或者文件改过了。{}",
+            spec.id,
+            spec.path.display(),
+            DiskGrants::of(spec).describe()
+        );
+        perms
+            .request_strict(&format!("cordis_plugin {}", spec.id), &summary, None)
+            .await
+    }
+
+    /// 装上这些根下的插件，**不查项目插件的信任**——调用方自己确认过（测试、已经点过头
+    /// 的）。产品路径走 [`Self::boot_disk`] / [`Self::boot_project`]。
+    pub async fn boot_disk_from(&self, roots: &[(PersistScope, PathBuf)]) {
+        for spec in scan(roots) {
+            self.boot_one(&spec).await;
+        }
+    }
+
+    /// 装上一个磁盘插件（同名已装的跳过），`enabled` 的再跑起来。
+    async fn boot_one(&self, spec: &DiskSpec) {
+        if self.inner.lock().unwrap().registry.get(&spec.id).is_some() {
+            return;
+        }
+        match self.install_disk(spec) {
+            Ok(defined) => {
+                if !spec.enabled {
+                    return;
+                }
+                if let Err(e) = self
+                    .run(
+                        PERSIST_SESSION,
+                        &defined.plugin_id,
+                        &defined.package_id,
+                        RunMode::Run,
+                    )
+                    .await
+                {
+                    eprintln!(
+                        "[cordis] disk plugin {} defined but did not start: {e}",
+                        spec.id
+                    );
+                }
+            }
+            Err(e) => eprintln!("[cordis] disk plugin {}: {e}", spec.id),
         }
     }
 
@@ -572,6 +748,9 @@ impl DynamicRunner {
         if enabled_now {
             write_disk_enabled(&spec.path, true)?;
         }
+        // reload 是用户批准过的加载（`cordis_plugin` 过了权限门、设置页点了启用）：记下
+        // 这份内容，下次打开项目不用再问。放在改 `enabled` 之后，指纹按改完的文件算。
+        self.remember_disk_trust(spec);
         let mut receipt = ReloadReceipt {
             id: spec.id.clone(),
             dir: spec.path.clone(),
@@ -727,6 +906,8 @@ impl DynamicRunner {
                     "已停用"
                 } else if v.shadowed_by.is_some() {
                     "被同名插件盖住"
+                } else if v.untrusted {
+                    "等用户确认"
                 } else {
                     "未装载"
                 };
@@ -775,6 +956,10 @@ pub struct DiskPluginView {
     pub shadowed_by: Option<PathBuf>,
     /// 读不起来、启动失败、或最近一次 reload 失败的原因。
     pub error: Option<String>,
+    /// 项目自带的插件，现在这份内容用户还没点过头，所以没装（见
+    /// [`DynamicRunner::disk_plugin_trusted`]）。
+    /// 用户自己触发的加载（设置页「立即加载」、`cordis_plugin reload`）就是点头。
+    pub untrusted: bool,
 }
 
 /// 两个路径是不是同一个目录：先比字面，不同再比规范化后的真实路径（符号链接、
@@ -826,6 +1011,7 @@ impl DynamicRunner {
                         .map(Path::to_path_buf)
                         .unwrap_or_else(|| PathBuf::from("（程序侧定义的插件）"))
                 });
+                let untrusted = spec.enabled && rec.is_none() && !self.disk_plugin_trusted(&spec);
                 out.push(DiskPluginView {
                     id: spec.id,
                     name: spec.name,
@@ -838,6 +1024,7 @@ impl DynamicRunner {
                     running: here && rec.is_some_and(|r| r.run.is_some()),
                     shadowed_by,
                     error: if here { rec.and_then(failure) } else { None },
+                    untrusted,
                 });
             }
             out.extend(broken.into_iter().map(|b| DiskPluginView {
@@ -852,6 +1039,7 @@ impl DynamicRunner {
                 running: false,
                 shadowed_by: None,
                 error: Some(b.error),
+                untrusted: false,
             }));
         }
         out
@@ -912,10 +1100,10 @@ impl DynamicRunner {
         std::fs::remove_dir_all(dir).map_err(|e| format!("删除 {} 失败：{e}", dir.display()))
     }
 
-    /// 打开某个项目的会话时装上它的永久插件（同名已装的跳过）。和 TUI 从这个目录
-    /// 启动时一样自动跑，不走权限确认。
-    pub async fn boot_project(&self, project: &Path) {
-        self.boot_disk_from(&[(PersistScope::Project, project_root(project))])
+    /// 打开某个项目的会话时装上它的永久插件（同名已装的跳过）。没确认过的在打开它的
+    /// 那一页 `page` 上问，见 [`Self::boot_disk_on`]。
+    pub async fn boot_project(&self, page: &Context, project: &Path) {
+        self.boot_disk_on(page, &[(PersistScope::Project, project_root(project))])
             .await;
     }
 }
