@@ -319,6 +319,20 @@ pub struct LlmFinished {
     pub cost_usd_ticks: Option<i64>,
 }
 
+/// 正在流的那一格（[`Sessions::begin_llm`] 放下的 [`LogEvent::LlmStream`]）的下标。
+///
+/// 流到一半时，别的来源可能已经往这一页追加了只给人看的 [`LogEvent::Notice`]（工作流
+/// 的上报卡、收尾卡都是异步来的）。以前只认「最后一条」，于是这一次采样的正文和工具
+/// 调用一个都写不进去：工具照样跑了，结果却成了没有调用的孤儿，下一轮回放时被丢掉，
+/// 模型既不记得自己调过、也看不到结果。Notice 不进模型历史，跳过去找；中间夹了
+/// 别的事件（工具结果、用户消息）说明这一格早就收尾了，不认。
+fn inflight_llm_index(events: &[LogEvent]) -> Option<usize> {
+    let at = events
+        .iter()
+        .rposition(|e| !matches!(e, LogEvent::Notice { .. }))?;
+    matches!(events[at], LogEvent::LlmStream(_)).then_some(at)
+}
+
 impl Sessions {
     pub fn new(ctx: Context) -> Self {
         Self::with_identity(ctx, ROOT_IDENTITY, true)
@@ -1208,7 +1222,10 @@ impl Sessions {
                     return;
                 }
                 let mut events = self.events.lock().unwrap();
-                let Some(LogEvent::LlmStream(out)) = events.last_mut() else {
+                let Some(at) = inflight_llm_index(&events) else {
+                    return;
+                };
+                let LogEvent::LlmStream(out) = &mut events[at] else {
                     return;
                 };
                 out.text.push_str(text);
@@ -1218,7 +1235,7 @@ impl Sessions {
                         usage.completion = Self::estimate_tokens(&out.text);
                     }
                 }
-                let event = events.last().cloned().unwrap();
+                let event = events[at].clone();
                 drop(events);
                 self.bump_events_rev();
                 self.emit_session(event);
@@ -1228,11 +1245,14 @@ impl Sessions {
                     return;
                 }
                 let mut events = self.events.lock().unwrap();
-                let Some(LogEvent::LlmStream(out)) = events.last_mut() else {
+                let Some(at) = inflight_llm_index(&events) else {
+                    return;
+                };
+                let LogEvent::LlmStream(out) = &mut events[at] else {
                     return;
                 };
                 out.reasoning.push_str(text);
-                let event = events.last().cloned().unwrap();
+                let event = events[at].clone();
                 drop(events);
                 self.bump_events_rev();
                 self.emit_session(event);
@@ -1265,9 +1285,12 @@ impl Sessions {
                 // 只是「用量变了」的通知：发当前这条流的原样副本。以前发空的
                 // `LlmStream`，按页投影的监听者（网关）会把它当成新一步开始，把
                 // 已推送的文本基准清空，下一条完整文本就被整段重推一遍。
-                let current = match self.events.lock().unwrap().last() {
-                    Some(event @ LogEvent::LlmStream(_)) => event.clone(),
-                    _ => LogEvent::LlmStream(cordis_base::types::LlmOutput::default()),
+                let current = {
+                    let events = self.events.lock().unwrap();
+                    match inflight_llm_index(&events) {
+                        Some(at) => events[at].clone(),
+                        None => LogEvent::LlmStream(cordis_base::types::LlmOutput::default()),
+                    }
                 };
                 self.emit_session(current);
             }
@@ -1317,10 +1340,13 @@ impl Sessions {
             return;
         }
         let mut events = self.events.lock().unwrap();
-        let Some(LogEvent::LlmStream(out)) = events.last_mut() else {
+        let Some(at) = inflight_llm_index(&events) else {
             drop(events);
             let _ = self.commit_pending_call();
             return;
+        };
+        let LogEvent::LlmStream(out) = &mut events[at] else {
+            unreachable!("inflight_llm_index 只回 LlmStream 的下标");
         };
         // 流式 delta 先写下原文。调用方给出非空文本时以它为准，这样 `llm/stream`
         // 的改写能盖掉已经推给界面、也会进下一轮 `model_history()` 的那一份。
@@ -1360,7 +1386,7 @@ impl Sessions {
                 .map(|t| t.elapsed().as_millis() as u64);
         }
         out.tool_calls = output.tool_calls.clone();
-        let event = events.last().cloned().unwrap();
+        let event = events[at].clone();
         drop(events);
         self.anchor_context();
         self.bump_events_rev();
@@ -1666,15 +1692,19 @@ impl Sessions {
         let mut events = self.events.lock().unwrap();
         let mut times = self.times.lock().unwrap();
         let mut changed = false;
-        loop {
-            match events.last() {
-                Some(LogEvent::LlmStream(out))
+        // 空着的那一格弹掉。尾巴上可能还压着流式途中到达的 Notice（见
+        // [`inflight_llm_index`]）：卡片留下，只拿掉空格。
+        while let Some(at) = inflight_llm_index(&events) {
+            match &events[at] {
+                LogEvent::LlmStream(out)
                     if out.text.is_empty()
                         && out.reasoning.is_empty()
                         && out.tool_calls.is_empty() =>
                 {
-                    events.pop();
-                    times.pop();
+                    events.remove(at);
+                    if at < times.len() {
+                        times.remove(at);
+                    }
                     changed = true;
                 }
                 _ => break,
@@ -2076,6 +2106,21 @@ impl Sessions {
         self.live_id.lock().unwrap().clone()
     }
 
+    /// 给上游当会话 id 用的（`prompt_cache_key`、订阅通道的会话路由头）：这一页的
+    /// 会话 id；子代理（工作流里的也是）没有落盘 id，用它自己的身份——那就是它的
+    /// agent id，唯一、resume 之后也不变。
+    ///
+    /// 主会话还没有 id 时是空串：`main` 这种身份每个进程都一样，拿它当键等于把
+    /// 不相干的会话捆在一起。以前子代理一律是空串，它们的请求不带键也不带路由头，
+    /// 在订阅通道上前缀缓存几乎不中。
+    pub fn upstream_session_id(&self) -> String {
+        let live = self.live_session_id();
+        if live.is_empty() && !self.is_main() {
+            return self.identity.to_string();
+        }
+        live
+    }
+
     /// 不落盘的页（侧边聊天的旁问页）也要一个 id，网关按它把这一页当线程寻址。
     /// 只在还没有 id 时给，不挂盘、不建目录。
     pub fn assign_ephemeral_id(&self) {
@@ -2448,6 +2493,88 @@ mod tests {
             LogEvent::LlmStream(out) => assert_eq!(out.text, "Hello"),
             other => panic!("{other:?}"),
         }
+    }
+
+    /// 流到一半来了一张只给人看的卡（工作流的上报 / 收尾卡是异步追加的）：这一次采样
+    /// 的正文和工具调用照样落进那一格，工具结果有对应的调用，下一轮回放得出来。
+    ///
+    /// 以前只认「最后一条」：卡片一插进来，那一格就一直是空的，工具照样跑了，结果
+    /// 却成了孤儿，回放时被丢掉（实测一次 `/code-review`：收尾卡插在那一格后面，
+    /// 模型最后回答「输出被截断、无法确认测试是否通过」）。
+    #[tokio::test]
+    async fn a_notice_mid_stream_does_not_orphan_the_tool_call() {
+        use cordis_base::stream_acc::StreamDelta;
+        use cordis_base::types::{LlmOutput, NoticeKind, ToolCall};
+        let ctx = Context::new();
+        let sessions = Sessions::new(ctx);
+        sessions.append(LogEvent::User("review".into()));
+        sessions.begin_llm();
+        sessions.apply_llm_delta(&StreamDelta::Reasoning("看一下".into()));
+        sessions.append(LogEvent::Notice {
+            kind: NoticeKind::WorkflowDone,
+            title: "工作流 code-review · 完成".into(),
+            body: "findings: 0".into(),
+        });
+        sessions.apply_llm_delta(&StreamDelta::Text("读一下测试输出".into()));
+        let call = ToolCall {
+            id: "call_1".into(),
+            name: "read_file".into(),
+            arguments: "{}".into(),
+        };
+        sessions.finish_llm(&LlmOutput {
+            tool_calls: vec![call.clone()],
+            ..LlmOutput::default()
+        });
+
+        let events = sessions.events();
+        match &events[1] {
+            LogEvent::LlmStream(out) => {
+                assert_eq!(out.text, "读一下测试输出");
+                assert_eq!(out.reasoning, "看一下");
+                assert_eq!(out.tool_calls, vec![call]);
+            }
+            other => panic!("那一格该是这次采样：{other:?}"),
+        }
+        assert!(
+            matches!(events[2], LogEvent::Notice { .. }),
+            "卡片留在它到达的位置：{events:?}"
+        );
+        // 卡片不进模型历史，调用照样在：下一轮回放时工具结果有主。
+        let history = sessions.model_history();
+        assert!(
+            history
+                .iter()
+                .any(|e| matches!(e, LogEvent::LlmStream(out) if out.tool_calls.len() == 1)),
+            "{history:?}"
+        );
+    }
+
+    /// 流式途中来了张卡、随后这一步什么都没产出就被停下：空着的那一格照样弹掉，
+    /// 卡片留着。以前只看最后一条，卡片压在上面时空格留在记录里。
+    #[tokio::test]
+    async fn sealing_drops_an_empty_slot_under_a_notice() {
+        use cordis_base::types::NoticeKind;
+        let ctx = Context::new();
+        let sessions = Sessions::new(ctx);
+        sessions.append(LogEvent::User("review".into()));
+        sessions.begin_llm();
+        sessions.append(LogEvent::Notice {
+            kind: NoticeKind::WorkflowReport,
+            title: "code-review · reviewer 上报".into(),
+            body: "findings: 0".into(),
+        });
+        sessions.seal_incomplete_tool_calls();
+
+        let events = sessions.events();
+        assert!(
+            !events.iter().any(|e| matches!(e, LogEvent::LlmStream(_))),
+            "空格该弹掉：{events:?}"
+        );
+        assert!(
+            matches!(events.last(), Some(LogEvent::Notice { .. })),
+            "卡片留着：{events:?}"
+        );
+        assert_eq!(sessions.times().len(), events.len(), "时刻跟着事件对齐");
     }
 
     /// 工具参数的片段按调用编号推给界面，不进日志；同一个调用按间隔节流（攒着的拼进

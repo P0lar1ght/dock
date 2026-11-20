@@ -323,6 +323,8 @@ async fn sample_http(
             messages::body(&wire, &request, &user_images, &params, prompt_cache)
         }
     };
+    // 订阅通道的会话路由（会话头 + 这一轮的粘性路由令牌），见 [`SessionRouting`]。
+    let mut routing = SessionRouting::default();
     // 订阅通道的请求体约束（`store: false`、system 走 `instructions`、去掉
     // 上游不收的字段……）。只对 responses 生效——那几条 wire 的字段名不一样。
     if let Some(policy) = wire_policy.as_ref() {
@@ -338,9 +340,12 @@ async fn sample_http(
         responses::apply_policy(&mut body, &request, policy);
         let session_id = exec
             .get::<Sessions>(SESSIONS)
-            .map(|s| s.live_session_id())
+            .map(|s| s.upstream_session_id())
             .unwrap_or_default();
         responses::apply_cache_key(&mut body, policy, &session_id);
+        if let Some(sub) = subscription.as_ref() {
+            routing = SessionRouting::new(policy, &session_id, sub, &wire);
+        }
     }
     // 上游以前明确说过不收的字段（400 `…_unsupported_capability` 的 `error.param`）：
     // 一开始就不发，免得每轮都先撞一次 400。
@@ -362,8 +367,10 @@ async fn sample_http(
         &wire,
         &body,
     );
+    let turn = exec.get::<TurnControl>(TURN);
+    cache_debug::note_routing(&routing.describe(turn.as_deref()));
     let client = llm_client();
-    let cancel = exec.get::<TurnControl>(TURN).map(|t| t.token());
+    let cancel = turn.as_ref().map(|t| t.token());
     // 三种重试各有各的预算，互不挤占：
     // - 传输失败 / 503：最多 3 次（`attempt`）；
     // - 订阅通道 401：换一份 token 重发**一次**——换完还 401 就是账号本身的问题；
@@ -378,6 +385,7 @@ async fn sample_http(
             .header(reqwest::header::ACCEPT, "text/event-stream")
             .json(&body);
         send = apply_auth(send, auth, &api_key);
+        send = routing.apply(send, turn.as_deref());
         if backend == ApiBackend::Messages {
             send = send.header("anthropic-version", "2023-06-01");
         }
@@ -512,6 +520,7 @@ async fn sample_http(
         });
         return http_error_output(status, request_id, &text, classified);
     }
+    routing.remember(response.headers(), turn.as_deref());
     let content_type = response
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
@@ -768,6 +777,96 @@ impl std::fmt::Debug for Subscription {
             .field("policy", &self.policy)
             .field("api_base", &self.api_base)
             .finish()
+    }
+}
+
+/// 订阅通道的会话路由：按会话带的请求头 + 这一轮回传的粘性路由令牌。
+///
+/// 有的通道（SIWC）按请求头把同一会话的请求路由到同一批机器；不带的话每次
+/// 请求都随机落到别的机器，前缀缓存几乎不中（`prompt_cache_key` 单独不够）。
+/// 默认值什么都不带：没走订阅通道的模型请求头与以前一样。
+#[derive(Default)]
+struct SessionRouting {
+    /// 值取会话 id 的那几个请求头。
+    headers: Vec<(&'static str, String)>,
+    /// `(头名, 这份令牌是谁给的)`：令牌存在 [`TurnControl`] 里，只活一轮。
+    turn_state: Option<(&'static str, String)>,
+}
+
+impl SessionRouting {
+    fn new(policy: &WirePolicy, session_id: &str, sub: &Subscription, wire: &str) -> Self {
+        let headers = if session_id.is_empty() {
+            // 还没落盘的会话：空 id 等于把这类会话全捆到一起，不如不带。
+            Vec::new()
+        } else {
+            policy
+                .session_headers
+                .iter()
+                .map(|name| (*name, session_id.to_string()))
+                .collect()
+        };
+        // 换账号 / 换模型就不该回传上一份：令牌是那一家、那个账号、那个模型给的。
+        let turn_state = policy.turn_state_header.map(|name| {
+            let account = &sub.lease.account;
+            (
+                name,
+                format!("{}\n{}\n{}", sub.provider_id, account.client_id, wire),
+            )
+        });
+        Self {
+            headers,
+            turn_state,
+        }
+    }
+
+    fn apply(
+        &self,
+        mut send: reqwest::RequestBuilder,
+        turn: Option<&TurnControl>,
+    ) -> reqwest::RequestBuilder {
+        for (name, value) in &self.headers {
+            send = send.header(*name, value);
+        }
+        if let (Some((name, key)), Some(turn)) = (&self.turn_state, turn) {
+            if let Some(token) = turn.routing_token(key) {
+                send = send.header(*name, token);
+            }
+        }
+        send
+    }
+
+    /// 成功的响应带回来的令牌记进这一轮（一轮里只认第一次给的）。
+    fn remember(&self, response: &reqwest::header::HeaderMap, turn: Option<&TurnControl>) {
+        let (Some((name, key)), Some(turn)) = (&self.turn_state, turn) else {
+            return;
+        };
+        let value = response
+            .get(*name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .unwrap_or("");
+        if !value.is_empty() {
+            turn.remember_routing_token(key, value);
+        }
+    }
+
+    /// 给 `DOCK_CACHE_DEBUG` 日志的一句：这次带了哪些路由头。没走订阅通道是空串。
+    fn describe(&self, turn: Option<&TurnControl>) -> String {
+        let mut parts: Vec<&str> = self.headers.iter().map(|(name, _)| *name).collect();
+        let replayed = match (&self.turn_state, turn) {
+            (Some((name, key)), Some(turn)) if turn.routing_token(key).is_some() => Some(*name),
+            _ => None,
+        };
+        if self.headers.is_empty() && self.turn_state.is_none() {
+            return String::new();
+        }
+        if parts.is_empty() {
+            parts.push("（没有会话 id，不带会话头）");
+        }
+        match replayed {
+            Some(name) => format!("{} · 回传 {name}", parts.join(" ")),
+            None => format!("{} · 这一轮还没有路由令牌", parts.join(" ")),
+        }
     }
 }
 

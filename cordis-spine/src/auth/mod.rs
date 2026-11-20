@@ -115,9 +115,15 @@ pub fn chatgpt_policy() -> WirePolicy {
         // `store: false` → 服务端不留存，推理项的 id 下次就不认了：必须把
         // 加密内容要回来（多轮回传靠它）。
         include_fields: &["reasoning.encrypted_content"],
-        // 不在禁发的 15 个字段里，实测上游收（200）。2026-11-15 实测这条通道的
-        // 前缀缓存很少命中（相同请求 30 秒后重发仍是 0），带上至少不吃亏。
+        // 不在禁发的 15 个字段里，实测上游收（200）。
         prompt_cache_key: true,
+        // 这条通道按请求头做会话路由，跟官方客户端 Codex 发的一样。2026-11-21
+        // 用 gpt-6-luna 实测（每组连发几步，后一步追加前一步的输出）：只带
+        // `prompt_cache_key`，后续 20 步 0 次命中；加上这三个头并回传
+        // turn-state，60 步里 51 步命中（每次约占输入的 95%）。实测记录见
+        // `docs/CHATGPT-SIWC.md`「前缀缓存」。
+        session_headers: &["session-id", "thread-id", "x-client-request-id"],
+        turn_state_header: Some("x-codex-turn-state"),
     }
 }
 
@@ -153,5 +159,17 @@ mod tests {
         assert!(policy.force_stream);
         assert!(policy.system_as_instructions);
         assert!(!policy.allow_previous_response_id);
+    }
+
+    /// 少了会话头 / turn-state，这条通道每次请求都落到别的机器，前缀缓存几乎不中。
+    #[test]
+    fn chatgpt_policy_routes_by_session_headers_and_turn_state() {
+        let policy = chatgpt_policy();
+        assert!(policy.prompt_cache_key);
+        assert_eq!(
+            policy.session_headers,
+            &["session-id", "thread-id", "x-client-request-id"]
+        );
+        assert_eq!(policy.turn_state_header, Some("x-codex-turn-state"));
     }
 }
