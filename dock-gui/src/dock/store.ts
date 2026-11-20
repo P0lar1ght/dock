@@ -1106,6 +1106,7 @@ export class DockStore {
         kind: string;
         fill?: string;
         menu?: string;
+        slot?: string;
         notice?: { title?: string; body?: string };
       }>("slash/execute", { threadId: id, text });
       await this.loadEnv(id).catch(() => {});
@@ -1116,6 +1117,8 @@ export class DockStore {
           return { kind: "filled", fill: r.fill ?? "" };
         case "passthrough":
           return { kind: "passthrough" };
+        case "openSlot":
+          return { kind: "openSlot", slot: r.slot ?? "" };
         case "notice":
         case "applied":
           return { kind: "notice", title: r.notice?.title ?? "", body: r.notice?.body ?? "" };

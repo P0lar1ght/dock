@@ -207,4 +207,5 @@ export type SlashResult =
   | { kind: "submitted" }
   | { kind: "filled"; fill: string }
   | { kind: "notice"; title: string; body: string }
+  | { kind: "openSlot"; slot: string }
   | { kind: "passthrough" };

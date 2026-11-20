@@ -51,6 +51,8 @@ export interface ComposerActions {
   loadSlash: () => Promise<SlashCommand[]>;
   /** 跑一行斜杠命令；`null` = 出错了（错误已经显示在别处）。 */
   onSlash: (text: string) => Promise<SlashResult | null>;
+  /** Dock 让打开一个插件面板（`kind: slot` 的斜杠命令，如 /cyberspace）。 */
+  onOpenSlot?: (slot: string) => void;
   /** 把这一条立成目标发出去；成功回 true。 */
   onStartGoal: (text: string, images: ImageInput[]) => Promise<boolean>;
   /** 上下文圆环点开时拉明细。 */
@@ -298,6 +300,7 @@ export function Composer({
           ref.current?.focus();
           return;
         }
+        if (r.kind === "openSlot") on.onOpenSlot?.(r.slot);
         if (r.kind === "notice") setNotice({ title: r.title, body: r.body });
         if (r.kind !== "passthrough") {
           setText("");

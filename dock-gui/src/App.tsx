@@ -46,6 +46,7 @@ import { TerminalDock } from "./components/TerminalDock";
 import { PANELS, PanelControls, PanelGrip, openPanelWindow } from "./components/PanelChrome";
 import { PanelStack } from "./components/PanelStack";
 import { SideTabs, type SideTabMeta } from "./components/SideTabs";
+import { surfaceKind } from "./features/plugins/panelKind";
 import { PanelRight } from "lucide-react";
 import { PullRequestsPage } from "./components/PullRequestsPage";
 import { SchedulesPage } from "./components/SchedulesPage";
@@ -891,6 +892,8 @@ export default function App() {
                   sideToggle={panelOpen || split ? undefined : sideToggle}
                   onDetach={activeSession ? () => detach(activeSession.id) : undefined}
                   onDeleted={() => navigate(null)}
+                  onOpenSlot={(slot) => featureHost.openPanel(surfaceKind(slot))}
+                  // 关左边：右边那个挪过来当主面板。
                   // 关左边：右边那个挪过来当主面板。
                   onClosePane={
                     split
@@ -927,6 +930,7 @@ export default function App() {
                       onDetach={() => detach(splitSession.id)}
                       onDeleted={() => setSplit(null)}
                       onClosePane={() => setSplit(null)}
+                      onOpenSlot={(slot) => featureHost.openPanel(surfaceKind(slot))}
                       showConnection={false}
                       empty={null}
                     />

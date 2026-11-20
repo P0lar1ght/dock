@@ -43,6 +43,8 @@ export interface SessionPaneProps {
   closeLabel?: string;
   /** 顶部的连接横条；分屏时只有左边那个画，免得两条一样的。 */
   showConnection?: boolean;
+  /** 斜杠命令要开插件面板（`kind: slot`）时调，App 接到右侧面板槽。 */
+  onOpenSlot?: (slot: string) => void;
 }
 
 /**
@@ -231,6 +233,7 @@ export function SessionPane(props: SessionPaneProps) {
             onSetPlan={(on) => store.setPlan(id, on)}
             loadSlash={store.slashCommands}
             onSlash={(text) => store.runSlash(id, text)}
+            onOpenSlot={props.onOpenSlot}
             onStartGoal={(text, images) => store.startGoal(id, text, images)}
             loadContext={() => store.contextBreakdown(id)}
             onCompact={() => void store.compact(id)}
