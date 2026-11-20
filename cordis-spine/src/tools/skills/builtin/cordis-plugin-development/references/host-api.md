@@ -7,7 +7,8 @@ HTTP 与编解码见 `http.md`。
 | 调用 | 要 `inject` | 说明 |
 | --- | --- | --- |
 | `host.register_tool(#{ name, description, parameters, execute, view? })` | `tools` | 注册一颗模型工具，见下 |
-| `host.call_tool(name, args)` | `tools` | 调一颗活着的工具；`args` 是 map 或 JSON 字符串。在发起这次调用的那一页上执行，bash 类工具照样弹权限 |
+| `host.call_tool(name, args)` | `tools` | 调一颗活着的工具，回文本；`args` 是 map 或 JSON 字符串。在发起这次调用的那一页上执行，bash 类工具照样弹权限 |
+| `host.call_tool_result(name, args)` | `tools` | 同上，回 `#{ name, text, json, is_error, images }`，见下 |
 | `host.provide(name, map)` | — | 把一张 map 挂成命名服务（RhaiBag）。重名失败；停包时撤掉 |
 | `host.get(name)` | — | bag → map 的拷贝；活着的非 bag 服务 → `true`；没有 → `()` |
 | `host.secret(name)` | — | 读密钥，见下 |
@@ -42,6 +43,27 @@ host.register_tool(#{
 - 绕过预设的工具允许名单（能力档位照查）。
 - reload 之后同一轮就能验证：`use_tool { tool_name: "memo_set", tool_input: { text: "x" } }`。
 - reload 换版 / disable 时一起撤掉；没有 `unregister_tool`。
+
+## 用工具，别等新的 host 函数：`host.call_tool_result`
+
+要读文件、跑命令、抓网页、操作浏览器、调某个 MCP 服务器，**调它的工具**：工具表里的每一颗
+都能调，MCP 工具按 `mcp_<server>__<tool>` 的名字（`cordis_inspect what: "tools"` 列着）。
+权限门、计划门照走，确认弹在发起调用的那一页。
+
+```rhai
+let r = host.call_tool_result("mcp_github__get_issue", #{ owner: "o", repo: "r", issue_number: 1 });
+if r.is_error { return "没取到：" + r.text; }
+let issue = r.json;          // 工具回的文本整段是 JSON 时已经解析好，不是就 ()
+if issue == () { return r.text; }
+issue.title
+```
+
+- `is_error`：注册表给的成败——被拒、被拦、报错、命令非零退出都是 `true`。别再按文本开头猜。
+- `json`：文本**整段**是合法 JSON 时解析好的值，不是就 `()`。很多 MCP 工具回的是 JSON；
+  `web_fetch` 不是（开头有一行 `HTTP 200 <url>`）——要调 JSON 接口用 `http_request`，再
+  `parse_json(resp.body)`（`http.md`）。
+- `name`：实际跑的那颗（被 `tools/pre-execute` 改道后是新名字）；`images`：回了几张图（像素拿不到）。
+- 只要文本就用 `host.call_tool`，它没变。
 
 ## `host.secret(name)`
 

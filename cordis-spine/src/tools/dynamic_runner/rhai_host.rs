@@ -123,8 +123,11 @@ pub const HOST_BUILTINS: &[(&str, &str, &[&str])] = &[
     ),
     (
         "host.call_tool",
-        "Execute a live model tool (permissions still apply), on the page that triggered this script.",
-        &["host.call_tool(name: String, args: Map | String) -> String"],
+        "Execute a live model tool (permissions still apply), on the page that triggered this script. Any tool in the table works, MCP ones included (mcp_<server>__<tool>) — reach for a tool before asking for a new host function. call_tool returns the text; call_tool_result also says whether it failed (is_error: refused, blocked, errored, non-zero exit) and parses the text when it is JSON (json, else ()). name is the tool that actually ran; images is how many images it returned.",
+        &[
+            "host.call_tool(name: String, args: Map | String) -> String",
+            "host.call_tool_result(name: String, args: Map | String) -> #{ name, text, json, is_error, images }",
+        ],
     ),
     (
         "host.followup",
@@ -332,6 +335,8 @@ fn apply_rhai(ctx: &Context, plugin_id: &str, source: &str, scope: RunScope) -> 
     super::rhai_regex::register(&mut engine);
     // Wall clock: SystemTime epoch helpers (timestamp() is Instant-only).
     super::rhai_time::register(&mut engine);
+    // Pure ecosystem packages (rhai-url, rhai-rand): runtime-only like the codecs.
+    super::rhai_packages::register(&mut engine);
     let ast = engine
         .compile(source)
         .map_err(|e| format!("rhai syntax: {e}"))?;
@@ -415,6 +420,7 @@ fn register_host(engine: &mut Engine) {
     engine.register_fn("register_tool_view", Host::register_tool_view);
     engine.register_fn("clear_status", Host::clear_status);
     engine.register_fn("call_tool", Host::call_tool);
+    engine.register_fn("call_tool_result", Host::call_tool_result);
     engine.register_fn("followup", Host::followup);
     engine.register_fn("followup", Host::followup_to);
     engine.register_fn("every", Host::every_int);
@@ -827,6 +833,26 @@ impl Host {
         name: ImmutableString,
         args: Dynamic,
     ) -> Result<ImmutableString, Box<rhai::EvalAltResult>> {
+        Ok(self.run_tool(name, args)?.content.into())
+    }
+
+    /// 同 `call_tool`，但把这次调用的结论一起交回来：`text` 是同一份文本，`is_error`
+    /// 是注册表给的成败（被拒、被拦、报错、非零退出都算），`json` 是文本恰好是 JSON
+    /// 时解析好的值（很多 MCP 工具回的就是 JSON），不是就 `()`。
+    /// `call_tool` 只给文本，脚本只能按开头猜成败。
+    fn call_tool_result(
+        &mut self,
+        name: ImmutableString,
+        args: Dynamic,
+    ) -> Result<Map, Box<rhai::EvalAltResult>> {
+        Ok(tool_result_map(&self.run_tool(name, args)?))
+    }
+
+    fn run_tool(
+        &self,
+        name: ImmutableString,
+        args: Dynamic,
+    ) -> Result<ToolResult, Box<rhai::EvalAltResult>> {
         let tools = self
             .inner
             .ctx
@@ -842,8 +868,7 @@ impl Host {
             name: name.to_string(),
             arguments,
         };
-        let text = block_on_tool(&self.inner.ctx, tools.as_ref(), call)?;
-        Ok(text.into())
+        block_on_tool(&self.inner.ctx, tools.as_ref(), call)
     }
 
     fn followup(
@@ -2154,12 +2179,25 @@ fn block_on_tool(
     plugin_ctx: &Context,
     tools: &Tools,
     call: ToolCall,
-) -> Result<String, Box<rhai::EvalAltResult>> {
+) -> Result<ToolResult, Box<rhai::EvalAltResult>> {
     let handle = tokio::runtime::Handle::try_current().map_err(|e| eval_err(e.to_string()))?;
     let tools = tools.clone();
     let page = crate::tools::registry::exec_ctx().unwrap_or_else(|| plugin_ctx.clone());
-    let result = tokio::task::block_in_place(|| handle.block_on(tools.execute_on(&page, call)));
-    Ok(result.content)
+    Ok(tokio::task::block_in_place(|| {
+        handle.block_on(tools.execute_on(&page, call))
+    }))
+}
+
+/// `host.call_tool_result` 交回脚本的 map。`name` 是实际跑的那颗（`tools/pre-execute`
+/// 改道后就是新名字）；`images` 只给张数，像素脚本用不上。
+fn tool_result_map(result: &ToolResult) -> Map {
+    let mut map = Map::new();
+    map.insert("name".into(), result.name.clone().into());
+    map.insert("text".into(), result.content.clone().into());
+    map.insert("json".into(), json_str_to_dynamic(result.content.trim()));
+    map.insert("is_error".into(), result.is_error.into());
+    map.insert("images".into(), (result.images.len() as rhai::INT).into());
+    map
 }
 
 pub(crate) fn tool_parameters_json(spec: &Map) -> Result<String, String> {
@@ -2286,6 +2324,7 @@ pub fn builtins_lines() -> Vec<String> {
         .chain(super::rhai_codec::BUILTINS.iter())
         .chain(super::rhai_regex::BUILTINS.iter())
         .chain(super::rhai_time::BUILTINS.iter())
+        .chain(super::rhai_packages::BUILTINS.iter())
         .flat_map(|(name, purpose, sigs)| {
             let mut lines = vec![format!("- {name} — {purpose}")];
             for sig in *sigs {

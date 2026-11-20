@@ -16,6 +16,7 @@ mod registry;
 mod rhai_codec;
 mod rhai_host;
 mod rhai_http;
+mod rhai_packages;
 mod rhai_regex;
 mod rhai_secret;
 mod rhai_time;

@@ -1,4 +1,4 @@
-# HTTP、文件上传、编解码、正则、时间
+# HTTP、文件上传、编解码、正则、时间、URL、随机数
 
 脚本自带 HTTP 和 JSON，一颗插件就能把任意 HTTP 接口变成 Dock 工具。
 本页函数**只在运行期有**：写在 `apply` 或 `execute` / 回调里，不要写在顶层
@@ -104,3 +104,33 @@ let auth = "Basic " + to_base64(args.user + ":" + args.pass);
 | `utc_date()` / `now_date()` | `YYYY-MM-DD` |
 
 API 签名用 `utc_now()`，别用 `timestamp()`（那是单调时钟，不是墙上时间）。
+
+## URL（`rhai-url`）
+
+拼带查询参数的地址用它，别自己拼 `url_encode` 片段：
+
+```rhai
+let u = Url("https://api.example.com/v1/items");
+u.query_set("page", `${args.page}`);
+u.query_append("tag", "a b");          // 自动编码
+let r = http_request(#{ url: u.href });
+```
+
+- 读写属性：`href`、`scheme`、`domain`、`path`、`query`、`fragment` / `hash`。
+- `query_get(key)` / `query_gets(key)`（数组）/ `query_set` / `query_append` / `query_remove` / `query_clear`。
+- 解析不了的 URL 会抛错。
+
+## 随机数（`rhai-rand`）
+
+| 调用 | 说明 |
+| --- | --- |
+| `rand()` / `rand(1..=6)` / `rand(0..10)` / `rand(start, end)` | 整数 |
+| `rand_float()` / `rand_float(start, end)` | `[0, 1)` 或给定区间的小数 |
+| `rand_bool()` / `rand_bool(0.1)` | 布尔，可给为真的概率 |
+| `rand_alpha_numeric(len)` | 字母数字串，`len` 最多 1 MiB |
+| `array.shuffle()` / `array.sample()` / `array.sample(n)` | 打乱 / 抽一个 / 抽 n 个 |
+
+不是密码学安全的随机数：别拿它生成密钥、令牌。
+
+脚本里只有这类**只做计算**的包。读写文件、发请求、跑命令用上面的 `http_request` /
+`host.read_bytes`，或 `host.call_tool` 调对应的工具——它们都过 Dock 的权限门。

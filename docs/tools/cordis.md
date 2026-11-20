@@ -88,6 +88,7 @@ MCP 要等模型来调；插件包在模型外面，每一次调用、每一轮�
 | 拦 / 要确认一次调用 | `host.on("tools/pre-execute")` 返回 `#{ deny }` / `#{ ask }` / `#{ rewrite }` | `ask`：自动批准、「始终允许」都不算数（`PreExecute::ask`，单调，deny 优先）；载荷带解析好的 `args` |
 | 事后改结果 | `host.on("tools/execute")` | 载荷带这次调用的 `arguments` / `args`（注册表把参数经 task-local 交给同步跑的监听器）和 `identity` / `main` |
 | 结构化会话事件 | `host.on("session/entry")` | `user` / `assistant` / `tool` / `reminder` / `notice` / `turn-end`，带页身份；`assistant` 来自采样收尾事件 `llm/finished`（`LlmFinished`：最终输出 + 用量 + 缓存命中 + 费用） |
+| 调工具拿结论 | `host.call_tool_result(name, args)` | 同 `call_tool`（工具表里每一颗，含 MCP；权限门照走），回 `#{ name, text, json, is_error, images }`：`is_error` 是注册表给的成败，`json` 是文本整段是 JSON 时解析好的值。要新能力优先接工具 / MCP，而不是加 host 函数 |
 | 主动找 agent | `host.followup(text)` / `host.followup(identity, text)` | 进那一页的信箱（`ParentNotice::Plugin`，同后台任务跑完通知）：在跑就下一步带上，闲着的主会话页叫醒开一轮；一页 5 秒内最多叫醒一次。默认送给「这段代码在替谁跑」的那一页：发起调用的页（工具、钩子、卡片按钮）→ 正在处理的 `session/entry` 那一页 → 最近一次跑过钩子的页（定时器）。指定 `identity` 也只能落在那一页的会话树里（它自己和它派出的子代理，顺着 `parent` 认），别的会话、认不得的 id 报错——插件是进程级装的，不能往同一进程里别的会话塞话 |
 | 定时器 | `host.every(秒, f)` / `host.after(秒, f)` | `every` ≥5 秒、`after` ≥1 秒，都支持小数秒且 ≤2592000 秒（30 天）；超限返回脚本错误，不占名额；一次运行最多 16 个，随运行取消 |
 | 问模型一句 | `host.llm(prompt)` / `host.llm(#{ system, prompt })` | 这一页的模型，不带工具，不进会话日志、不计入 `/usage`，阻塞调用方 |
@@ -108,6 +109,11 @@ MCP 要等模型来调；插件包在模型外面，每一次调用、每一轮�
   reload 要用户确认，自动装载的是用户放进插件目录的东西。程序侧 define 的会话包打不开。
   另三个（`session/event`、`agent/step-start`、`agent/turn-end`）任何包都能挂。钩子的
   排序、返回值和不吞链的规矩见技能 `references/hooks.md`。
+- 脚本里挂的生态包只有**只做计算**的：`rhai-url`（`Url(...)`）、`rhai-rand`（`rand` /
+  `shuffle` / `sample`，`rand_alpha_numeric` 盖了一层 1 MiB 上限——包里的实现先分配再交给
+  引擎查大小）。`rhai-fs`、`rhai-http`、`rhai-dylib` 不挂：文件写入会绕过权限门和每轮改动
+  记录，HTTP 不按 host 确认、不走 SSRF / 代理策略，dylib 直接跑原生代码。要这些能力就
+  `host.call_tool` 调对应的工具。和 codec 一样只挂在运行期引擎上（`rhai_packages.rs`）。
 - `http_request`：按 host 确认（`http_request <host>`）。`plugin.toml` 声明过的 host
   不再逐次问；声明只认主机名（可带 `*.` 前缀、只配子域），不认光一个 `*`。
 - 脚本里的 `host.call_tool` 与 HTTP 确认都落在**发起这次调用的那一页**：动态工具的
