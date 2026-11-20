@@ -30,6 +30,9 @@ pub const EVENTS: [&str; 6] = [
 /// 没写 `timeout` 时等多久（Claude Code / Codex 的默认值）。
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(600);
 
+// Hooks block an agent step: allow long checks, but never wait more than one day.
+const MAX_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Dialect {
     Dock,
@@ -219,12 +222,25 @@ pub fn parse(path: &Path, raw: &str, dialect: Dialect, project: bool) -> Result<
                     warnings.push(format!("{event}：有一条 hook 没写 command"));
                     continue;
                 };
-                let timeout = hook
+                let timeout = match hook
                     .get("timeout")
                     .and_then(Value::as_f64)
                     .filter(|t| *t > 0.0)
-                    .map(Duration::from_secs_f64)
-                    .unwrap_or(DEFAULT_TIMEOUT);
+                {
+                    None => DEFAULT_TIMEOUT,
+                    Some(seconds) => match Duration::try_from_secs_f64(seconds)
+                        .ok()
+                        .filter(|t| !t.is_zero() && *t <= MAX_TIMEOUT)
+                    {
+                        Some(timeout) => timeout,
+                        None => {
+                            warnings.push(format!(
+                                "{event}：timeout 必须大于 0 且不超过 86400 秒（至少 1 纳秒），跳过命令 {command:?}"
+                            ));
+                            continue;
+                        }
+                    },
+                };
                 hooks.push(CommandHook {
                     command: command.to_string(),
                     timeout,
@@ -368,6 +384,50 @@ mod tests {
             src(r#"{ "model": "x" }"#, Dialect::ClaudeCode).command_count(),
             0
         );
+    }
+
+    /// 直接解析未信任的项目 JSON：旧版在 1e20 / 1e308 上先 panic，根本走不到确认。
+    #[test]
+    fn project_timeouts_are_checked_before_trust_without_panicking() {
+        for dialect in [Dialect::Dock, Dialect::ClaudeCode, Dialect::Codex] {
+            for literal in ["1e20", "1e308", "86400.001", "1e-20"] {
+                let raw = format!(
+                    r#"{{"hooks":{{"Stop":[{{"hooks":[
+                        {{"command":"./bad.sh","timeout":{literal}}},
+                        {{"command":"./good.sh","timeout":0.25}}
+                    ]}}]}}}}"#
+                );
+                let source = parse(Path::new("/project/.dock/hooks.json"), &raw, dialect, true)
+                    .expect("坏 timeout 只跳过这一条，不丢掉整份配置");
+                assert!(source.project);
+                let jobs = source.select("Stop", &[]);
+                assert_eq!(jobs.len(), 1, "{dialect:?}: {literal}");
+                assert_eq!(jobs[0].command, "./good.sh");
+                assert_eq!(jobs[0].timeout, Duration::from_millis(250));
+                assert_eq!(source.warnings, vec![
+                    "Stop：timeout 必须大于 0 且不超过 86400 秒（至少 1 纳秒），跳过命令 \"./bad.sh\""
+                ]);
+            }
+        }
+    }
+
+    #[test]
+    fn hook_timeout_boundaries_and_legacy_defaults_are_preserved() {
+        for (field, expected) in [
+            ("", DEFAULT_TIMEOUT),
+            (r#", "timeout": 0"#, DEFAULT_TIMEOUT),
+            (r#", "timeout": -1"#, DEFAULT_TIMEOUT),
+            (r#", "timeout": "bad""#, DEFAULT_TIMEOUT),
+            (r#", "timeout": 0.000000001"#, Duration::from_nanos(1)),
+            (r#", "timeout": 86400"#, MAX_TIMEOUT),
+        ] {
+            let raw = format!(r#"{{"Stop":[{{"hooks":[{{"command":"ok"{field}}}]}}]}}"#);
+            let source = src(&raw, Dialect::Dock);
+            let jobs = source.select("Stop", &[]);
+            assert_eq!(jobs.len(), 1, "{field}");
+            assert_eq!(jobs[0].timeout, expected, "{field}");
+            assert_eq!(source.warnings, Vec::<String>::new(), "{field}");
+        }
     }
 
     #[test]

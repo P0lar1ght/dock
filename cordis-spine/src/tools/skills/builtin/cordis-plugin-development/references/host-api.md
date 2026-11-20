@@ -84,7 +84,7 @@ host.every(60, || { let r = http_request(#{ url: host.setting("status_url") }); 
 host.after(10, || { host.followup("十秒到了"); });
 ```
 
-- `every` 最少 5 秒，`after` 最少 1 秒；一次运行最多 16 个。插件停了 / reload 换版就取消。
+- `every` 最少 5 秒，`after` 最少 1 秒；都支持小数秒，最多 2592000 秒（30 天，覆盖日 / 周级任务并避免无意义的超长等待）。超限返回脚本错误，不占定时器名额。一次运行最多 16 个。插件停了 / reload 换版就取消。
 - 回调不在任何一轮里：要让 agent 做事就 `host.followup`，要让用户看见就 `host.card` / `set_status`。
 
 ## 问模型一句：`host.llm`

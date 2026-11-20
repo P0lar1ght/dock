@@ -78,7 +78,7 @@ MCP 要等模型来调；插件包在模型外面，每一次调用、每一轮�
 | 事后改结果 | `host.on("tools/execute")` | 载荷带这次调用的 `arguments` / `args`（注册表把参数经 task-local 交给同步跑的监听器）和 `identity` / `main` |
 | 结构化会话事件 | `host.on("session/entry")` | `user` / `assistant` / `tool` / `reminder` / `notice` / `turn-end`，带页身份；`assistant` 来自采样收尾事件 `llm/finished`（`LlmFinished`：最终输出 + 用量 + 缓存命中 + 费用） |
 | 主动找 agent | `host.followup(text)` / `host.followup(identity, text)` | 进那一页的信箱（`ParentNotice::Plugin`，同后台任务跑完通知）：在跑就下一步带上，闲着的主会话页叫醒开一轮；一页 5 秒内最多叫醒一次 |
-| 定时器 | `host.every(秒, f)` / `host.after(秒, f)` | `every` ≥5 秒、`after` ≥1 秒，一次运行最多 16 个，随运行取消 |
+| 定时器 | `host.every(秒, f)` / `host.after(秒, f)` | `every` ≥5 秒、`after` ≥1 秒，都支持小数秒且 ≤2592000 秒（30 天）；超限返回脚本错误，不占名额；一次运行最多 16 个，随运行取消 |
 | 问模型一句 | `host.llm(prompt)` / `host.llm(#{ system, prompt })` | 这一页的模型，不带工具，不进会话日志、不计入 `/usage`，阻塞调用方 |
 | 小存储 | `host.load` / `host.save` / `host.forget` | `$DOCK_HOME/plugin-state/<id>-<目录指纹>.json`，≤1 MiB，跨 reload 和重启 |
 | 回答下面的卡片 | `host.card` / `update_card` / `remove_card` | named service `"turnCards"`，GUI `turn/cards/*`，见 [PLUGIN-VIEWS](../PLUGIN-VIEWS.md#回答下面的卡片) |
