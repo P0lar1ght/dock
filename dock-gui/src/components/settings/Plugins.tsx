@@ -73,6 +73,8 @@ function diskState(p: DiskPlugin): { label: string; kind: "green" | "gray" | "or
   if (p.error) return { label: "加载失败", kind: "red" };
   if (p.shadowedBy) return { label: "被同名插件占用", kind: "orange", title: `已经装着 ${tilde(p.shadowedBy)} 的同名插件` };
   if (!p.enabled) return { label: "已停用", kind: "gray" };
+  if (p.untrusted)
+    return { label: "待确认", kind: "orange", title: "项目自带的插件，第一次加载（或文件改过之后）要你点头；点「立即加载」就是同意" };
   if (p.running) return { label: "运行中", kind: "green" };
   if (p.loaded) return { label: "已停止", kind: "gray" };
   return { label: "未加载", kind: "gray", title: "打开这个项目的会话时自动加载；也可以现在就加载" };

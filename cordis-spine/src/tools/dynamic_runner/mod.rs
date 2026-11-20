@@ -65,7 +65,7 @@ pub use factories::{
     DynEcho, DynNote, FactoryInfo, DYN_ECHO, DYN_ECHO_TOOL, DYN_NOTE, RHAI_FACTORY,
 };
 pub use persist::{
-    declared_hooks, find_disk, persist_root, plugin_roots, project_root, DisableReceipt,
+    find_disk, persist_root, plugin_roots, project_root, DisableReceipt, DiskGrants,
     DiskPluginView, DiskSpec, ReloadReceipt, ReloadStatus, PERSIST_SESSION,
 };
 
@@ -190,6 +190,12 @@ pub struct DynamicRunner {
     /// `apply_rhai` 每次现读磁盘配置：`tool-web` 也是组合根把 `WebFetchParams`
     /// 递进去、插件体自己不 live-read 环境，这里跟它保持一致，顺带让测试能换掉它。
     http_params: Arc<Mutex<crate::tools::web_fetch::WebFetchParams>>,
+    /// 这个进程里已经问过「要不要加载」的项目插件（目录 + 内容指纹）：问着的时候别的页
+    /// 再开同一个项目不重复弹，拒绝过的不再问（见 `persist::boot_disk_on`）。
+    pub(crate) trust_asked: Arc<Mutex<std::collections::HashSet<(std::path::PathBuf, String)>>>,
+    /// 项目插件的信任记录放哪（`None` = `$DOCK_HOME/plugins-trust.json`）。和 `http_params`
+    /// 一样存一份好让测试换掉：测试不碰本机的 `$DOCK_HOME`，又不用抢进程级的 env 锁。
+    trust_store: Arc<Mutex<Option<std::path::PathBuf>>>,
 }
 
 impl DynamicRunner {
@@ -202,7 +208,22 @@ impl DynamicRunner {
                 start_hold: None,
             })),
             http_params: Arc::new(Mutex::new(crate::tools::web_fetch::web_fetch_params())),
+            trust_asked: Arc::default(),
+            trust_store: Arc::default(),
         }
+    }
+
+    /// 把项目插件的信任记录换到 `path`（测试用；默认 `$DOCK_HOME/plugins-trust.json`）。
+    pub fn set_trust_store(&self, path: impl Into<std::path::PathBuf>) {
+        *self.trust_store.lock().unwrap() = Some(path.into());
+    }
+
+    pub(crate) fn trust_store(&self) -> std::path::PathBuf {
+        self.trust_store.lock().unwrap().clone().unwrap_or_else(|| {
+            crate::host::hooks_bridge::trust::store_path(
+                crate::host::hooks_bridge::trust::PLUGINS_FILE,
+            )
+        })
     }
 
     /// 脚本 HTTP 的出网策略。组合根想换（或测试要开 `allow_local` 打本地服务端）

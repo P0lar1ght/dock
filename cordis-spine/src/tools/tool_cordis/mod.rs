@@ -22,8 +22,8 @@ use serde_json::Value;
 use crate::names::{DYNAMIC_CORDIS_RUNNER, PRE_STEP, SESSIONS, TOOLS};
 use crate::session::log::Sessions;
 use crate::tools::dynamic_runner::{
-    declared_hooks, project_root, DiskSpec, DynamicRunner, PersistScope, ReloadReceipt,
-    ReloadStatus, Surface,
+    project_root, DiskGrants, DiskSpec, DynamicRunner, PersistScope, ReloadReceipt, ReloadStatus,
+    Surface,
 };
 use crate::tools::registry::{exec_ctx, own_registered, tool_result, ToolBody, Tools};
 use cordis_base::config::dock_home;
@@ -39,7 +39,7 @@ pub(crate) const PLUGIN: &str = "cordis_plugin";
 const INSPECT_DESC: &str = "Read-only view of the plugin host; never runs plugin code. No arguments: this session's plugin directories and every plugin with its status (running, failed and why, disabled). `plugin`: one plugin — directory, enabled, what its running version registered (tools, slash commands, slots, hooks), declared HTTP hosts, last error. `what`: one reference section — services (what a Rhai host can reach), tools (live tool names), builtins (Rhai host API signatures), events (hook names and payloads), slots (panels). Load the cordis-plugin-development skill before writing a plugin.";
 const INSPECT_PARAMS: &str = r#"{"type":"object","properties":{"plugin":{"type":"string","description":"Plugin id (its directory name under .dock/plugins/)."},"what":{"type":"string","enum":["plugins","services","tools","builtins","events","slots"],"description":"One reference section. Ignored when plugin is given."}}}"#;
 
-const PLUGIN_DESC: &str = "Load, hot-reload, or disable a plugin. A plugin is a directory: .dock/plugins/<id>/ in the project (scope \"user\": ~/.dock/plugins/<id>/) holding source.rhai and an optional plugin.toml. Write and edit those files with the file tools, then action \"reload\" compiles them as they are now and starts them, replacing the running version; if the new version fails, the previous one keeps running and the error (with line and position) comes back. Reload also sets enabled = true. Action \"disable\" stops the plugin and writes enabled = false; files stay. Asks the user like bash, once per plugin when they choose always; the request lists the plugin's hooks and declared HTTP hosts. Changes reach every session and survive restart. After reload, call the tools it registered through use_tool to verify. Load the cordis-plugin-development skill before writing a plugin.";
+const PLUGIN_DESC: &str = "Load, hot-reload, or disable a plugin. A plugin is a directory: .dock/plugins/<id>/ in the project (scope \"user\": ~/.dock/plugins/<id>/) holding source.rhai and an optional plugin.toml. Write and edit those files with the file tools, then action \"reload\" compiles them as they are now and starts them, replacing the running version; if the new version fails, the previous one keeps running and the error (with line and position) comes back. Reload also sets enabled = true. Action \"disable\" stops the plugin and writes enabled = false; files stay. Asks the user like bash; the request lists the plugin's hooks and declared HTTP hosts, and choosing always covers later reloads of that plugin until it adds a hook or an HTTP host. Changes reach every session and survive restart. After reload, call the tools it registered through use_tool to verify. Load the cordis-plugin-development skill before writing a plugin.";
 const PLUGIN_PARAMS: &str = r#"{"type":"object","required":["action","id"],"properties":{"action":{"type":"string","enum":["reload","disable"]},"id":{"type":"string","description":"Plugin id = directory name: 2–32 chars, lowercase letter first, then a-z 0-9 -."},"scope":{"type":"string","enum":["project","user"],"description":"Which plugins root. Default: project if .dock/plugins/<id>/ exists there, else user."}}}"#;
 
 /// The registered surface, for the text guard below.
@@ -369,15 +369,17 @@ pub(crate) fn surface_line(s: &Surface) -> String {
     parts.join("；")
 }
 
-/// `cordis_plugin` 的权限请求：按插件记「始终允许」（键 `cordis_plugin <id>`），
-/// 迭代同一个插件不用每改一次点一次，换一个插件还会再问。摘要把这个插件挂的钩子
-/// 和声明的 HTTP host 列出来——批准加载，批的就是这些。
+/// `cordis_plugin` 的权限请求：按插件记「始终允许」，迭代同一个插件不用每改一次点
+/// 一次，换一个插件还会再问。摘要把这个插件挂的钩子和声明的 HTTP host 列出来——批准
+/// 加载，批的就是这些；所以 reload 的键是 `cordis_plugin <id>` 再带上它们的指纹
+/// （[`DiskGrants::fingerprint`]），多挂一个钩子、多声明一个 host 就换了键、要再问。
+/// 两样都没有的（和停用）就是 `cordis_plugin <id>`。
 pub(crate) fn permission_request(exec: &Context, arguments: &str) -> (String, String) {
     let v: Value = serde_json::from_str(arguments).unwrap_or(Value::Null);
     let id = text_arg(&v, "id")
         .or_else(|| text_arg(&v, "pluginId"))
         .unwrap_or_default();
-    let key = format!("{PLUGIN} {id}");
+    let mut key = format!("{PLUGIN} {id}");
     let action = parse_action(&text_arg(&v, "action").unwrap_or_default()).ok();
     let scope = parse_scope(&v).ok().flatten();
     let found = crate::tools::dynamic_runner::find_disk(&id, scope, &roots_for(exec)).ok();
@@ -394,20 +396,10 @@ pub(crate) fn permission_request(exec: &Context, arguments: &str) -> (String, St
         (_, None) => format!("加载插件 {id}（目录还不存在）"),
     };
     if let (Some(Action::Reload), Some((spec, _))) = (action, found.as_ref()) {
-        let hooks = spec
-            .source_path
-            .as_ref()
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .map(|src| declared_hooks(&src))
-            .unwrap_or_default();
-        if !hooks.is_empty() {
-            summary.push_str(&format!("\n钩子：{}", hooks.join("、")));
-        }
-        if !spec.http_allow.is_empty() {
-            summary.push_str(&format!(
-                "\nHTTP 免逐次确认：{}",
-                spec.http_allow.join("、")
-            ));
+        let grants = DiskGrants::of(spec);
+        summary.push_str(&grants.describe());
+        if let Some(fp) = grants.fingerprint() {
+            key = format!("{key} #{fp}");
         }
     }
     (key, summary)
@@ -586,6 +578,58 @@ mod tests {
         assert_eq!(parse_action("stop").unwrap(), Action::Disable);
         assert!(parse_action("delete").is_err());
         assert!(parse_action("").is_err());
+    }
+
+    /// 「始终允许」按「加载它批了什么」记：只改代码照旧免问；多挂一个钩子、多声明一个
+    /// HTTP host（之后对它免逐次确认）就是扩大权限，换一个键、再问一次。以前键只有
+    /// `cordis_plugin <id>`，点过一次以后加什么都不再问。
+    #[tokio::test]
+    async fn always_allow_does_not_cover_new_hooks_or_http_hosts() {
+        let project = tempfile::tempdir().unwrap();
+        let ctx = Context::new();
+        let sessions = Sessions::tab(ctx.clone(), 2);
+        sessions.pin_workspace_cwd(project.path());
+        let _reg = ctx.provide(SESSIONS, sessions).unwrap();
+        let dir = project.path().join(".dock").join("plugins").join("memo");
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |name: &str, text: &str| std::fs::write(dir.join(name), text).unwrap();
+        let key =
+            || permission_request(&ctx, r#"{"action":"reload","id":"memo","scope":"project"}"#).0;
+
+        write("source.rhai", "#{ inject: [], apply: |host| { } }");
+        let plain = key();
+        assert_eq!(plain, "cordis_plugin memo");
+        write(
+            "source.rhai",
+            "#{ inject: [], apply: |host| { host.set_status(\"x\"); } }",
+        );
+        assert_eq!(key(), plain, "只改代码不扩大权限，迭代不用每次点");
+
+        write(
+            "plugin.toml",
+            "[permissions]\nhttp = [\"api.example.com\"]\n",
+        );
+        let with_http = key();
+        assert_ne!(with_http, plain, "新声明的 HTTP host 要再问一次");
+        assert!(with_http.starts_with("cordis_plugin memo "), "{with_http}");
+
+        write(
+            "source.rhai",
+            "#{ inject: [], apply: |host| { host.on(\"tools/pre-execute\", |c| { () }); } }",
+        );
+        let with_hook = key();
+        assert_ne!(with_hook, with_http, "新挂的流程钩子要再问一次");
+        write(
+            "source.rhai",
+            "#{ inject: [], apply: |host| {\n  host.on(\"tools/pre-execute\", |c| { () });\n} }",
+        );
+        assert_eq!(key(), with_hook, "钩子没变，只是排版");
+
+        let (disable, _) = permission_request(
+            &ctx,
+            r#"{"action":"disable","id":"memo","scope":"project"}"#,
+        );
+        assert_eq!(disable, "cordis_plugin memo", "停用不扩大权限");
     }
 
     #[test]

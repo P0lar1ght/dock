@@ -68,6 +68,10 @@ async fn boot_with(tool_table: cordis::Plugin) -> Context {
     root.require::<Sessions>(SESSIONS)
         .unwrap()
         .pin_workspace_cwd(project.path());
+    // 项目插件的信任记录（reload 会记）也落在这个临时目录，不碰本机 `$DOCK_HOME`。
+    root.require::<DynamicRunner>(DYNAMIC_CORDIS_RUNNER)
+        .unwrap()
+        .set_trust_store(project.path().join("plugins-trust.json"));
     let _ = root.provide("dynamicTestProject", project);
     root
 }
@@ -276,8 +280,13 @@ async fn inspect_overview_plugin_and_sections() {
 
     let overview = exec(&root, "cordis_inspect", "{}").await;
     assert!(overview.contains("root project:"), "{overview}");
+    // 项目自带、还没点过头的插件：概览说清楚是在等用户确认，不只是「没装」。
     assert!(
-        overview.contains("- both [project] not loaded — Both"),
+        overview.contains("- both [project] waiting for the user's go-ahead — Both"),
+        "{overview}"
+    );
+    assert!(
+        overview.contains("cordis_plugin reload asks them"),
         "{overview}"
     );
     assert!(
@@ -288,7 +297,11 @@ async fn inspect_overview_plugin_and_sections() {
     let plugin = exec(&root, "cordis_inspect", r#"{"plugin":"both"}"#).await;
     assert!(plugin.contains("plugin: both"), "{plugin}");
     assert!(plugin.contains("factory: note"), "{plugin}");
-    assert!(plugin.contains("status: not loaded"), "{plugin}");
+    assert!(
+        plugin.contains("status: waiting for the user's go-ahead"),
+        "{plugin}"
+    );
+    assert!(plugin.contains("note: not confirmed"), "{plugin}");
 
     // plugin 比 what 窄，窄的赢。
     let both = exec(
@@ -1081,7 +1094,8 @@ async fn plugin_http_asks_on_the_calling_page_unless_the_host_is_declared() {
 }
 
 /// `cordis_plugin` 的确认按插件记：「始终允许」一个插件，迭代它不用每次点；换一个
-/// 插件还会再问。确认框里列着它挂的钩子和声明的 HTTP host。
+/// 插件还会再问。确认框里列着它挂的钩子和声明的 HTTP host——批的就是这些，所以多声明
+/// 一个 host 也要再问。
 #[tokio::test(flavor = "multi_thread")]
 async fn plugin_approval_is_per_plugin_and_lists_hooks_and_hosts() {
     let root = boot_gated().await;
@@ -1112,7 +1126,11 @@ async fn plugin_approval_is_per_plugin_and_lists_hooks_and_hosts() {
 
     let first = spawn_reload("guard");
     let prompt = wait_for_prompt(&perms).await;
-    assert_eq!(prompt.tool, "cordis_plugin guard");
+    assert!(
+        prompt.tool.starts_with("cordis_plugin guard #"),
+        "{}",
+        prompt.tool
+    );
     assert!(
         prompt.summary.contains("加载插件 guard"),
         "{}",
@@ -1138,10 +1156,34 @@ async fn plugin_approval_is_per_plugin_and_lists_hooks_and_hosts() {
     assert!(again.contains("运行中"), "{again}");
     assert!(perms.front().is_none());
 
+    // 多声明一个 HTTP host（之后对它免逐次确认）：扩大了权限，「始终允许」不再替它点头。
+    write_plugin(
+        &root,
+        "guard",
+        &[(
+            "plugin.toml",
+            "[permissions]\nhttp = [\"api.example.com\", \"evil.example.net\"]\n",
+        )],
+    );
+    let widened = spawn_reload("guard");
+    let prompt = wait_for_prompt(&perms).await;
+    assert!(
+        prompt.summary.contains("evil.example.net"),
+        "{}",
+        prompt.summary
+    );
+    perms.resolve(PermissionOptionKind::RejectOnce);
+    let refused = widened.await.unwrap();
+    assert!(!refused.contains("已重载"), "{refused}");
+
     // 换一个插件：还问。
     let other = spawn_reload("other");
     let prompt = wait_for_prompt(&perms).await;
-    assert_eq!(prompt.tool, "cordis_plugin other");
+    assert!(
+        prompt.tool.starts_with("cordis_plugin other #"),
+        "{}",
+        prompt.tool
+    );
     perms.resolve(PermissionOptionKind::RejectOnce);
     let denied = other.await.unwrap();
     assert!(!denied.contains("运行中"), "{denied}");
@@ -3603,6 +3645,171 @@ async fn followup_wakes_the_page_and_rate_limits() {
     );
 }
 
+/// `host.followup(identity, …)` 只能送进发起这次调用的那棵会话树（这一页和它的子代理）。
+/// 插件是进程级装的，钩子载荷里又带着各页的 identity——以前随便一个字符串都照收：
+/// 同一个 GUI 进程里能往别的会话塞话并叫醒它，拼错 / 过期的 id 也一直留在信箱里。
+#[tokio::test]
+async fn followup_only_reaches_the_calling_session_tree() {
+    let root = boot().await;
+    mount_subagents(&root).await;
+    load_plugin(
+        &root,
+        "notify",
+        r#"#{ inject: ["tools"], apply: |host| {
+            host.register_tool(#{ name: "notify_to", parameters: #{ type: "object", properties: #{ to: #{ type: "string" } } },
+                execute: |a| { host.followup(a.to, "看一下") } });
+        } }"#,
+    )
+    .await;
+    let sub = root
+        .require::<cordis_spine::Subagents>(cordis_spine::SUBAGENTS)
+        .unwrap();
+    for target in ["main#7", "ghost"] {
+        let out = exec(&root, "notify_to", &json!({ "to": target }).to_string()).await;
+        assert!(out.contains("session tree"), "{target}: {out}");
+        assert!(!sub.has_parent_notices(target), "{target} 收不到");
+    }
+    assert_eq!(
+        exec(&root, "notify_to", r#"{"to":"main"}"#).await,
+        "woke",
+        "送回发起的这一页照常"
+    );
+    assert!(sub.has_parent_notices(MAIN));
+}
+
+/// `session/entry` 的处理器不在任何一轮里跑，但它正在处理的那一条有页身份：照文档写
+/// `host.followup(e.identity, …)` 送回那一页要能送到。
+#[tokio::test]
+async fn followup_from_a_session_entry_reaches_that_entry_page() {
+    let root = boot().await;
+    mount_subagents(&root).await;
+    load_plugin(
+        &root,
+        "echoer",
+        r#"#{ inject: [], apply: |host| {
+            host.on("session/entry", |e| {
+                if e.kind == "user" { host.followup(e.identity, "收到：" + e.text); }
+            });
+        } }"#,
+    )
+    .await;
+    root.require::<Sessions>(SESSIONS)
+        .unwrap()
+        .append(LogEvent::User("你好".into()));
+    let sub = root
+        .require::<cordis_spine::Subagents>(cordis_spine::SUBAGENTS)
+        .unwrap();
+    for _ in 0..100 {
+        if sub.has_parent_notices(MAIN) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let notes = sub.drain_parent_notices(MAIN);
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(notes[0].contains("收到：你好"), "{}", notes[0]);
+}
+
+// ── 项目自带的插件：第一次加载前要用户点头 ────────────────────────────────
+
+/// 打开项目时 `.dock/plugins/<id>/` 不再直接跑：克隆来的仓库自带的插件能改流程、免确认
+/// 出网、叫醒会话，和同仓库的 `.dock/hooks.json` 一样，要先在打开它的那一页上点头。点过
+/// 的按「目录 + 内容指纹」记住（下次打开不问），文件一改再问；拒绝了这个进程里不再问。
+#[tokio::test(flavor = "multi_thread")]
+async fn project_plugins_ask_before_their_first_load() {
+    // 几个 `boot()` 当成先后几次启动：共用一份信任记录。
+    let home = tempfile::tempdir().unwrap();
+    let store = home.path().join("plugins-trust.json");
+    let project = tempfile::tempdir().unwrap();
+    let plugin_dir = project.path().join(".dock").join("plugins").join("echo");
+    std::fs::create_dir_all(&plugin_dir).unwrap();
+    std::fs::write(
+        plugin_dir.join("plugin.toml"),
+        "name = \"Echo\"\npurpose = \"cloned\"\nfactory = \"echo\"\nenabled = true\n",
+    )
+    .unwrap();
+    let roots = [(
+        PersistScope::Project,
+        project.path().join(".dock").join("plugins"),
+    )];
+    let boot_project = |root: &Context| {
+        let runner = root
+            .require::<DynamicRunner>(DYNAMIC_CORDIS_RUNNER)
+            .unwrap();
+        runner.set_trust_store(&store);
+        let (page, dir) = (root.clone(), project.path().to_path_buf());
+        tokio::spawn(async move { runner.boot_project(&page, &dir).await })
+    };
+
+    // 第一次打开：先问，没点头之前不跑，列表里说明为什么没跑。
+    let root = boot().await;
+    let perms = root.require::<Permissions>(PERMISSIONS).unwrap();
+    let booting = boot_project(&root);
+    let prompt = wait_for_prompt(&perms).await;
+    assert_eq!(prompt.tool, "cordis_plugin echo");
+    assert!(prompt.summary.contains("还没确认过"), "{}", prompt.summary);
+    assert!(root.get::<DynEcho>(DYN_ECHO).is_none(), "点头之前不跑");
+    let runner = root
+        .require::<DynamicRunner>(DYNAMIC_CORDIS_RUNNER)
+        .unwrap();
+    let row = runner.disk_plugins_in(&roots).pop().unwrap();
+    assert!(!row.running);
+    assert!(row.untrusted, "设置页 / cordis_inspect 看得出为什么没跑");
+    assert!(
+        row.error.is_none(),
+        "不是加载失败：设置页的「立即加载」要还能点"
+    );
+    perms.resolve(PermissionOptionKind::AllowOnce);
+    booting.await.unwrap();
+    assert!(root.get::<DynEcho>(DYN_ECHO).is_some(), "点头之后装上");
+
+    // 下次打开（新进程）：同一份内容不再问。
+    let root = boot().await;
+    let perms = root.require::<Permissions>(PERMISSIONS).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), boot_project(&root))
+        .await
+        .expect("信任过的不该再弹")
+        .unwrap();
+    assert!(perms.front().is_none());
+    assert!(root.get::<DynEcho>(DYN_ECHO).is_some());
+
+    // 文件改了（比如 git pull）：再问；拒绝了就不装，这个进程里也不再问。
+    std::fs::write(
+        plugin_dir.join("plugin.toml"),
+        "name = \"Echo\"\npurpose = \"pulled\"\nfactory = \"echo\"\nenabled = true\n",
+    )
+    .unwrap();
+    let root = boot().await;
+    let perms = root.require::<Permissions>(PERMISSIONS).unwrap();
+    let booting = boot_project(&root);
+    wait_for_prompt(&perms).await;
+    perms.resolve(PermissionOptionKind::RejectOnce);
+    booting.await.unwrap();
+    assert!(root.get::<DynEcho>(DYN_ECHO).is_none(), "拒绝了不装");
+    tokio::time::timeout(std::time::Duration::from_secs(5), boot_project(&root))
+        .await
+        .expect("拒绝过的这个进程里不再问")
+        .unwrap();
+    assert!(perms.front().is_none());
+    assert!(root.get::<DynEcho>(DYN_ECHO).is_none());
+
+    // 用户自己让它加载（`cordis_plugin reload` 过了权限门 / 设置页启用）：记下这份内容，
+    // 下次打开不再问。
+    root.require::<Sessions>(SESSIONS)
+        .unwrap()
+        .pin_workspace_cwd(project.path());
+    let out = exec(&root, "cordis_plugin", r#"{"action":"reload","id":"echo"}"#).await;
+    assert!(out.contains("已重载插件 echo"), "{out}");
+    let root = boot().await;
+    let perms = root.require::<Permissions>(PERMISSIONS).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), boot_project(&root))
+        .await
+        .expect("reload 过的不该再弹")
+        .unwrap();
+    assert!(perms.front().is_none());
+    assert!(root.get::<DynEcho>(DYN_ECHO).is_some());
+}
+
 /// 定时器在插件运行期间触发；间隔太短的直接拒绝。
 #[tokio::test(flavor = "multi_thread")]
 async fn timers_fire_and_reject_busy_loops() {
@@ -3812,6 +4019,8 @@ async fn a_project_hooks_file_asks_once_before_it_runs() {
         "{}",
         prompt.summary
     );
+    // 每条命令带着超时：没写 timeout 的默认等 10 分钟，点头之前要看得到。
+    assert!(prompt.summary.contains("超时 600 秒"), "{}", prompt.summary);
     perms.resolve(PermissionOptionKind::AllowOnce);
     assert!(first
         .await

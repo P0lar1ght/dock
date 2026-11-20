@@ -341,6 +341,8 @@ export interface DiskPlugin {
   /** 同名插件已经从别处装上了。 */
   shadowedBy: string | null;
   error: string | null;
+  /** 项目自带的插件，现在这份内容还没点过头，所以没装；点「立即加载」就是同意。 */
+  untrusted?: boolean;
 }
 
 export interface PluginListing {

@@ -945,7 +945,8 @@ pub fn plugin_list(gateway: &GatewayHandle) -> Result<Value, RpcError> {
                 "loaded": p.loaded,
                 "running": p.running,
                 "shadowedBy": p.shadowed_by.map(|d| d.display().to_string()),
-                "error": p.error
+                "error": p.error,
+                "untrusted": p.untrusted
             })
         })
         .collect();
@@ -977,12 +978,17 @@ pub async fn plugin_delete(gateway: &GatewayHandle, params: Value) -> Result<Val
     plugin_list(gateway)
 }
 
-/// 开了某个项目的会话：装上这个项目的永久插件（后台跑，不挡开页）。
-pub fn boot_project_plugins(gateway: &GatewayHandle, project: std::path::PathBuf) {
+/// 开了某个项目的会话：装上这个项目的永久插件（后台跑，不挡开页）。没确认过的项目插件
+/// 在打开它的这一页 `page` 上问。
+pub fn boot_project_plugins(
+    gateway: &GatewayHandle,
+    page: cordis::Context,
+    project: std::path::PathBuf,
+) {
     let Some(runner) = gateway.ctx().get::<DynamicRunner>(DYNAMIC_CORDIS_RUNNER) else {
         return;
     };
-    tokio::spawn(async move { runner.boot_project(&project).await });
+    tokio::spawn(async move { runner.boot_project(&page, &project).await });
 }
 
 /// `skill/list`：内置 / 用户级的技能列一次；每个已知项目自己那几层（`skills/`、

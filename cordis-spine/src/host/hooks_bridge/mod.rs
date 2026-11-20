@@ -219,7 +219,11 @@ fn ask_trust(page: &Context, source: &Source) -> bool {
                     } else {
                         format!(" [{}]", g.matcher)
                     };
-                    lines.push(format!("{event}{matcher}: {}", h.command));
+                    lines.push(format!(
+                        "{event}{matcher}: {}（超时 {} 秒）",
+                        h.command,
+                        h.timeout.as_secs_f64()
+                    ));
                 }
                 shown += 1;
             }

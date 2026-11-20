@@ -109,9 +109,15 @@ fn describe_plugins(runner: &DynamicRunner, roots: &[(PersistScope, PathBuf)]) -
         if let Some(other) = &v.shadowed_by {
             lines.push(format!("    shadowed by {}", other.display()));
         }
+        if v.untrusted {
+            lines.push(format!("    {UNTRUSTED_HINT}"));
+        }
     }
     lines
 }
+
+/// 没确认过的项目插件为什么没装、怎么办。
+const UNTRUSTED_HINT: &str = "not confirmed: a project plugin needs the user's go-ahead before its first load (and again after its files change). cordis_plugin reload asks them; so does Load now on the settings page.";
 
 fn state_label(v: &DiskPluginView) -> &'static str {
     if v.running && v.error.is_some() {
@@ -124,6 +130,8 @@ fn state_label(v: &DiskPluginView) -> &'static str {
         "disabled"
     } else if v.shadowed_by.is_some() {
         "shadowed"
+    } else if v.untrusted {
+        "waiting for the user's go-ahead"
     } else {
         "not loaded"
     }
@@ -196,6 +204,9 @@ pub fn render_plugin(
     }
     if let Some(other) = shadowed {
         lines.push(format!("note: {} is shadowed by this one", other.display()));
+    }
+    if view.as_ref().is_some_and(|v| v.untrusted) {
+        lines.push(format!("note: {UNTRUSTED_HINT}"));
     }
     for w in &spec.warnings {
         lines.push(format!("warning: {w}"));

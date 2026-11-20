@@ -160,6 +160,24 @@ async fn presets_disk() -> tokio::sync::MutexGuard<'static, ()> {
 }
 
 /// 一个存在的、这次独有的项目目录。
+/// 项目自带的插件第一次加载前在打开它的那一页上问（`DynamicRunner::boot_disk_on`）：
+/// 像用户在 GUI 里那样点「允许」。
+async fn approve_project_plugin(gui: &mut Rpc, thread_id: &str) {
+    for _ in 0..100 {
+        let resolved = gui
+            .call(
+                "permission/resolve",
+                json!({ "threadId": thread_id, "decision": "approve" }),
+            )
+            .await;
+        if resolved["result"]["ok"] == true {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("没等到项目插件的确认");
+}
+
 fn project_dir(tag: &str) -> std::path::PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -6528,7 +6546,8 @@ async fn serve_trusted(root: &Context) -> (SocketAddr, String, ServeGuard) {
 }
 
 /// 桌面 GUI 的进程 cwd 不是任何项目：项目里的永久插件要按会话的项目目录找。
-/// 列表里看得到还没装的，开了这个项目的会话就装上；界面传的目录必须在插件根下。
+/// 列表里看得到还没装的，开了这个项目的会话就在那一页上问、点头就装上；界面传的目录
+/// 必须在插件根下。
 #[tokio::test]
 async fn project_plugins_follow_session_projects_not_the_process_cwd() {
     let root = harness_root().await;
@@ -6569,9 +6588,25 @@ async fn project_plugins_follow_session_projects_not_the_process_cwd() {
             json!({ "cwd": project.display().to_string() }),
         )
         .await;
-    assert!(started["result"]["thread"]["id"].is_string(), "{started}");
-    // 开页时在后台装：等它装上。
+    let id = started["result"]["thread"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{started}"))
+        .to_string();
     let path = plugin.display().to_string();
+    // 克隆来的项目自带的插件：点头之前不装，列表里标着「还没确认」。
+    let listed = gui.call("plugin/list", json!({})).await;
+    let waiting = listed["result"]["disk"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["path"] == json!(path))
+        .cloned()
+        .unwrap_or(Value::Null);
+    assert_eq!(waiting["untrusted"], true, "{waiting}");
+    assert_eq!(waiting["running"], false, "{waiting}");
+    // 确认弹在开这个项目的那一页上。
+    approve_project_plugin(&mut gui, &id).await;
+    // 点了头在后台装：等它装上。
     let mut row = Value::Null;
     for _ in 0..50 {
         let listed = gui.call("plugin/list", json!({})).await;
@@ -6594,8 +6629,9 @@ async fn project_plugins_follow_session_projects_not_the_process_cwd() {
         json!(project.display().to_string()),
         "{row}"
     );
-    assert_eq!(row["loaded"], true, "开了这个项目的会话就该装上：{row}");
+    assert_eq!(row["loaded"], true, "点了头就该装上：{row}");
     assert_eq!(row["running"], true, "{row}");
+    assert_eq!(row["untrusted"], false, "{row}");
 
     let off = gui
         .call("plugin/enable", json!({ "path": path, "enabled": false }))
@@ -6677,7 +6713,11 @@ async fn plugin_paths_are_checked_after_canonicalization() {
             json!({ "cwd": project.display().to_string() }),
         )
         .await;
-    assert!(started["result"]["thread"]["id"].is_string(), "{started}");
+    let id = started["result"]["thread"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{started}"))
+        .to_string();
+    approve_project_plugin(&mut gui, &id).await;
     // 开页在后台装插件：等它跑起来，之后的 plugin/list 才有这个根。
     let mut row = Value::Null;
     for _ in 0..50 {
@@ -8956,6 +8996,7 @@ async fn turn_cards_from_a_project_plugin_list_push_and_act() {
     let _ = gui
         .call("thread/subscribe", json!({ "threadId": id }))
         .await;
+    approve_project_plugin(&mut gui, &id).await;
     // 开页时在后台装插件：等它跑起来。
     for _ in 0..50 {
         let listed = gui.call("plugin/list", json!({})).await;
@@ -8977,8 +9018,9 @@ async fn turn_cards_from_a_project_plugin_list_push_and_act() {
         .as_str()
         .unwrap_or_else(|| panic!("{turn}"))
         .to_string();
+    // 等这一轮的收尾：开页时那条「要不要加载项目插件」的确认在空闲页上自己占了一轮。
     let notes = notes_until(&mut gui, Duration::from_secs(10), |n| {
-        n["method"] == "turn/completed"
+        n["method"] == "turn/completed" && n["params"]["turnId"] == turn_id.as_str()
     })
     .await;
     let pushed = notes
