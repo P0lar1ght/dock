@@ -20,6 +20,14 @@ pub static BUILTIN_FILES: &[(&str, &str)] = &[
         include_str!("builtin/cordis-plugin-development/examples/api-tool.rhai"),
     ),
     (
+        "cordis-plugin-development/examples/done-check.rhai",
+        include_str!("builtin/cordis-plugin-development/examples/done-check.rhai"),
+    ),
+    (
+        "cordis-plugin-development/examples/guard.rhai",
+        include_str!("builtin/cordis-plugin-development/examples/guard.rhai"),
+    ),
+    (
         "cordis-plugin-development/examples/memo.rhai",
         include_str!("builtin/cordis-plugin-development/examples/memo.rhai"),
     ),
@@ -30,6 +38,10 @@ pub static BUILTIN_FILES: &[(&str, &str)] = &[
     (
         "cordis-plugin-development/examples/plugin.toml",
         include_str!("builtin/cordis-plugin-development/examples/plugin.toml"),
+    ),
+    (
+        "cordis-plugin-development/examples/trim-output.rhai",
+        include_str!("builtin/cordis-plugin-development/examples/trim-output.rhai"),
     ),
     (
         "cordis-plugin-development/references/hooks.md",

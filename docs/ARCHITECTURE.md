@@ -67,9 +67,10 @@ config.toml.example      用户 / 项目模型目录样例
 |---|---|---|
 | Spine 五件套 | `sessions` `llm` `tools` `systemPrompt` `agents` | 同名 |
 | 循环 | `agent-loop` 提供 `LoopHandle` | `agentLoop` |
-| 其它 spine | `context` `settings` `turn` `permissions` `cron` `roster` `jobs` `todos` `planMode` `ask` `mcp` `goal` `lsp` `skills` `subagents` `memory` `browser` `computer` `workflows` `slash` `status.items` `tool.views` `plugin.settings` `user.edits` `agentPresets` `dynamicCordisRunner` `compact` `auth` | 同名 |
-| 斜杠命令 | `command-session` `command-settings` `command-goal` `command-plan` `command-loop` `command-workflow` `command-compact`（宿主无关，带 handler）；TUI 的 `tui.commands`（终端专属） | 向 `"slash"` `register_command`；命令体收调用页的 ctx，回 `SlashOutcome`，TUI / 网关各自呈现 |
+| 其它 spine | `context` `settings` `turn` `permissions` `cron` `roster` `jobs` `todos` `planMode` `ask` `mcp` `goal` `lsp` `skills` `subagents` `memory` `browser` `computer` `workflows` `slash` `status.items` `tool.views` `plugin.settings` `user.edits` `agentPresets` `dynamicCordisRunner` `turnCards` `compact` `auth` | 同名 |
+| 斜杠命令 | `command-session` `command-settings` `command-hooks` `command-goal` `command-plan` `command-loop` `command-workflow` `command-compact`（宿主无关，带 handler）；TUI 的 `tui.commands`（终端专属） | 向 `"slash"` `register_command`；命令体收调用页的 ctx，回 `SlashOutcome`，TUI / 网关各自呈现 |
 | 工具插件 | `tool-web` `tool-todo` `plan-mode` `tool-ask-user` `tool-jobs` `tool-scheduler` `tool-task` `tool-memory` `tool-monitor` `tool-goal` `tool-lsp` `tool-skills` `tool-workflow` `mcp-client` `tool-cordis` | 向 `"tools"` `register` |
+| 流程钩子插件 | `hooks-bridge`（跑 Dock / Claude Code / Codex 格式的 command hook，见 `docs/HOOKS.md`） | 挂 `tools/pre-execute` `tools/execute` `agent/pre-step` `agent/step-start` `agent/turn-end` |
 | 宿主契约 | `session_actor` 提供 `session` / `session.port`（`SessionRef`）；`tabs` 提供 `Tabs` | 同名 |
 | TUI | `theme` `tui.scrollback` `tui.prompt` `tui.statusBar` `tui.welcome` `tui.shortcuts` `tui.pairing`；`tui` 只跑事件循环，视图件由组合根挂（`cordis_tui::views()`） | 同名 |
 | 回环网关 | `gateway`；功能插件 `gateway.settings` `gateway.presets` `gateway.fs` `gateway.canvas` `gateway.mcpApps` `gateway.vcs` `gateway.schedule` `gateway.surfaces` `gateway.status` `gateway.toolViews` `gateway.pluginSettings` `gateway.memory`（`cordis_gateway::features()`，往 `"gateway.methods"` 登记 dock.1 方法） | `"gateway"`（`GatewayRef`）、`"gateway.methods"`，事件 `gateway/pairing` |

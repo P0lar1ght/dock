@@ -8891,3 +8891,129 @@ async fn memory_changes_on_disk_are_pushed_to_the_gui() {
         "{after}"
     );
 }
+
+/// 插件卡片：项目插件在回合结束时（`agent/turn-end`）往这一轮下面挂一张卡。推
+/// `turn/cards/updated`（`turnId` 同 `turn/start` 回的），`turn/cards/list` 列得到，
+/// `turn/cards/action` 在这一页上跑插件的回调、回一句提示。
+#[tokio::test]
+async fn turn_cards_from_a_project_plugin_list_push_and_act() {
+    let root = harness_root().await;
+    root.plugin(agent_presets(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    root.plugin(
+        cordis_spine::tabs(),
+        cordis_spine::TabsConfig::headless(test_page_mount()),
+    )
+    .unwrap()
+    .wait()
+    .await
+    .unwrap();
+    root.plugin(dynamic_runner(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    root.plugin(cordis_spine::turn_cards(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    let (addr, ticket, _serve) = serve_trusted(&root).await;
+    let (mut gui, _) = Rpc::connect_as(addr, &ticket, GUI_ORIGIN).await;
+    let init = gui.call("initialize", json!({})).await;
+    assert_eq!(init["result"]["capabilities"]["turnCards"], true, "{init}");
+
+    let project = project_dir("turn-cards");
+    let plugin = project.join(".dock").join("plugins").join("carder");
+    std::fs::create_dir_all(&plugin).unwrap();
+    std::fs::write(
+        plugin.join("source.rhai"),
+        r#"#{ inject: [], apply: |host| {
+            host.on("agent/turn-end", |e| {
+                if e.main {
+                    host.card(#{ id: "done", title: "本轮结束", text: e.text, tone: "success",
+                        actions: [#{ id: "ok", label: "好" }],
+                        on_action: |a| { "收到 " + a } });
+                }
+                ()
+            });
+        } }"#,
+    )
+    .unwrap();
+    let started = gui
+        .call(
+            "thread/start",
+            json!({ "cwd": project.display().to_string() }),
+        )
+        .await;
+    let id = started["result"]["thread"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{started}"))
+        .to_string();
+    let _ = gui
+        .call("thread/subscribe", json!({ "threadId": id }))
+        .await;
+    // 开页时在后台装插件：等它跑起来。
+    for _ in 0..50 {
+        let listed = gui.call("plugin/list", json!({})).await;
+        let running = listed["result"]["disk"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["id"] == "carder" && p["running"] == true);
+        if running {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    let turn = gui
+        .call("turn/start", json!({ "threadId": id, "message": "hello" }))
+        .await;
+    let turn_id = turn["result"]["turnId"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{turn}"))
+        .to_string();
+    let notes = notes_until(&mut gui, Duration::from_secs(10), |n| {
+        n["method"] == "turn/completed"
+    })
+    .await;
+    let pushed = notes
+        .iter()
+        .rfind(|n| n["method"] == "turn/cards/updated")
+        .unwrap_or_else(|| panic!("发了卡要推：{notes:#?}"));
+    assert_eq!(pushed["params"]["turnId"], turn_id.as_str());
+    let card = &pushed["params"]["cards"][0];
+    assert_eq!(card["title"], "本轮结束", "{card}");
+    assert_eq!(card["plugin"], "carder");
+    assert_eq!(card["tone"], "success");
+    assert_eq!(card["live"], true);
+
+    let listed = gui.call("turn/cards/list", json!({ "threadId": id })).await;
+    assert_eq!(
+        listed["result"]["turns"][0]["turnId"],
+        turn_id.as_str(),
+        "{listed}"
+    );
+    let card_id = listed["result"]["turns"][0]["cards"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let acted = gui
+        .call(
+            "turn/cards/action",
+            json!({ "threadId": id, "cardId": card_id, "action": "ok" }),
+        )
+        .await;
+    assert_eq!(acted["result"]["toast"], "收到 ok", "{acted}");
+    let bad = gui
+        .call(
+            "turn/cards/action",
+            json!({ "threadId": id, "cardId": card_id, "action": "nope" }),
+        )
+        .await;
+    assert!(bad["error"].is_object(), "{bad}");
+}

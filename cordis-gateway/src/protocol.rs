@@ -79,6 +79,9 @@ pub const CAPABILITIES: &[(&str, bool)] = &[
     // `turn/changes/list` / `diff` / `revert` + 推送 `turn/changes/updated`：每轮 agent 用
     // `search_replace` / `write_file` 改了哪些文件（行数、diff、撤销）。
     ("turnChanges", true),
+    // `turn/cards/list` / `action` + 推送 `turn/cards/updated`：插件挂在一轮回答下面的卡片
+    // （标题、正文、视图树、按钮）。
+    ("turnCards", true),
     // `vcs/worktree/diff`：项目 git 仓库相对 HEAD 的改动 + 未跟踪的新文件（受信连接）。
     ("worktreeDiff", true),
     // `thread/context/get`：上下文窗口按类别拆开（系统提示 / 工具定义 / 消息 / 其余 / 空闲，
@@ -160,6 +163,10 @@ pub const TURN_CHANGES_LIST: &str = "turn/changes/list";
 pub const TURN_CHANGES_DIFF: &str = "turn/changes/diff";
 /// 撤销一轮改动（受信连接）：还是那一轮改完样子的文件恢复成原文。
 pub const TURN_CHANGES_REVERT: &str = "turn/changes/revert";
+/// 线程上插件挂的卡片（按轮次）；推送 `turn/cards/updated`。
+pub const TURN_CARDS_LIST: &str = "turn/cards/list";
+/// 点卡片上的按钮（受信连接）：跑插件的回调，回一句提示。
+pub const TURN_CARDS_ACTION: &str = "turn/cards/action";
 pub const SCHEDULE_LIST: &str = "schedule/list";
 pub const SCHEDULE_CREATE: &str = "schedule/create";
 pub const SCHEDULE_UPDATE: &str = "schedule/update";
@@ -291,8 +298,6 @@ pub const BROWSER_STATUS: &str = "browser/status";
 pub const PLUGIN_LIST: &str = "plugin/list";
 pub const PLUGIN_ENABLE: &str = "plugin/enable";
 pub const PLUGIN_DELETE: &str = "plugin/delete";
-pub const PLUGIN_PROMOTE: &str = "plugin/promote";
-pub const PLUGIN_DISCARD: &str = "plugin/discard";
 pub const SKILL_LIST: &str = "skill/list";
 pub const SECRET_LIST: &str = "secret/list";
 pub const SECRET_SET: &str = "secret/set";

@@ -18,8 +18,8 @@ pub async fn start_host_half(group: &Fiber, plugin: Plugin) -> Result<Fiber, Str
             let message = error.to_string();
             if message.contains("has been registered") || message.contains("already registered") {
                 Err(format!(
-                    "{message} — to REPLACE something an earlier dynamic package registered, first cordis_stop that package's pluginId \
-(find it with cordis_inspect what:\"temporary\"), then run the new version."
+                    "{message} — another plugin already registered that name. Find the owner with \
+cordis_inspect what:\"plugins\"; pick a different name, or cordis_plugin disable the other plugin first."
                 ))
             } else {
                 Err(message)

@@ -78,7 +78,7 @@
 | `/lsp` | 探测 PATH 上的 `rust-analyzer` / `typescript-language-server` / `gopls` / `pyright-langserver`，按工作区标记（含子目录，跳过 `node_modules` / `target`）把缺的服务器写入 `.dock/lsp.json`，不覆盖已有条目。Notice 显示保留 / 添加 / 跳过。当前会话会尝试启动新服务器。空命令或 `/lsp setup` 写项目配置；`/lsp status` 只看不写；`/lsp user` 把 PATH 上有的默认服务器写入 `~/.dock/lsp.json`（不要求工作区标记）。输入 `/lsp ` 后 Tab / Enter 补全 `status` / `setup` / `user`（`/lsp s` 可滤到 status）。浏览器 companion 拒绝（请在 Dock 终端用） |
 | `/browser` | 额外命令（薄驾驶舱）：内置浏览器 MCP 的状态，见下 |
 | `/computer` | 额外命令（薄驾驶舱，Cordis/TUI）：本机 **cua-driver** 状态机 —— `mcp-client 未挂载` / `未安装` / `缺授权` / `已禁用` / `未连上` / `已连接`，外加最近审批提示；**不**嵌真桌面。**引导键**：`i` 装 / 重装 driver（走官方 `https://cua.ai/driver/install.sh`），`p` 在 macOS 跑 `cua-driver permissions grant` 要辅助功能 + 屏幕录制，`Ctrl+R` 重新探测本机并重载 MCP 配置，`↑/↓` 滚动，`Esc` 关闭。`i` / `p` 都是**两步**：先进确认态列出要执行的每一步，`Enter` 才真的跑（`Esc` 只取消确认、不关窗）；进度一行行显示在驾驶舱里，装完自动重探 + MCP 重载，不用重启 dock。底栏 hint 随状态变（`i:install` / `i:reinstall` / `p:grant` 仅在可用时出现）。装好 driver 后**不用写 `config.toml`**：Dock 自己发现 `PATH` / `~/.local/bin` / macOS `.app`，并注入内置 `[mcp_servers.cua-driver]`；`DOCK_CUA_DRIVER=<绝对路径>` 指定、`=off` 关掉。桌面键鼠走 MCP 公名 `mcp_cua-driver__*`（`search_tool` / `use_tool`），**全部**与 bash 同级 permissions / 计划门。细节见 [TOOLS.md](TOOLS.md)「Computer / CUA」与 [config.toml.example](config.toml.example)。勿与 Dock 浏览器 `mcp_browser__*` 混淆 |
-| `/cordis`（`plugins`） | Notice「Cordis 插件」：磁盘永久层（项目 `.dock/plugins/<id>/` 覆盖用户 `~/.dock/plugins/<id>/`）和本会话内存插件。Esc 关闭。写成永久用模型工具 `cordis_promote` |
+| `/cordis`（`plugins`） | Notice「Cordis 插件」：插件目录（项目 `.dock/plugins/<id>/` 覆盖用户 `~/.dock/plugins/<id>/`）与各自状态、最近的错误。Esc 关闭。改了文件让模型用 `cordis_plugin reload` 重载 |
 | `/preset`（`presets` `agent` `agents`） | 打开 Agent 预设名册。定义全是 YAML 目录：内置 < `~/.dock/presets/<id>/agent.yml` < 项目 `.dock/presets/<id>/agent.yml`（后写覆盖；仍可读旧 `<id>.yml`）。**加一个目录就是一个 Agent**，不必改代码。子代理写在 `agents/<type>.yml`（人设 + 工具允许名单）。**`n` 新建 / `d` 复制默认写当前工作区** `.dock/presets/<id>/`（有项目层时 origin 为项目）；改内置模式仍写 `~/.dock/presets/` 覆盖。新建人设默认写 `.dock/presets/<当前模式>/agents/`。`task` 工具 description 注入工作区相对路径 `.dock/presets` 与 `.dock/presets/<模式>/agents`（空名册也会注入，不用绝对 `{cwd}`）；只有用户明确要求保存到全局才写 `~/.dock/presets/`。省略 `tools` = 当前已注册全部工具；`[]` = 空；列表 = 允许名单（Dock 工具名）。`replace_prompt: true` 时 `persona` 整份替换系统提示。手写 `agents/<type>.yml` 后，`task` 校验、`/preset` 和下一采样步的 `task` enum / role hint 都会重读；本轮要立刻出现在 enum 里时用 `task`（`reload_roster: true`），不必新开会话。新建模式写完后用 `/preset` 应用该 id（`reload_roster` 不切模式）。名册列出子代理 id；`n` 新建、`d` 复制、`a` 应用、`x` 删除（内置不能删；删覆盖则恢复内置）。名册与写路径**只**通过 `task` 工具的 description 发给模型，系统提示里不再另写一份。**预设按页**：每个常驻分页各持一份，开页时抄当前页的当前预设，之后一页切换不影响别的页 |
 | `/history` | 搜索提示词历史 |
 | `/copy [N] [file]` | 把上一条回复复制到剪贴板或文件 |
@@ -146,7 +146,7 @@ order: 10
 
 子代理另放 `agents/<type>.yml`（人设 + 工具集），默认路径是项目 `.dock/presets/<当前模式 id>/agents/<type>.yml`。主代理用**唯一**的 spawn 工具 `task` 委派当前模式名册角色，`subagent_type` 为该文件名（不含 `.yml`）。发给模型的 `task` 参数带名册 `enum`（名册多出来的角色必须出现在这个 enum 里才能调）。本轮新写 `agents/<id>.yml` 后，用 `task` 的 `reload_roster: true` 刷新（不 spawn），下一采样步的 enum 才带新 id。新建模式写 `{cwd}/.dock/presets/<id>/agent.yml`（id 不能是汉字），然后 `/preset` 应用；`reload_roster` 只刷新当前模式名册。子代理默认不带技能 / 工作流 listing（`agents/<type>.yml` 的 `listings: true` 打开；打开还要求该角色的工具集里有 `skill` / `workflow`，否则那段仍不发）。`task` 只接受 prompt / description / subagent_type / run_in_background / resume_from / reload_roster——`cwd` / `isolation` / `model` 已从参数里删掉（dock 不实现）。每个子代理都是可续跑的：一轮跑完 park idle，父代理收到回合结束通知（本轮没给父级发过消息时带上该轮正文），不需要轮询。子代理不是作业：`job` / `kill_task` 只管后台命令。持续交流只有一颗 `send_message({agent_id, message})`，父子共用：父→直接子（在跑就在它下一步读到，idle 就开下一轮），子→启动它的会话（父级 id 写在子代理的初始任务里）；兄弟之间、别的分页发不了。`list_agents` 是状态源。`interrupt_agent` 停本轮；要整个撤掉在 `/tasks` 里按 `x`。用户 Stop / 新会话会取消本会话子代理。
 
-`tools` 里写 Dock 已挂上的名字（`bash` `read_file` `cordis_define` …），不是 DSH 包名。未挂上的名字在画布右侧显示「未挂载」。
+`tools` 里写 Dock 已挂上的名字（`bash` `read_file` `cordis_plugin` …），不是 DSH 包名。未挂上的名字在画布右侧显示「未挂载」。
 
 ---
 
@@ -160,7 +160,9 @@ order: 10
 | 浏览器配对 overlay | 听 `gateway/pairing`。`/pair` 第一行开启或关闭监听；首次 Origin 请求弹出「允许浏览器连接？」；下列待批与已绑来源（Enter 批准 / `x` 拒绝或撤销） |
 | MCP elicitation | 听 `mcp/elicit`。权限 / 提问 overlay 会抢前台（队列仍在）。表单逐步填：选项带「其他」、自由输入空内容闪「请输入具体内容」；可选字段留空不拦（数字类整个键不出现）；填好的值按 schema 校验（`minLength` / `minimum` / `format` / `minItems` 等），不合就闪原因。`d` 明确拒绝（decline），`Esc` 取消（cancel）。URL 模式显示完整地址 + 域名（高亮）+ 可疑警告（Punycode / 明文 http），Enter 开浏览器并**立刻**回服务器「同意」 |
 | 动态插槽 `Overlay::Slot` | `"tui.slots"` 登记的 pane（复用 Notice 布局）。有视图树（`docs/PLUGIN-VIEWS.md`）就按视图画，否则画 `render()` 的纯文本。Esc 关闭；↑/↓ 滚动并把规范化键名转给 `on_key`（`esc` / `enter` / `up` / `down` / `char:x`）。有视图时可见的动作编号 `[1]`–`[9]`，按数字键就是点它，插件收到的是动作 id 而不是 `char:n`（折叠段里的不编号）。脚本 `open_slot` 或 slash `kind: slot` 打开 |
-| `/cordis` | Notice：永久（磁盘）与会话（内存）插件一览；有设置卡的插件另列一段「插件设置」（普通字段给当前值，密钥只说已设置 / 未设置）。`/cordis set <插件 id> <key> <值>` 改一项：值能按 JSON 解析就按 JSON（数字、`true` / `false`、`null` 清回默认），否则当文字；按插件的 schema 校验，不合法底栏闪原因；写密钥字段时这条输入不留在上箭头历史里 |
+| `/hooks` | Notice：这个项目生效的 hooks 配置（Dock / Claude Code / Codex 格式）：每个文件、命令数、信任状态、警告，以及 `[hooks]` 开关怎么打开。见 `docs/HOOKS.md` |
+| 插件卡片 | 插件挂在一轮回答下面的卡片（Rhai `host.card`）：终端在发卡时记一条通知（标题「插件 id · 卡片标题」），按钮只在 GUI 上点 |
+| `/cordis` | Notice：插件目录与各自状态一览；有设置卡的插件另列一段「插件设置」（普通字段给当前值，密钥只说已设置 / 未设置）。`/cordis set <插件 id> <key> <值>` 改一项：值能按 JSON 解析就按 JSON（数字、`true` / `false`、`null` 清回默认），否则当文字；按插件的 schema 校验，不合法底栏闪原因；写密钥字段时这条输入不留在上箭头历史里 |
 | 插件工具卡视图 | 插件给某个工具登记了卡片视图（`"tool.views"`，Rhai `host.register_tool_view` 或 `register_tool` 的 `view`）：展开那张工具卡时头照旧，正文换成插件给的视图（`docs/PLUGIN-VIEWS.md`）；插件这次回 `()` 或已卸下就照旧画原始输出 |
 | 插件状态项 | `"status.items"`（Rhai `host.set_status`）与 `hud: true` 的插槽（正文第一行）画在快捷键条那一行**右侧**：「● 文字」按色调上色，单项超宽截断，放不下的折成「+N」；快捷键条让出那几列。没挂状态项服务的装配退回老样子（`hud` 进快捷键条） |
 | `/preset` 画布 | 左侧完整目录（当前 `"tools"`，右侧工具简介）、右侧本预设工具集。身份区列出本模式 `agents/` id。Enter 左加右删。名册 `n`/`d` 新建或复制默认写项目 `.dock/presets/<id>/`；改内置会写到 `~/.dock/presets/<id>/agent.yml` 覆盖。Esc 从画布回名册 |

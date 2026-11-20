@@ -6,6 +6,7 @@ use crate::agent::preset_propose::tool_propose_preset;
 use crate::agent::presets::agent_presets;
 use crate::agent::turn::turn;
 use crate::auth::{auth_commands, auth_manager, chatgpt_auth};
+use crate::host::hooks_bridge::{hooks_bridge, hooks_command};
 use crate::host::mcp_app_context::mcp_app_context;
 use crate::host::mcp_app_views::mcp_app_views;
 use crate::host::permissions::permissions;
@@ -16,6 +17,7 @@ use crate::host::slash::slash;
 use crate::host::status_items::status_items;
 use crate::host::tool_views::tool_views;
 use crate::host::tui_slots::tui_slots;
+use crate::host::turn_cards::turn_cards;
 use crate::host::turn_changes::turn_changes;
 use crate::host::user_edits::user_edits;
 use crate::llm::compact::{compact, compact_command};
@@ -143,6 +145,10 @@ pub async fn install_app(ctx: &Context) -> Result<()> {
     ctx.plugin(tui_slots(), ())?.wait().await?;
     ctx.plugin(status_items(), ())?.wait().await?;
     ctx.plugin(tool_views(), ())?.wait().await?;
+    ctx.plugin(turn_cards(), ())?.wait().await?;
+    // Claude Code / Codex 格式的 command hook（没有配置就什么都不做）。
+    ctx.plugin(hooks_bridge(), ())?.wait().await?;
+    ctx.plugin(hooks_command(), ())?.wait().await?;
     ctx.plugin(plugin_settings(), ())?.wait().await?;
     ctx.plugin(agent_presets(), ())?.wait().await?;
     // 会话里起草预设，交给桌面端编辑器审（不写盘）；终端照旧写文件。

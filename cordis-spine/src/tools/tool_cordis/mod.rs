@@ -1,77 +1,50 @@
-//! Model-facing Cordis inspect / define / run / call / stop / promote tools.
-//! Injects `"dynamicCordisRunner"` + `"tools"`; does not own the registry.
+//! Model-facing plugin tools: `cordis_inspect` (read) and `cordis_plugin`
+//! (reload / disable a plugin directory). Injects `"dynamicCordisRunner"` +
+//! `"tools"`; does not own the registry.
+//!
+//! 对齐 DSH 现在的做法：模型只有「只读查看」和「管理插件目录」两颗工具，插件
+//! 本身就是普通文件，用文件工具写。以前那套 define / run / call / stop / promote
+//! 让模型在内存里的会话插件和磁盘插件之间来回搬：一次修改要三次调用，插件 id
+//! 跟着分裂（`safe-1` → `safeguard`，`cyberspace` → `cyber-2`），define 和 run
+//! 校验的路径还不一样。DSH 撤掉同一套工具的理由原话是「生成代码工具在普通已安装
+//! 组合包之外引入了第二套插件生命周期」。
 
 mod inspect;
 
 use std::future::Future;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
 use cordis::{plugin, Context, Inject, Plugin};
 use serde_json::Value;
 
-use crate::host::slash::{contrib_fields_present, slash_entry_from_define, Slash};
-use crate::names::{DYNAMIC_CORDIS_RUNNER, PRE_STEP, SESSIONS, SLASH, TOOLS};
+use crate::names::{DYNAMIC_CORDIS_RUNNER, PRE_STEP, SESSIONS, TOOLS};
 use crate::session::log::Sessions;
 use crate::tools::dynamic_runner::{
-    AttemptStatus, DynamicRunner, PersistScope, PluginOrigin, PluginSel, RunMode, SourceInput,
+    declared_hooks, project_root, DiskSpec, DynamicRunner, PersistScope, ReloadReceipt,
+    ReloadStatus, Surface,
 };
-use crate::tools::registry::{own_registered, tool_result, ToolBody, Tools};
+use crate::tools::registry::{exec_ctx, own_registered, tool_result, ToolBody, Tools};
+use cordis_base::config::dock_home;
 use cordis_base::types::{LogEvent, PreStep, ToolCall, ToolResult, ToolSpec};
 
-use inspect::{render_inspect, render_plugin};
+use inspect::{render_inspect, render_overview, render_plugin};
 
 type ExecFut = Pin<Box<dyn Future<Output = ToolResult> + Send + 'static>>;
 
-/// One read-only tool, two questions: "what is live in this process" (`what`)
-/// and "what is in this Plugin" (`pluginId`). They used to be `cordis_inspect`
-/// and `cordis_inspect_self`; both are ungated reads over the same registry, and
-/// splitting them cost a whole extra row in `search_tool`'s window — which is
-/// how `cordis_define` / `cordis_run` fell out of the default five hits.
-const INSPECT_DESC: &str = "Read-only Cordis directory. With `what`: services (reachable from Rhai vs merely mounted), fibers, tools, factories, builtins (Rhai host API), events, slots, temporary (session Plugins), permanent (disk plugins); omit `what` for all of it. With `pluginId`: that Plugin's version pointers, latest Run and Packages; add `packageId` for one Package's factory, source_path or inline source, and runtime diagnostics. Never executes apply or moves version pointers. Load the cordis-plugin-development skill before writing a Plugin.";
-const INSPECT_PARAMS: &str = r#"{"type":"object","properties":{"what":{"type":"string","enum":["services","fibers","tools","temporary","permanent","factories","builtins","events","slots"],"description":"Live directory section. Omit for all sections. Ignored when pluginId is given."},"pluginId":{"type":"string","description":"Inspect this Plugin instead of the directory."},"packageId":{"type":"string","description":"One Package of pluginId; requires pluginId."}}}"#;
+pub(crate) const INSPECT: &str = "cordis_inspect";
+pub(crate) const PLUGIN: &str = "cordis_plugin";
 
-const DEFINE_DESC: &str = "Record an immutable Package. New Plugin: plugin.kind \"new\" + idPrefix (3–6 lowercase letters). Change an existing one: plugin.kind \"existing\" + its pluginId, which appends a Package and never overwrites an older one. factory is echo, note, hold, slash, or rhai (cordis_inspect what:\"factories\"). Custom behaviour is factory rhai: write the script to .dock/plugins/<id>/source.rhai and pass source_path; inline source is for tiny samples only. source XOR source_path. Define compiles the source and stops there — no approval, no apply, currentPackageId unchanged; call cordis_run next. Load the cordis-plugin-development skill before authoring: it routes to the Rhai contract, the host API, UI surfaces and pitfalls.";
-const DEFINE_PARAMS: &str = r#"{"type":"object","required":["plugin","name","purpose","factory"],"properties":{"plugin":{"type":"object","description":"kind:\"new\" + idPrefix, or kind:\"existing\" + pluginId."},"name":{"type":"string"},"purpose":{"type":"string"},"factory":{"type":"string","description":"echo, note, hold, slash, or rhai."},"source":{"type":"string","description":"rhai, inline (≤128KiB, tiny samples): #{ inject: [...], apply: |host| { ... } }. XOR source_path."},"source_path":{"type":"string","description":"rhai, preferred: path under .dock/plugins/<id>/ or ~/.dock/plugins/<id>/ (≤1MiB, re-read on run). XOR source. No .. escape."},"command":{"type":"string","description":"slash: extra /command token; cannot collide with builtins."},"kind":{"type":"string","enum":["prompt","overlay","slot","tool"],"description":"slash: what /command does. prompt = template, overlay = read-only pane, slot = open a tui.slots id, tool = run a live tool."},"text":{"type":"string","description":"slash: prompt template, overlay body, slot id, or tool name. {args} takes the typed arguments."},"title":{"type":"string","description":"slash overlay/tool Notice title."},"send":{"type":"boolean","description":"slash prompt: send immediately (default) or fill the composer."},"description":{"type":"string","description":"slash /help label; defaults to purpose."}}}"#;
+const INSPECT_DESC: &str = "Read-only view of the plugin host; never runs plugin code. No arguments: this session's plugin directories and every plugin with its status (running, failed and why, disabled). `plugin`: one plugin — directory, enabled, what its running version registered (tools, slash commands, slots, hooks), declared HTTP hosts, last error. `what`: one reference section — services (what a Rhai host can reach), tools (live tool names), builtins (Rhai host API signatures), events (hook names and payloads), slots (panels). Load the cordis-plugin-development skill before writing a plugin.";
+const INSPECT_PARAMS: &str = r#"{"type":"object","properties":{"plugin":{"type":"string","description":"Plugin id (its directory name under .dock/plugins/)."},"what":{"type":"string","enum":["plugins","services","tools","builtins","events","slots"],"description":"One reference section. Ignored when plugin is given."}}}"#;
 
-const RUN_DESC: &str = "Activate one exact Package. mode \"run\" = first start, restart of current, or rollback to it; mode \"update\" = switch to a different Package, which disposes the previous Run's fiber entirely (every provide / register_* it made) and starts clean — it does not overlay. Asks the same permission overlay as bash. currentPackageId moves only on success; a throwing apply rolls its registrations back first. Do not re-request approval the user rejected.";
-const RUN_PARAMS: &str = r#"{"type":"object","required":["pluginId","packageId","mode"],"properties":{"pluginId":{"type":"string"},"packageId":{"type":"string"},"mode":{"type":"string","enum":["run","update"]}}}"#;
+const PLUGIN_DESC: &str = "Load, hot-reload, or disable a plugin. A plugin is a directory: .dock/plugins/<id>/ in the project (scope \"user\": ~/.dock/plugins/<id>/) holding source.rhai and an optional plugin.toml. Write and edit those files with the file tools, then action \"reload\" compiles them as they are now and starts them, replacing the running version; if the new version fails, the previous one keeps running and the error (with line and position) comes back. Reload also sets enabled = true. Action \"disable\" stops the plugin and writes enabled = false; files stay. Asks the user like bash, once per plugin when they choose always; the request lists the plugin's hooks and declared HTTP hosts. Changes reach every session and survive restart. After reload, call the tools it registered through use_tool to verify. Load the cordis-plugin-development skill before writing a plugin.";
+const PLUGIN_PARAMS: &str = r#"{"type":"object","required":["action","id"],"properties":{"action":{"type":"string","enum":["reload","disable"]},"id":{"type":"string","description":"Plugin id = directory name: 2–32 chars, lowercase letter first, then a-z 0-9 -."},"scope":{"type":"string","enum":["project","user"],"description":"Which plugins root. Default: project if .dock/plugins/<id>/ exists there, else user."}}}"#;
 
-/// The repair loop is in `RUN_DESC` and the Skill, but `cordis_*` are deferred
-/// tools: their descriptions are not in context unless the model just looked
-/// them up. A failed apply is the one place the loop is needed, so it ships with
-/// the failure instead of being remembered. Only for host failures — a mode /
-/// id validation error already says what to do, and this on top would bury it.
-const RUN_REPAIR_HINT: &str = "Packages are immutable — do not retry this same packageId. Repair: cordis_inspect with pluginId+packageId for the source and hostError; fix the file (or the inline source); cordis_define again with plugin.kind \"existing\" and the SAME pluginId, which appends a new Package; then cordis_run that new packageId (mode \"update\" when the Plugin already has a current Package, otherwise \"run\"). Do not mint a second Plugin for the same purpose.";
-
-const CALL_DESC: &str = "Execute one live model-facing tool by exact name, including tools a running dynamic Package registered with host.register_tool / register_dynamic. Use this after cordis_run to verify a dynamic tool in the same Host turn — do not wait for a later model step or a TUI slash like /test. `arguments` is a JSON object (or a JSON string of that object); omit for {}. Permissions, plan-mode gates, and Agent preset allowlists still apply (dynamic tools bypass the allowlist). Do not call cordis_call recursively.";
-const CALL_PARAMS: &str = r#"{"type":"object","required":["name"],"properties":{"name":{"type":"string","description":"Exact tool name from cordis_inspect what:\"tools\" or a dynamic register_tool name."},"arguments":{"description":"JSON object of tool arguments, or a JSON string. Default {}."}}}"#;
-
-/// Teardown is one tool with one switch, not two tools. Both halves are ungated
-/// and differ in exactly one thing — whether the definition survives — which is
-/// easier to teach side by side than as two descriptions that each end with
-/// "use the other one instead".
-const STOP_DESC: &str = "Stop a dynamic Plugin's current Run: its fiber is disposed, so every tool, slash, slot and bag that Run registered goes away. Stopping an already stopped Plugin succeeds. By default the Plugin, its Packages and currentPackageId stay, so it can run or update again later. drop:true also deletes the in-memory definition (use it only when no version needs to remain). Neither one touches disk: files under .dock/plugins/<id>/ stay and autoload next start unless you set enabled=false or delete that directory.";
-const STOP_PARAMS: &str = r#"{"type":"object","required":["pluginId"],"properties":{"pluginId":{"type":"string"},"drop":{"type":"boolean","description":"Also forget the definition and every Package. Default false."}}}"#;
-
-const PROMOTE_DESC: &str = "Write the Plugin's current (or latest) Package to disk so it survives restart, then autostart it from there (no second permission prompt). scope \"project\" (default) writes {cwd}/.dock/plugins/<id>/, \"user\" writes ~/.dock/plugins/<id>/; default id strips the minted -N suffix (echo-1 → echo). If the disk id differs from the session Plugin, the session copy is stopped to avoid duplicate tools — cordis_stop drop:true it if you no longer need the in-memory definition. Files stay until you delete them.";
-const PROMOTE_PARAMS: &str = r#"{"type":"object","required":["pluginId"],"properties":{"pluginId":{"type":"string","description":"Session or already-loaded Plugin to persist."},"id":{"type":"string","description":"Disk directory / stable pluginId. Default: strip -N from pluginId."},"scope":{"type":"string","enum":["project","user"],"description":"project (default) = workspace .dock/plugins; user = ~/.dock/plugins."}}}"#;
-
-/// Runtime half of the promote receipt. A const so `every_cordis_name_in_model_text_is_a_live_tool`
-/// covers it: the first version of this sentence outlived `cordis_undefine` and
-/// spent a turn telling the model to call a tool that no longer existed.
-const PROMOTE_STOP_NOTE: &str = "was stopped to avoid duplicate tools; cordis_stop it with drop:true if you no longer need the in-memory copy.";
-
-/// The registered surface, in one place so registration and the text guard
-/// cannot drift apart.
-const TOOL_NAMES: [&str; 6] = [
-    "cordis_inspect",
-    "cordis_define",
-    "cordis_run",
-    "cordis_call",
-    "cordis_stop",
-    "cordis_promote",
-];
+/// The registered surface, for the text guard below.
+#[cfg(test)]
+const TOOL_NAMES: [&str; 2] = [INSPECT, PLUGIN];
 
 pub fn tool_cordis() -> Plugin {
     plugin(
@@ -82,9 +55,10 @@ pub fn tool_cordis() -> Plugin {
             let _ = ctx.on_waterfall(PRE_STEP, move |step: PreStep, args| {
                 let next = args.next::<PreStep>().unwrap_or(step);
                 // Main session only: a `@pluginId` reminder has to land in the
-                // session that mentioned it, and that is the only one reachable.
+                // session that mentioned it.
                 if next.enter && next.is_main_session() {
-                    inject_plugin_mentions(&ctx_pre, &next.user);
+                    let page = exec_ctx().unwrap_or_else(|| ctx_pre.clone());
+                    inject_plugin_mentions(&ctx_pre, &page, &next.user);
                 }
                 next
             });
@@ -95,7 +69,7 @@ pub fn tool_cordis() -> Plugin {
                     spec(
                         ctx,
                         tools.as_ref(),
-                        TOOL_NAMES[0],
+                        INSPECT,
                         INSPECT_DESC,
                         INSPECT_PARAMS,
                         inspect_tool,
@@ -103,42 +77,10 @@ pub fn tool_cordis() -> Plugin {
                     spec(
                         ctx,
                         tools.as_ref(),
-                        TOOL_NAMES[1],
-                        DEFINE_DESC,
-                        DEFINE_PARAMS,
-                        define_tool,
-                    )?,
-                    spec(
-                        ctx,
-                        tools.as_ref(),
-                        TOOL_NAMES[2],
-                        RUN_DESC,
-                        RUN_PARAMS,
-                        run_tool,
-                    )?,
-                    spec(
-                        ctx,
-                        tools.as_ref(),
-                        TOOL_NAMES[3],
-                        CALL_DESC,
-                        CALL_PARAMS,
-                        call_tool,
-                    )?,
-                    spec(
-                        ctx,
-                        tools.as_ref(),
-                        TOOL_NAMES[4],
-                        STOP_DESC,
-                        STOP_PARAMS,
-                        stop_tool,
-                    )?,
-                    spec(
-                        ctx,
-                        tools.as_ref(),
-                        TOOL_NAMES[5],
-                        PROMOTE_DESC,
-                        PROMOTE_PARAMS,
-                        promote_tool,
+                        PLUGIN,
+                        PLUGIN_DESC,
+                        PLUGIN_PARAMS,
+                        plugin_tool,
                     )?,
                 ],
             )?;
@@ -170,351 +112,350 @@ fn spec(
     )
 }
 
+/// 发起这次调用的那一页：项目目录、会话身份都按它算。插件 fiber 和这两颗工具都
+/// 挂在根上，拿根算的话 GUI 里每个会话都会被当成第 1 页。
+fn page(ctx: &Context) -> Context {
+    exec_ctx().unwrap_or_else(|| ctx.clone())
+}
+
+/// 这一页能看到的两个插件根：用户级在前、项目级在后（后者覆盖前者）。
+pub(crate) fn roots_for(page: &Context) -> Vec<(PersistScope, PathBuf)> {
+    vec![
+        (PersistScope::User, dock_home().join("plugins")),
+        (
+            PersistScope::Project,
+            project_root(&crate::session::cwd::session_cwd(page)),
+        ),
+    ]
+}
+
 fn inspect_tool(ctx: Context, call: ToolCall) -> ExecFut {
     Box::pin(async move {
         let v = json(&call);
-        let plugin_id = v.get("pluginId").and_then(Value::as_str);
-        let package_id = v.get("packageId").and_then(Value::as_str);
         let Some(runner) = ctx.get::<DynamicRunner>(DYNAMIC_CORDIS_RUNNER) else {
-            return tool_result(call, "Error: dynamicCordisRunner is not mounted");
+            return tool_result(call, "错误：动态插件服务没有挂上");
         };
-        // One Package is the narrowest question, so it wins over `what`.
-        if let Some(plugin_id) = plugin_id {
-            return match render_plugin(&runner, &session_id(&ctx), plugin_id, package_id) {
+        let page = page(&ctx);
+        let roots = roots_for(&page);
+        if let Some(id) = text_arg(&v, "plugin").or_else(|| text_arg(&v, "pluginId")) {
+            return match render_plugin(&runner, &roots, &id) {
                 Ok(text) => tool_result(call, text),
-                Err(e) => tool_result(call, format!("Error: {e}")),
+                Err(e) => error_result(call, e),
             };
         }
-        if package_id.is_some() {
-            return tool_result(call, "Error: cordis_inspect packageId requires pluginId");
-        }
         let Some(tools) = ctx.get::<Tools>(TOOLS) else {
-            return tool_result(call, "Error: tools is not mounted");
+            return error_result(call, "工具表没有挂上");
         };
-        let what = v.get("what").and_then(Value::as_str);
-        tool_result(
-            call,
-            render_inspect(&ctx, &runner, &tools, session_id(&ctx).as_str(), what),
-        )
+        let text = match text_arg(&v, "what") {
+            None => render_overview(&runner, &roots),
+            Some(what) => render_inspect(&ctx, &runner, &tools, &roots, &what),
+        };
+        tool_result(call, text)
     })
 }
 
-fn define_tool(ctx: Context, call: ToolCall) -> ExecFut {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Action {
+    Reload,
+    Disable,
+}
+
+/// 宽松地认动作名：模型常写 enable / load / stop，意思都明白，就别为一个同义词
+/// 再让它重来一轮。
+fn parse_action(raw: &str) -> Result<Action, String> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "reload" | "load" | "enable" | "start" | "run" | "update" => Ok(Action::Reload),
+        "disable" | "stop" | "unload" => Ok(Action::Disable),
+        "" => Err("action 是必填的：\"reload\" 或 \"disable\"".into()),
+        other => Err(format!(
+            "action 只能是 \"reload\" 或 \"disable\"，收到 {other:?}"
+        )),
+    }
+}
+
+fn parse_scope(v: &Value) -> Result<Option<PersistScope>, String> {
+    match text_arg(v, "scope").as_deref() {
+        None => Ok(None),
+        Some("project") => Ok(Some(PersistScope::Project)),
+        Some("user") => Ok(Some(PersistScope::User)),
+        Some(other) => Err(format!(
+            "scope 只能是 \"project\" 或 \"user\"，收到 {other:?}"
+        )),
+    }
+}
+
+fn plugin_tool(ctx: Context, call: ToolCall) -> ExecFut {
     Box::pin(async move {
         let v = json(&call);
         let Some(runner) = ctx.get::<DynamicRunner>(DYNAMIC_CORDIS_RUNNER) else {
-            return tool_result(call, "Error: dynamicCordisRunner is not mounted");
+            return error_result(call, "动态插件服务没有挂上");
         };
-        let plugin = match parse_plugin_sel(&v) {
-            Ok(p) => p,
-            Err(e) => return tool_result(call, format!("Error: {e}")),
+        let action = match parse_action(&text_arg(&v, "action").unwrap_or_default()) {
+            Ok(a) => a,
+            Err(e) => return error_result(call, e),
         };
-        let name = v.get("name").and_then(Value::as_str).unwrap_or("");
-        let purpose = v.get("purpose").and_then(Value::as_str).unwrap_or("");
-        let factory = v.get("factory").and_then(Value::as_str).unwrap_or("");
-        let contrib = match (factory, contrib_fields_present(&v)) {
-            ("slash", _) => match slash_entry_from_define(&v, purpose) {
-                // 命令表里有的名字（`/help`、各功能的命令、终端的命令）不能盖：
-                // define 时就说，别等到 `cordis_run` 才失败。
-                Ok(entry)
-                    if ctx
-                        .get::<Slash>(SLASH)
-                        .is_some_and(|slash| slash.is_builtin(&entry.command)) =>
-                {
-                    return tool_result(
-                        call,
-                        format!("Error: cannot shadow builtin slash /{}", entry.command),
-                    );
-                }
-                Ok(entry) => Some(entry),
-                Err(e) => return tool_result(call, format!("Error: {e}")),
-            },
-            (_, true) => {
-                return tool_result(
-                    call,
-                    "Error: command/kind/text are only for factory \"slash\"",
-                );
-            }
-            _ => None,
-        };
-        let source = match (
-            v.get("source").and_then(Value::as_str),
-            v.get("source_path").and_then(Value::as_str),
-        ) {
-            (Some(_), Some(_)) => {
-                return tool_result(
-                    call,
-                    "Error: provide source or source_path for factory \"rhai\", not both",
-                );
-            }
-            (Some(s), None) => Some(SourceInput::Inline(s.to_string())),
-            (None, Some(p)) => Some(SourceInput::Path(p.to_string())),
-            (None, None) => None,
-        };
-        match runner.define(
-            session_id(&ctx).as_str(),
-            plugin,
-            name,
-            purpose,
-            factory,
-            contrib,
-            source,
-        ) {
-            Ok(r) => tool_result(
+        let Some(id) = text_arg(&v, "id").or_else(|| text_arg(&v, "pluginId")) else {
+            return error_result(
                 call,
-                format!(
-                    "Defined {}/{} ({}); factory {}; it is not running yet. Use cordis_run to activate this Package.",
-                    r.plugin_id, r.package_id, r.name, r.factory
-                ),
-            ),
-            Err(e) => tool_result(call, format!("Error: {e}")),
-        }
-    })
-}
-
-fn run_tool(ctx: Context, call: ToolCall) -> ExecFut {
-    Box::pin(async move {
-        let v = json(&call);
-        let Some(runner) = ctx.get::<DynamicRunner>(DYNAMIC_CORDIS_RUNNER) else {
-            return tool_result(call, "Error: dynamicCordisRunner is not mounted");
-        };
-        let plugin_id = v.get("pluginId").and_then(Value::as_str).unwrap_or("");
-        let package_id = v.get("packageId").and_then(Value::as_str).unwrap_or("");
-        let mode = match RunMode::parse(v.get("mode").and_then(Value::as_str).unwrap_or("")) {
-            Ok(m) => m,
-            Err(e) => return tool_result(call, format!("Error: {e}")),
-        };
-        if plugin_id.is_empty() || package_id.is_empty() {
-            return tool_result(call, "Error: pluginId and packageId are required");
-        }
-        match runner
-            .run(&session_id(&ctx), plugin_id, package_id, mode)
-            .await
-        {
-            Ok(r) => tool_result(
-                call,
-                serde_json::json!({
-                    "status": r.status,
-                    "pluginId": r.plugin_id,
-                    "packageId": r.package_id,
-                    "pluginRunId": r.plugin_run_id,
-                    "mode": r.mode.as_str(),
-                    "currentPackageId": r.current_package_id,
-                    "nextPackageId": r.next_package_id,
-                    "host": {
-                        "status": r.status,
-                        "provides": r.provides,
-                        "waitingFor": r.waiting_for,
-                        "fiberState": r.fiber_state,
-                    }
-                })
-                .to_string(),
-            ),
-            Err(e) => {
-                // 只有真的起过 host 半才谈得上"修 source 再来一版"：`resolve_plan`
-                // 的 mode / id 报错自己已经写清了下一步。
-                let host_failed = runner
-                    .inspect_plugin(&session_id(&ctx), plugin_id)
-                    .ok()
-                    .and_then(|row| row.latest)
-                    .is_some_and(|a| {
-                        a.status == AttemptStatus::Failed && a.host_error.as_deref() == Some(&e)
-                    });
-                if host_failed {
-                    tool_result(call, format!("Error: {e}\n\n{RUN_REPAIR_HINT}"))
-                } else {
-                    tool_result(call, format!("Error: {e}"))
-                }
-            }
-        }
-    })
-}
-
-fn call_tool(ctx: Context, call: ToolCall) -> ExecFut {
-    Box::pin(async move {
-        let v = json(&call);
-        let name = v
-            .get("name")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        if name.is_empty() {
-            return tool_result(call, "Error: name is required");
-        }
-        if name == "cordis_call" {
-            return tool_result(call, "Error: cordis_call cannot call itself");
-        }
-        let Some(tools) = ctx.get::<Tools>(TOOLS) else {
-            return tool_result(call, "Error: tools is not mounted");
-        };
-        let live: Vec<String> = tools.specs().into_iter().map(|s| s.name).collect();
-        if !live.iter().any(|n| n == &name) {
-            return tool_result(
-                call,
-                format!(
-                    "Error: tool {name:?} is not registered. Live tools: {}",
-                    live.join(", ")
-                ),
+                "id 是必填的：插件目录名，比如 .dock/plugins/memo/ 的 memo",
             );
-        }
-        let arguments = match v.get("arguments") {
-            None | Some(Value::Null) => "{}".into(),
-            Some(Value::String(s)) => {
-                let trimmed = s.trim();
-                if trimmed.is_empty() {
-                    "{}".into()
-                } else {
-                    s.clone()
-                }
-            }
-            Some(other) => other.to_string(),
         };
-        let inner = tools
-            .execute(ToolCall {
-                id: format!("{}→{}", call.id, name),
-                name: name.clone(),
-                arguments,
-            })
-            .await;
-        tool_result(
-            call,
-            format!("## cordis_call → {name}\n\n{}", inner.content),
-        )
-    })
-}
-
-fn stop_tool(ctx: Context, call: ToolCall) -> ExecFut {
-    Box::pin(async move {
-        let v = json(&call);
-        let plugin_id = v
-            .get("pluginId")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        let drop = v.get("drop").and_then(Value::as_bool).unwrap_or(false);
-        let Some(runner) = ctx.get::<DynamicRunner>(DYNAMIC_CORDIS_RUNNER) else {
-            return tool_result(call, "Error: dynamicCordisRunner is not mounted");
+        let scope = match parse_scope(&v) {
+            Ok(s) => s,
+            Err(e) => return error_result(call, e),
         };
-        if plugin_id.is_empty() {
-            return tool_result(call, "Error: pluginId is required");
-        }
-        let sid = session_id(&ctx);
-        if !drop {
-            return match runner.stop(&sid, &plugin_id).await {
+        let page = page(&ctx);
+        let roots = roots_for(&page);
+        let (spec, shadowed) = match crate::tools::dynamic_runner::find_disk(&id, scope, &roots) {
+            Ok(found) => found,
+            Err(e) => return error_result(call, e),
+        };
+        match action {
+            Action::Disable => match runner.disable_disk(&spec).await {
                 Ok(r) => tool_result(
                     call,
                     format!(
-                        "Dynamic Plugin {} is stopped; its definition and versions remain.",
-                        r.plugin_id
+                        "已停用插件 {}（{}）{}。plugin.toml 已写 enabled = false，文件都还在；要再用就 cordis_plugin reload {}。",
+                        r.id,
+                        r.dir.display(),
+                        if r.was_running { "，它登记的工具 / 命令 / 面板已经撤下" } else { "（本来就没在跑）" },
+                        r.id
                     ),
                 ),
-                Err(e) => tool_result(call, format!("Error: {e}")),
-            };
-        }
-        // Read the origin before the definition is gone — that is the only place
-        // the disk path lives, and the model needs it to hear "files remain".
-        let origin = runner
-            .inspect_plugin(&sid, &plugin_id)
-            .ok()
-            .map(|row| row.origin);
-        match runner.undefine(&sid, &plugin_id).await {
-            Ok(r) => {
-                let disk = match origin {
-                    Some(PluginOrigin::Disk { path, .. }) => format!(
-                        " Disk files remain at {}; set enabled=false or delete that directory to stop autoload.",
-                        path.display()
-                    ),
-                    _ => String::new(),
-                };
-                tool_result(
-                    call,
-                    format!(
-                        "Removed dynamic Plugin {} and all of its Packages. wasRunning={}{disk}",
-                        r.plugin_id, r.was_running
-                    ),
-                )
-            }
-            Err(e) => tool_result(call, format!("Error: {e}")),
+                Err(e) => error_result(call, e),
+            },
+            Action::Reload => match runner.reload_disk(&spec).await {
+                Ok(r) => {
+                    let failed = r.status == ReloadStatus::Failed;
+                    let text = render_reload(&spec, &r, shadowed.as_deref());
+                    if failed {
+                        ToolResult {
+                            is_error: true,
+                            ..tool_result(call, text)
+                        }
+                    } else {
+                        tool_result(call, text)
+                    }
+                }
+                Err(e) => error_result(call, e),
+            },
         }
     })
 }
 
-fn promote_tool(ctx: Context, call: ToolCall) -> ExecFut {
-    Box::pin(async move {
-        let v = json(&call);
-        let plugin_id = v
-            .get("pluginId")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        if plugin_id.is_empty() {
-            return tool_result(call, "Error: pluginId is required");
+/// reload 回执：状态、登记了什么、下一步。给模型的「下一步」只有一条，按结果挑。
+fn render_reload(spec: &DiskSpec, r: &ReloadReceipt, shadowed: Option<&std::path::Path>) -> String {
+    let mut lines = Vec::new();
+    let place = format!("{}级 {}", scope_label(r.scope), r.dir.display());
+    match r.status {
+        ReloadStatus::Failed => {
+            lines.push(format!("插件 {} 这一版没跑起来（{place}）：", r.id));
+            lines.push(r.error.clone().unwrap_or_else(|| "原因不明".into()));
+            match &r.kept_previous {
+                Some(prev) => lines.push(format!(
+                    "上一版 {prev} 仍在运行（已自动回滚），用户手上的功能没断。"
+                )),
+                None => lines.push("现在没有在跑的版本。".into()),
+            }
         }
-        let disk_id = v.get("id").and_then(Value::as_str);
-        let scope = match PersistScope::parse(v.get("scope").and_then(Value::as_str).unwrap_or(""))
-        {
-            Ok(s) => s,
-            Err(e) => return tool_result(call, format!("Error: {e}")),
-        };
-        let Some(runner) = ctx.get::<DynamicRunner>(DYNAMIC_CORDIS_RUNNER) else {
-            return tool_result(call, "Error: dynamicCordisRunner is not mounted");
-        };
-        match runner
-            .promote(&session_id(&ctx), &plugin_id, disk_id, scope)
-            .await
-        {
-            Ok(r) => {
-                let stop_note = if r.stopped_source {
-                    format!(" Session Plugin {} {PROMOTE_STOP_NOTE}", r.source_plugin_id)
-                } else {
-                    String::new()
-                };
-                tool_result(
-                    call,
-                    format!(
-                        "Wrote {} plugin {} at {}. packageId={}; running={}.{stop_note} Restart autoloads this directory without a permission overlay.",
-                        r.scope.as_str(),
-                        r.plugin_id,
-                        r.path.display(),
-                        r.package_id,
-                        r.running
-                    ),
+        ReloadStatus::Running | ReloadStatus::Waiting => {
+            lines.push(format!(
+                "已重载插件 {}（{place}），{}。",
+                r.id,
+                status_label(r.status)
+            ));
+            if r.enabled_now {
+                lines.push(
+                    "plugin.toml 原来是 enabled = false，已改成 true（以后启动会自动装上）。"
+                        .into(),
+                );
+            }
+        }
+    }
+    if r.status != ReloadStatus::Failed || r.kept_previous.is_some() {
+        lines.push(format!("登记：{}", surface_line(&r.surface)));
+    }
+    if !r.http_allow.is_empty() {
+        lines.push(format!("HTTP 免逐次确认：{}", r.http_allow.join("、")));
+    }
+    if let Some(other) = shadowed {
+        lines.push(format!(
+            "注意：同名的另一份 {} 被这份盖住了，不会加载。",
+            other.display()
+        ));
+    }
+    for w in &r.warnings {
+        lines.push(format!("注意：{w}"));
+    }
+    lines.push(format!("下一步：{}", next_step(spec, r)));
+    lines.join("\n")
+}
+
+fn next_step(spec: &DiskSpec, r: &ReloadReceipt) -> String {
+    let source = spec
+        .source_path
+        .as_ref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| r.dir.join("plugin.toml").display().to_string());
+    match r.status {
+        ReloadStatus::Failed => {
+            let error = r.error.as_deref().unwrap_or("");
+            if error.contains("Function not found") || error.contains("Syntax error") || error.contains("rhai syntax") {
+                format!(
+                    "按报错的行号改 {source}，再 cordis_plugin reload {}。Rhai 不是 JS：报 Function not found 先读技能里的 references/rhai-pitfalls.md。别另起一个插件目录。",
+                    r.id
+                )
+            } else {
+                format!(
+                    "改 {source} 后再 cordis_plugin reload {}；要看完整状态用 cordis_inspect plugin \"{}\"。别另起一个插件目录。",
+                    r.id, r.id
                 )
             }
-            Err(e) => tool_result(call, format!("Error: {e}")),
         }
-    })
+        ReloadStatus::Waiting => format!(
+            "它在等这些服务挂上：{}。inject 里写了没有的名字就删掉再 reload（cordis_inspect what \"services\" 看哪些够得着）。",
+            r.waiting_for.join("、")
+        ),
+        ReloadStatus::Running => match r.surface.tools.first() {
+            Some(tool) => format!(
+                "用 use_tool 试调刚登记的工具，例如 use_tool {{\"tool_name\":\"{tool}\",\"tool_input\":{{}}}}，看结果对不对。改了文件就再 reload 一次。"
+            ),
+            None if !r.surface.hooks.is_empty() => format!(
+                "触发一次它挂的钩子（{}）看效果，比如直接调被拦的那个工具。改了文件就再 reload 一次。",
+                r.surface.hooks.join("、")
+            ),
+            None if !r.surface.slash.is_empty() || !r.surface.slots.is_empty() => {
+                "请用户打开它登记的斜杠命令 / 面板看一眼；你这边用 cordis_inspect 确认登记无误。".into()
+            }
+            None => "它没有登记任何东西——apply 里是不是漏了 host.register_tool / register_slash / on？".into(),
+        },
+    }
+}
+
+fn status_label(status: ReloadStatus) -> &'static str {
+    match status {
+        ReloadStatus::Running => "运行中",
+        ReloadStatus::Waiting => "已启动、在等依赖",
+        ReloadStatus::Failed => "失败",
+    }
+}
+
+fn scope_label(scope: PersistScope) -> &'static str {
+    match scope {
+        PersistScope::Project => "项目",
+        PersistScope::User => "用户",
+    }
+}
+
+pub(crate) fn surface_line(s: &Surface) -> String {
+    if s.is_empty() {
+        return "（没有）".into();
+    }
+    let mut parts = Vec::new();
+    let mut push = |label: &str, items: &[String], prefix: &str| {
+        if !items.is_empty() {
+            let items: Vec<String> = items.iter().map(|i| format!("{prefix}{i}")).collect();
+            parts.push(format!("{label} {}", items.join("、")));
+        }
+    };
+    push("工具", &s.tools, "");
+    push("斜杠", &s.slash, "/");
+    push("面板", &s.slots, "");
+    push("钩子", &s.hooks, "");
+    push("服务", &s.provides, "");
+    if s.settings {
+        parts.push("设置卡".into());
+    }
+    parts.join("；")
+}
+
+/// `cordis_plugin` 的权限请求：按插件记「始终允许」（键 `cordis_plugin <id>`），
+/// 迭代同一个插件不用每改一次点一次，换一个插件还会再问。摘要把这个插件挂的钩子
+/// 和声明的 HTTP host 列出来——批准加载，批的就是这些。
+pub(crate) fn permission_request(exec: &Context, arguments: &str) -> (String, String) {
+    let v: Value = serde_json::from_str(arguments).unwrap_or(Value::Null);
+    let id = text_arg(&v, "id")
+        .or_else(|| text_arg(&v, "pluginId"))
+        .unwrap_or_default();
+    let key = format!("{PLUGIN} {id}");
+    let action = parse_action(&text_arg(&v, "action").unwrap_or_default()).ok();
+    let scope = parse_scope(&v).ok().flatten();
+    let found = crate::tools::dynamic_runner::find_disk(&id, scope, &roots_for(exec)).ok();
+    let mut summary = match (action, found.as_ref()) {
+        (Some(Action::Disable), Some((spec, _))) => {
+            format!("停用插件 {id}（{}）", spec.path.display())
+        }
+        (Some(Action::Disable), None) => format!("停用插件 {id}"),
+        (_, Some((spec, _))) => format!(
+            "加载插件 {id}（{}级 {}）：以宿主权限运行它的代码，对所有会话生效",
+            scope_label(spec.scope),
+            spec.path.display()
+        ),
+        (_, None) => format!("加载插件 {id}（目录还不存在）"),
+    };
+    if let (Some(Action::Reload), Some((spec, _))) = (action, found.as_ref()) {
+        let hooks = spec
+            .source_path
+            .as_ref()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .map(|src| declared_hooks(&src))
+            .unwrap_or_default();
+        if !hooks.is_empty() {
+            summary.push_str(&format!("\n钩子：{}", hooks.join("、")));
+        }
+        if !spec.http_allow.is_empty() {
+            summary.push_str(&format!(
+                "\nHTTP 免逐次确认：{}",
+                spec.http_allow.join("、")
+            ));
+        }
+    }
+    (key, summary)
 }
 
 fn json(call: &ToolCall) -> Value {
     serde_json::from_str(&call.arguments).unwrap_or(Value::Null)
 }
 
-fn session_id(ctx: &Context) -> String {
-    ctx.get::<Sessions>(SESSIONS)
-        .map(|s| s.identity().to_string())
-        .unwrap_or_else(|| "main".into())
+fn text_arg(v: &Value, key: &str) -> Option<String> {
+    v.get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
-fn inject_plugin_mentions(ctx: &Context, user: &str) {
+fn error_result(call: ToolCall, message: impl Into<String>) -> ToolResult {
+    ToolResult {
+        is_error: true,
+        ..tool_result(call, format!("错误：{}", message.into()))
+    }
+}
+
+fn inject_plugin_mentions(ctx: &Context, page: &Context, user: &str) {
     let Some(runner) = ctx.get::<DynamicRunner>(DYNAMIC_CORDIS_RUNNER) else {
         return;
     };
-    let Some(sessions) = ctx.get::<Sessions>(SESSIONS) else {
+    let Some(sessions) = page.get::<Sessions>(SESSIONS) else {
         return;
     };
-    let sid = sessions.identity().to_string();
+    let roots = roots_for(page);
     for id in mentioned_plugin_ids(user) {
-        let text = match runner.reference(&sid, &id) {
-            Ok(r) => format!(
-                "# @{} context\npluginId: {}\npackageId: {} (baseline)\nname: {}\npurpose: {}\nrunning: {}\nCall cordis_inspect with these ids, then cordis_define kind existing. Do not create a replacement Plugin. Source is not included here.",
-                r.plugin_id, r.plugin_id, r.package_id, r.name, r.purpose, r.running
-            ),
-            Err(_) if looks_like_minted_id(&id) => format!(
-                "@{id} is not a dynamic Plugin in this session — it may have been removed or lost on restart."
-            ),
-            Err(_) => continue,
+        let Ok((spec, _)) = crate::tools::dynamic_runner::find_disk(&id, None, &roots) else {
+            continue;
         };
+        let running = runner
+            .disk_plugins_in(&roots)
+            .into_iter()
+            .any(|v| v.id == spec.id && v.running && v.path == spec.path);
+        let text = format!(
+            "# @{id}\n插件目录：{}（{}级）\n名称：{}\n用途：{}\n状态：{}\n改它就改这个目录里的文件，然后 cordis_plugin reload {id}；cordis_inspect plugin \"{id}\" 看它登记了什么、最近的错误。不要另起一个插件目录。",
+            spec.path.display(),
+            scope_label(spec.scope),
+            spec.name,
+            if spec.purpose.is_empty() { "（未写）" } else { spec.purpose.as_str() },
+            if running { "运行中" } else if spec.enabled { "未在运行" } else { "已停用" },
+        );
         sessions.append(LogEvent::SystemReminder(text));
     }
 }
@@ -552,87 +493,44 @@ fn mentioned_plugin_ids(user: &str) -> Vec<String> {
     ids
 }
 
-fn looks_like_minted_id(id: &str) -> bool {
-    let bytes = id.as_bytes();
-    let Some(dash) = bytes.iter().position(|b| *b == b'-') else {
-        return false;
-    };
-    let prefix = &bytes[..dash];
-    let digits = &bytes[dash + 1..];
-    (3..=6).contains(&prefix.len())
-        && prefix.iter().all(|b| b.is_ascii_lowercase())
-        && !digits.is_empty()
-        && digits.iter().all(|b| b.is_ascii_digit())
-}
-
-fn parse_plugin_sel(v: &Value) -> Result<PluginSel, String> {
-    let plugin = v.get("plugin").ok_or("plugin is required")?;
-    let kind = plugin
-        .get("kind")
-        .and_then(Value::as_str)
-        .ok_or("plugin.kind is required")?;
-    match kind {
-        "new" => {
-            let id_prefix = plugin
-                .get("idPrefix")
-                .and_then(Value::as_str)
-                .ok_or("plugin.idPrefix is required")?
-                .to_string();
-            Ok(PluginSel::New { id_prefix })
-        }
-        "existing" => {
-            let plugin_id = plugin
-                .get("pluginId")
-                .and_then(Value::as_str)
-                .ok_or("plugin.pluginId is required")?
-                .to_string();
-            Ok(PluginSel::Existing { plugin_id })
-        }
-        other => Err(format!(
-            "plugin.kind must be \"new\" or \"existing\", got {other:?}"
-        )),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Model-facing text may only name tools that exist. Descriptions, schemas,
-    /// the repair loop and the promote receipt all outlive the tool table they
-    /// were written against: `cordis_undefine` survived in four of them after
-    /// the tool itself was folded into `cordis_stop drop:true`, so the model was
-    /// being told to call something that answers "is not registered".
+    /// Model-facing text may only name tools that exist. Descriptions, receipts
+    /// and the bundled skill all outlive the tool table they were written
+    /// against: `cordis_undefine` survived in four places after it was folded
+    /// away, and the model was told to call something that answered "is not
+    /// registered".
     #[test]
     fn every_cordis_name_in_model_text_is_a_live_tool() {
-        const MODEL_TEXT: &[(&str, &str)] = &[
+        let model_text: &[(&str, &str)] = &[
             ("INSPECT_DESC", INSPECT_DESC),
             ("INSPECT_PARAMS", INSPECT_PARAMS),
-            ("DEFINE_DESC", DEFINE_DESC),
-            ("DEFINE_PARAMS", DEFINE_PARAMS),
-            ("RUN_DESC", RUN_DESC),
-            ("RUN_PARAMS", RUN_PARAMS),
-            ("RUN_REPAIR_HINT", RUN_REPAIR_HINT),
-            ("CALL_DESC", CALL_DESC),
-            ("CALL_PARAMS", CALL_PARAMS),
-            ("STOP_DESC", STOP_DESC),
-            ("STOP_PARAMS", STOP_PARAMS),
-            ("PROMOTE_DESC", PROMOTE_DESC),
-            ("PROMOTE_PARAMS", PROMOTE_PARAMS),
-            ("PROMOTE_STOP_NOTE", PROMOTE_STOP_NOTE),
+            ("PLUGIN_DESC", PLUGIN_DESC),
+            ("PLUGIN_PARAMS", PLUGIN_PARAMS),
             (
-                "PROMOTE_SESSION_COLLISION_HINT",
-                crate::tools::dynamic_runner::PROMOTE_SESSION_COLLISION_HINT,
+                "INLINE_TOO_LARGE",
+                crate::tools::dynamic_runner::rhai_host_inline_too_large(),
             ),
         ];
-        // Folded-away verbs, bare. The receipt that started this said "undefine
-        // it", never "cordis_undefine", so prefixed-name matching alone would
-        // have waved it through — it did, when this test was first written.
+        // Retired verbs. Prefixed-name matching alone would wave through a bare
+        // "promote it" or "define it", so the bare forms are checked too.
         const RETIRED: &[(&str, &str)] = &[
-            ("undefine", "cordis_stop with drop:true"),
-            ("inspect_self", "cordis_inspect with pluginId"),
+            ("cordis_define", "write files + cordis_plugin reload"),
+            ("cordis_run", "cordis_plugin reload"),
+            ("cordis_call", "use_tool"),
+            ("cordis_stop", "cordis_plugin disable"),
+            (
+                "cordis_promote",
+                "files under .dock/plugins are already permanent",
+            ),
+            ("undefine", "cordis_plugin disable"),
+            ("inspect_self", "cordis_inspect with plugin"),
+            ("source_path", "the plugin directory"),
+            ("idPrefix", "the directory name"),
         ];
-        for (label, text) in MODEL_TEXT {
+        let check = |label: &str, text: &str| {
             for name in cordis_names(text) {
                 assert!(
                     TOOL_NAMES.contains(&name.as_str()),
@@ -642,9 +540,12 @@ mod tests {
             for (gone, now) in RETIRED {
                 assert!(
                     !text.contains(gone),
-                    "{label} still says {gone:?}; that surface is now {now}"
+                    "{label} still says {gone:?}; that is now {now}"
                 );
             }
+        };
+        for (label, text) in model_text {
+            check(label, text);
         }
         // The bundled skill is the authoring contract (tool descriptions point
         // at it). References and examples get the same two checks.
@@ -659,18 +560,7 @@ mod tests {
             "cordis-plugin-development is not a bundled skill"
         );
         for (rel, text) in skill_files {
-            for name in cordis_names(text) {
-                assert!(
-                    TOOL_NAMES.contains(&name.as_str()),
-                    "{rel} names {name:?}, which is not a registered tool: {TOOL_NAMES:?}"
-                );
-            }
-            for (gone, now) in RETIRED {
-                assert!(
-                    !text.contains(gone),
-                    "{rel} still says {gone:?}; that surface is now {now}"
-                );
-            }
+            check(rel, text);
         }
     }
 
@@ -687,5 +577,30 @@ mod tests {
             rest = &tail[end..];
         }
         out
+    }
+
+    #[test]
+    fn action_names_are_forgiving_but_not_anything_goes() {
+        assert_eq!(parse_action("reload").unwrap(), Action::Reload);
+        assert_eq!(parse_action(" Enable ").unwrap(), Action::Reload);
+        assert_eq!(parse_action("stop").unwrap(), Action::Disable);
+        assert!(parse_action("delete").is_err());
+        assert!(parse_action("").is_err());
+    }
+
+    #[test]
+    fn surface_line_names_each_kind() {
+        let s = Surface {
+            tools: vec!["fofa_info".into()],
+            slash: vec!["cyber".into()],
+            hooks: vec!["tools/pre-execute".into()],
+            settings: true,
+            ..Surface::default()
+        };
+        assert_eq!(
+            surface_line(&s),
+            "工具 fofa_info；斜杠 /cyber；钩子 tools/pre-execute；设置卡"
+        );
+        assert_eq!(surface_line(&Surface::default()), "（没有）");
     }
 }

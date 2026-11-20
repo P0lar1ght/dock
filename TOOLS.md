@@ -57,8 +57,10 @@
 | `tool-lsp` | `"lsp"` + `"tools"` | `lsp`（按需） | Grok `LspManager`/`dispatch`，没服务器时 fail-open | [lsp](docs/tools/lsp.md) |
 | `tool-workflow` | `"workflows"` + `"tools"` | `workflow`（按需） | Grok Rhai 引擎 + 目录 reminder | [workflow](docs/tools/workflow.md) |
 | `mcp-client` | `"mcp"` + `"tools"` | `search_tool` `use_tool` | stdio + Streamable HTTP；BM25 检索、schema 去重、15KB 预算；MCP Apps 界面 | [mcp](docs/tools/mcp.md) |
-| `dynamic-runner` | `"dynamicCordisRunner"` | — | 会话注册表 + 磁盘永久插件 | [cordis](docs/tools/cordis.md) |
-| `tool-cordis` | → `"tools"` | `cordis_*`（按需） | 预置工厂 + Rhai；热挂插件 | [cordis](docs/tools/cordis.md) |
+| `dynamic-runner` | `"dynamicCordisRunner"` | — | 插件目录 `.dock/plugins/<id>/` 的装载、快照、热换与失败回滚 | [cordis](docs/tools/cordis.md) |
+| `tool-cordis` | → `"tools"` | `cordis_inspect` `cordis_plugin`（创造预设常驻） | 只读查看 + reload / disable 插件目录（对齐 DSH Plugin Manager） | [cordis](docs/tools/cordis.md) |
+| `turn-cards` | `"turnCards"` | — | 插件挂在一轮回答下面的卡片（Rhai `host.card`，GUI `turn/cards/*`） | [PLUGIN-VIEWS](docs/PLUGIN-VIEWS.md#回答下面的卡片) |
+| `hooks-bridge` | 挂流程钩子 | — | 跑 Dock / Claude Code / Codex 格式的 command hook（`/hooks` 看生效了哪些） | [HOOKS](docs/HOOKS.md) |
 | `compact` | `"compact"` | — | Grok 会话压缩，85% 自动 | [compact](docs/tools/compact.md) |
 
 浏览器工具：内置 MCP `browser`（`dock mcp browser`，crate `cordis-browser`）。
@@ -69,7 +71,7 @@
 
 另见 [工具结果图](docs/tools/images.md)（多模态，`ToolResult.images`）。
 
-**权限门**（询问 overlay）：`bash` `search_replace` `write_file` `scheduler_create` `kill_task` `monitor` `cordis_run` `cordis_promote` `mcp_browser__browser_evaluate` `mcp_browser__browser_js` `mcp_browser__browser_file_upload`，以及全部 `mcp_cua-driver__*`。
+**权限门**（询问 overlay）：`bash` `search_replace` `write_file` `scheduler_create` `kill_task` `monitor` `cordis_plugin`（按插件记「始终允许」） `mcp_browser__browser_evaluate` `mcp_browser__browser_js` `mcp_browser__browser_file_upload`，以及全部 `mcp_cua-driver__*`。
 
 **计划门**：同上（`enter_plan_mode` 之后返回 blocked，直到 `exit_plan_mode`）。例外：对**本页**计划文件的 `search_replace` / `write_file` 自动放行（对齐 grok）。
 

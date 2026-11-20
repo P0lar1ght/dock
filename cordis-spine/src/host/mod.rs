@@ -11,6 +11,7 @@
 //! `dock serve` 不链接终端 UI。
 
 pub mod gateway_port;
+pub mod hooks_bridge;
 pub mod mcp_app_context;
 pub mod mcp_app_views;
 pub mod permissions;
@@ -24,5 +25,6 @@ pub mod status_items;
 pub mod tabs;
 pub mod tool_views;
 pub mod tui_slots;
+pub mod turn_cards;
 pub mod turn_changes;
 pub mod user_edits;

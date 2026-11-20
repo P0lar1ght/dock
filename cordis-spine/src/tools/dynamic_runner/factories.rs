@@ -168,7 +168,7 @@ fn build_slash(fiber_name: &str, contrib: Option<&SlashEntry>) -> Plugin {
     plugin(fiber_name, Inject::from([SLASH]), move |ctx, _: &()| {
         let Some(entry) = contrib.clone() else {
             return Err(cordis::Error::plugin(
-                "slash factory needs command, kind, and text from cordis_define",
+                "slash factory needs command, kind, and text in plugin.toml",
             ));
         };
         let slash = ctx.require::<Slash>(SLASH)?;

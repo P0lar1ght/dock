@@ -1,67 +1,73 @@
 //! Disk-backed Cordis plugins. Directory name is the stable pluginId.
 //!
-//! `{project}/.dock/plugins/<id>/` overlays `~/.dock/plugins/<id>/`. DSH does
-//! not persist dynamic packages; this is Dock's Host-only stand-in for "write
-//! a real plugin" when the user cannot ship a cordis-rust crate.
+//! `{project}/.dock/plugins/<id>/` overlays `~/.dock/plugins/<id>/`. 这是模型侧
+//! **唯一**的插件生命周期（对齐 DSH 的 Plugin Manager）：写文件 →
+//! `cordis_plugin reload` → 用新能力验证。每次 reload 把 `source.rhai` 读成一个
+//! 不可变的新 Package；跑不起来就回到上一版继续跑，原因留给 `cordis_inspect`。
 
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use indexmap::IndexMap;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::json;
 
-use super::registry::{Package, PersistScope, PluginOrigin};
-use super::{DefineReceipt, DefineTarget, DynamicRunner, RunMode, SourceInput};
+use super::registry::{PersistScope, PluginOrigin, Surface};
+use super::{AttemptStatus, DefineReceipt, DefineTarget, DynamicRunner, RunMode, SourceInput};
 use crate::host::slash::{slash_entry_from_define, SlashEntry};
 use crate::tools::dynamic_runner::factories::RHAI_FACTORY;
-use crate::tools::dynamic_runner::rhai_host::{
-    FILE_TOO_LARGE, INLINE_TOO_LARGE, MAX_FILE_SOURCE, MAX_INLINE_SOURCE,
-};
+use crate::tools::dynamic_runner::rhai_host::{FILE_TOO_LARGE, MAX_FILE_SOURCE};
 use cordis_base::config::dock_home;
 
 /// Session id of autoloaded disk plugins. Visible to every chat session.
 pub const PERSIST_SESSION: &str = "*";
 
-/// Tail of the promote-vs-session-Plugin collision error. A const so
-/// `every_cordis_name_in_model_text_is_a_live_tool` covers it: the first
-/// version said "undefine it".
-pub const PROMOTE_SESSION_COLLISION_HINT: &str =
-    "cordis_stop it with drop:true, or pass a different `id`";
+/// `plugin.toml` 里认得的键。认不得的不报错（老插件可能写了别的），但 reload
+/// 回执里会提一句——`[permission]` 少个 s 这种错不该静默吞掉。
+const MANIFEST_KEYS: &[&str] = &[
+    "name",
+    "purpose",
+    "factory",
+    "enabled",
+    "command",
+    "kind",
+    "text",
+    "title",
+    "send",
+    "description",
+    "permissions",
+];
 
-#[derive(Clone, Debug)]
-pub struct PromoteReceipt {
-    pub plugin_id: String,
-    pub package_id: String,
-    pub path: PathBuf,
-    pub scope: PersistScope,
-    pub running: bool,
-    pub source_plugin_id: String,
-    pub stopped_source: bool,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize)]
 struct PluginManifest {
-    name: String,
-    purpose: String,
-    factory: String,
-    #[serde(default = "enabled_true")]
-    enabled: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    purpose: Option<String>,
+    #[serde(default)]
+    factory: Option<String>,
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
     command: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     kind: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     text: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     title: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     send: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     description: Option<String>,
+    #[serde(default)]
+    permissions: ManifestPermissions,
 }
 
-fn enabled_true() -> bool {
-    true
+#[derive(Clone, Debug, Default, Deserialize)]
+struct ManifestPermissions {
+    /// 免逐次确认的 HTTP host：`api.example.com` 或 `*.example.com`。
+    #[serde(default)]
+    http: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -75,6 +81,10 @@ pub struct DiskSpec {
     pub enabled: bool,
     pub source_path: Option<PathBuf>,
     pub contrib: Option<SlashEntry>,
+    /// `[permissions] http`，已规范成小写。
+    pub http_allow: Vec<String>,
+    /// 读 `plugin.toml` 时发现的小问题（认不得的键）。不挡加载。
+    pub warnings: Vec<String>,
 }
 
 /// 项目级 = **正在跑的那个会话**的工作目录（桌面 GUI 每个会话一个项目）；不在任何
@@ -91,6 +101,7 @@ pub fn project_root(project: &Path) -> PathBuf {
     project.join(".dock").join("plugins")
 }
 
+/// 用户级在前、项目级在后：扫描时后面的覆盖前面的（同 id 项目级胜出）。
 pub fn plugin_roots() -> Vec<(PersistScope, PathBuf)> {
     vec![
         (PersistScope::User, persist_root(PersistScope::User)),
@@ -107,190 +118,91 @@ pub fn valid_disk_id(id: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
 }
 
-/// Resolve `cordis_define` `source_path` under project or user plugin roots.
-/// Rejects `..`, paths outside the roots, and non-files.
-pub fn resolve_source_path(raw: &str) -> Result<PathBuf, String> {
-    resolve_source_path_in(raw, &plugin_roots())
+/// `host` 在不在声明单里。`*.example.com` 只配子域（`a.example.com`），不配
+/// `example.com` 本身——要两个都放就两行都写。
+pub fn http_host_allowed(allow: &[String], host: &str) -> bool {
+    let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    if host.is_empty() {
+        return false;
+    }
+    allow.iter().any(|entry| match entry.strip_prefix("*.") {
+        Some(suffix) => host.len() > suffix.len() + 1 && host.ends_with(&format!(".{suffix}")),
+        None => *entry == host,
+    })
 }
 
-pub fn resolve_source_path_in(
-    raw: &str,
-    roots: &[(PersistScope, PathBuf)],
-) -> Result<PathBuf, String> {
-    let raw = raw.trim();
-    if raw.is_empty() {
-        return Err("source_path must be non-empty".into());
-    }
-    let path = PathBuf::from(raw);
-    if path.components().any(|c| matches!(c, Component::ParentDir)) {
-        return Err("source_path must not contain '..'".into());
-    }
-    let abs = if path.is_absolute() {
-        path
+/// 一行声明合不合法：只能是主机名（可带一个 `*.` 前缀），不许 scheme、端口、路径，
+/// 也不许光一个 `*`——那等于放开全网，批准框上也看不出来。
+fn normalize_http_entry(raw: &str) -> Result<String, String> {
+    let entry = raw.trim().trim_end_matches('.').to_ascii_lowercase();
+    let bare = entry.strip_prefix("*.").unwrap_or(&entry);
+    let ok = !bare.is_empty()
+        && bare.contains('.')
+        && bare
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+        && !bare.starts_with('.')
+        && !bare.contains("..");
+    if ok || entry == "localhost" {
+        Ok(entry)
     } else {
-        std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join(path)
-    };
-    assert_under_plugin_root_in(&abs, roots)
+        Err(format!(
+            "plugin.toml [permissions] http 只能写主机名（如 api.example.com 或 *.example.com），不能写 {raw:?}"
+        ))
+    }
 }
 
-/// Re-canonicalize `path` and verify it still resolves under a plugin root.
-/// Call before every re-read of a stored `source_path` (run/update/promote).
-pub fn assert_under_plugin_root(path: &Path) -> Result<PathBuf, String> {
-    assert_under_plugin_root_in(path, &plugin_roots())
+/// 源码里 `host.on("…")` 挂的钩子名（只认字面量）。给批准框和回执看的说明，不是
+/// 安全边界——真正的门是「加载这个插件」本身要用户点头。
+pub fn declared_hooks(source: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut rest = source;
+    while let Some(at) = rest.find("host.on(") {
+        rest = &rest[at + "host.on(".len()..];
+        let trimmed = rest.trim_start();
+        let Some(body) = trimmed.strip_prefix('"') else {
+            continue;
+        };
+        let Some(end) = body.find('"') else {
+            break;
+        };
+        let name = &body[..end];
+        if !name.is_empty() && !out.iter().any(|n| n == name) {
+            out.push(name.to_string());
+        }
+    }
+    out
 }
 
-pub fn assert_under_plugin_root_in(
-    path: &Path,
-    roots: &[(PersistScope, PathBuf)],
-) -> Result<PathBuf, String> {
+/// 读插件目录里的源文件：规范化后必须还在这个插件目录里（不许经软链读到别处），
+/// 不超过 1MiB。
+pub fn read_source_file(path: &Path, max_bytes: usize, dir: &Path) -> Result<String, String> {
     let canon = path
         .canonicalize()
-        .map_err(|e| format!("source_path {}: {e}", path.display()))?;
+        .map_err(|e| format!("{}: {e}", path.display()))?;
     if !canon.is_file() {
-        return Err(format!("source_path is not a file: {}", canon.display()));
+        return Err(format!("{} 不是文件", canon.display()));
     }
-    let under = roots.iter().any(|(_, root)| match root_canonicalize(root) {
-        Some(root_canon) => path_under_plugin_root(&canon, &root_canon),
-        None => false,
-    });
-    if !under {
+    let dir_canon = dir
+        .canonicalize()
+        .map_err(|e| format!("{}: {e}", dir.display()))?;
+    if !canon.starts_with(&dir_canon) {
         return Err(format!(
-            "source_path must resolve under .dock/plugins/<id>/ or ~/.dock/plugins/<id>/; got {}",
+            "源文件要在插件目录 {} 里，实际指向 {}",
+            dir_canon.display(),
             canon.display()
         ));
     }
-    Ok(canon)
-}
-
-fn root_canonicalize(root: &Path) -> Option<PathBuf> {
-    if !root.exists() {
-        return None;
-    }
-    root.canonicalize().ok()
-}
-
-fn path_under_plugin_root(canon: &Path, root_canon: &Path) -> bool {
-    let Ok(rel) = canon.strip_prefix(root_canon) else {
-        return false;
-    };
-    let mut comps = rel.components();
-    let Some(Component::Normal(id)) = comps.next() else {
-        return false;
-    };
-    let Some(id) = id.to_str() else {
-        return false;
-    };
-    valid_disk_id(id) && comps.next().is_some()
-}
-
-fn source_too_large_msg(max_bytes: usize) -> String {
-    match max_bytes {
-        MAX_INLINE_SOURCE => INLINE_TOO_LARGE.into(),
-        MAX_FILE_SOURCE => FILE_TOO_LARGE.into(),
-        n => format!("rhai source exceeds {n} bytes"),
-    }
-}
-
-/// 重读前再确认一次路径**仍然**落在授权范围内，防的是 define 之后把文件换成
-/// 软链的那一手。
-///
-/// `allowed_dir` 是这次授权的边界：
-/// - `None` —— 走全局 [`plugin_roots`]，`cordis_define` 传进来的 `source_path` 用这条。
-/// - `Some(dir)` —— 只认这个插件自己的目录。磁盘插件走这条，因为扫描用的 root
-///   可以是调用方传进来的（[`DynamicRunner::boot_disk_from`]），写死全局 root 会
-///   让它**静默**加载不上。
-fn assert_still_authorized(path: &Path, allowed_dir: Option<&Path>) -> Result<PathBuf, String> {
-    match allowed_dir {
-        None => assert_under_plugin_root(path),
-        Some(dir) => {
-            let canon = path
-                .canonicalize()
-                .map_err(|e| format!("source_path {}: {e}", path.display()))?;
-            if !canon.is_file() {
-                return Err(format!("source_path is not a file: {}", canon.display()));
-            }
-            let dir_canon = dir
-                .canonicalize()
-                .map_err(|e| format!("source_path {}: {e}", dir.display()))?;
-            if !canon.starts_with(&dir_canon) {
-                return Err(format!(
-                    "source_path must resolve under {}; got {}",
-                    dir_canon.display(),
-                    canon.display()
-                ));
-            }
-            Ok(canon)
-        }
-    }
-}
-
-/// Read a path-backed Rhai source after re-validating it. See
-/// [`assert_still_authorized`] for what `allowed_dir` means.
-pub fn read_source_file(
-    path: &Path,
-    max_bytes: usize,
-    allowed_dir: Option<&Path>,
-) -> Result<String, String> {
-    let path = assert_still_authorized(path, allowed_dir)?;
-    let meta = std::fs::metadata(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let meta = std::fs::metadata(&canon).map_err(|e| format!("read {}: {e}", canon.display()))?;
     if meta.len() as usize > max_bytes {
-        return Err(source_too_large_msg(max_bytes));
+        return Err(FILE_TOO_LARGE.into());
     }
     let text =
-        std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        std::fs::read_to_string(&canon).map_err(|e| format!("read {}: {e}", canon.display()))?;
     if text.len() > max_bytes {
-        return Err(source_too_large_msg(max_bytes));
+        return Err(FILE_TOO_LARGE.into());
     }
     Ok(text)
-}
-
-pub fn package_source_text(
-    pkg: &Package,
-    allowed_dir: Option<&Path>,
-) -> Result<(String, usize), String> {
-    match (&pkg.source, &pkg.source_path) {
-        (Some(s), None) => Ok((s.clone(), MAX_INLINE_SOURCE)),
-        (None, Some(p)) => Ok((
-            read_source_file(p, MAX_FILE_SOURCE, allowed_dir)?,
-            MAX_FILE_SOURCE,
-        )),
-        (Some(_), Some(_)) => Err("rhai package has both source and source_path".into()),
-        (None, None) => Err("rhai package has no source to read".into()),
-    }
-}
-
-fn source_input_for_package(
-    pkg: &Package,
-    allowed_dir: Option<&Path>,
-) -> Result<Option<SourceInput>, String> {
-    match (&pkg.source, &pkg.source_path) {
-        (Some(s), None) => Ok(Some(SourceInput::Inline(s.clone()))),
-        (None, Some(p)) => Ok(Some(SourceInput::ResolvedPath {
-            path: p.clone(),
-            dir: allowed_dir.map(|d| d.to_path_buf()),
-        })),
-        (Some(_), Some(_)) => Err("rhai package has both source and source_path".into()),
-        (None, None) => Ok(None),
-    }
-}
-
-/// 磁盘插件的授权边界就是它自己那个目录。
-pub(super) fn origin_source_dir(origin: &PluginOrigin) -> Option<&Path> {
-    match origin {
-        PluginOrigin::Disk { path, .. } => Some(path.as_path()),
-        _ => None,
-    }
-}
-
-pub fn default_disk_id(plugin_id: &str) -> String {
-    if let Some((head, tail)) = plugin_id.rsplit_once('-') {
-        if !tail.is_empty() && tail.bytes().all(|b| b.is_ascii_digit()) && valid_disk_id(head) {
-            return head.to_string();
-        }
-    }
-    plugin_id.to_string()
 }
 
 pub fn scan(roots: &[(PersistScope, PathBuf)]) -> Vec<DiskSpec> {
@@ -330,6 +242,10 @@ pub fn scan_report(roots: &[(PersistScope, PathBuf)]) -> (Vec<DiskSpec>, Vec<Bro
             if !valid_disk_id(id) {
                 continue;
             }
+            // 既没有 plugin.toml 也没有 source.rhai 的目录不是插件（可能是别的东西）。
+            if !path.join("plugin.toml").is_file() && !path.join("source.rhai").is_file() {
+                continue;
+            }
             match load_dir(&path, id, *scope) {
                 Ok(spec) => {
                     by_id.insert(id.to_string(), spec);
@@ -346,10 +262,59 @@ pub fn scan_report(roots: &[(PersistScope, PathBuf)]) -> (Vec<DiskSpec>, Vec<Bro
     (by_id.into_values().collect(), broken)
 }
 
-/// 改磁盘插件 `plugin.toml` 的 `enabled`（就地改，其余键不动）。
+/// 按 id 找插件目录：给了 `scope` 只看那一层，否则项目级优先（和扫描时的覆盖顺序
+/// 一致）。返回找到的那份，以及被它盖住的另一份（如果有）。
+pub fn find_disk(
+    id: &str,
+    scope: Option<PersistScope>,
+    roots: &[(PersistScope, PathBuf)],
+) -> Result<(DiskSpec, Option<PathBuf>), String> {
+    let id = id.trim();
+    if !valid_disk_id(id) {
+        return Err(format!(
+            "插件 id {id:?} 不合法：2–32 位，小写字母开头，只含小写字母、数字和 -（它就是 .dock/plugins/ 下的目录名）"
+        ));
+    }
+    let mut ordered: Vec<&(PersistScope, PathBuf)> = roots
+        .iter()
+        .filter(|(s, _)| scope.is_none_or(|want| want == *s))
+        .collect();
+    // 项目级优先。
+    ordered.sort_by_key(|(s, _)| match s {
+        PersistScope::Project => 0,
+        PersistScope::User => 1,
+    });
+    let mut found: Vec<(PersistScope, PathBuf)> = Vec::new();
+    for (s, root) in ordered {
+        let dir = root.join(id);
+        if dir.is_dir() && !found.iter().any(|(_, d)| same_dir(d, &dir)) {
+            found.push((*s, dir));
+        }
+    }
+    let Some((s, dir)) = found.first().cloned() else {
+        let places: Vec<String> = roots
+            .iter()
+            .filter(|(s, _)| scope.is_none_or(|want| want == *s))
+            .map(|(s, root)| format!("{} {}", s.as_str(), root.join(id).display()))
+            .collect();
+        return Err(format!(
+            "没找到插件目录 {id}。先把 source.rhai（和可选的 plugin.toml）写进其中一处：{}",
+            places.join("；")
+        ));
+    };
+    let spec = load_dir(&dir, id, s).map_err(|e| format!("{}: {e}", dir.display()))?;
+    Ok((spec, found.get(1).map(|(_, d)| d.clone())))
+}
+
+/// 改磁盘插件 `plugin.toml` 的 `enabled`（就地改，其余键不动）。没有 `plugin.toml`
+/// 的插件（只有 `source.rhai`）就建一个只写这一行的。
 pub fn write_disk_enabled(dir: &Path, enabled: bool) -> Result<(), String> {
     let path = dir.join("plugin.toml");
-    let raw = std::fs::read_to_string(&path).map_err(|e| format!("read plugin.toml: {e}"))?;
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(format!("read plugin.toml: {e}")),
+    };
     let mut doc = raw
         .parse::<toml_edit::DocumentMut>()
         .map_err(|e| format!("plugin.toml: {e}"))?;
@@ -357,23 +322,57 @@ pub fn write_disk_enabled(dir: &Path, enabled: bool) -> Result<(), String> {
     std::fs::write(&path, doc.to_string()).map_err(|e| format!("write plugin.toml: {e}"))
 }
 
+/// 读一个插件目录。`plugin.toml` 可以没有（只有 `source.rhai` 就是一个 Rhai 插件，
+/// 名字取目录名）；有的话每个键都可选。
 fn load_dir(dir: &Path, id: &str, scope: PersistScope) -> Result<DiskSpec, String> {
-    let raw = std::fs::read_to_string(dir.join("plugin.toml"))
-        .map_err(|e| format!("read plugin.toml: {e}"))?;
-    let man: PluginManifest = toml::from_str(&raw).map_err(|e| format!("plugin.toml: {e}"))?;
-    if man.name.trim().is_empty() || man.purpose.trim().is_empty() {
-        return Err("plugin.toml needs name and purpose".into());
-    }
-    let source_path = if man.factory == RHAI_FACTORY {
+    let manifest_path = dir.join("plugin.toml");
+    let mut warnings = Vec::new();
+    let man: PluginManifest = match std::fs::read_to_string(&manifest_path) {
+        Ok(raw) => {
+            let table: toml::Table =
+                toml::from_str(&raw).map_err(|e| format!("plugin.toml: {e}"))?;
+            let unknown: Vec<&str> = table
+                .keys()
+                .map(String::as_str)
+                .filter(|k| !MANIFEST_KEYS.contains(k))
+                .collect();
+            if !unknown.is_empty() {
+                warnings.push(format!(
+                    "plugin.toml 里有认不得的键：{}（认得的：{}）",
+                    unknown.join("、"),
+                    MANIFEST_KEYS.join("、")
+                ));
+            }
+            toml::from_str(&raw).map_err(|e| format!("plugin.toml: {e}"))?
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => PluginManifest::default(),
+        Err(e) => return Err(format!("read plugin.toml: {e}")),
+    };
+    let factory = man
+        .factory
+        .as_deref()
+        .map(str::trim)
+        .filter(|f| !f.is_empty())
+        .unwrap_or(RHAI_FACTORY)
+        .to_string();
+    let source_path = if factory == RHAI_FACTORY {
         let p = dir.join("source.rhai");
         if !p.is_file() {
-            return Err("rhai plugin needs source.rhai".into());
+            return Err("Rhai 插件要有 source.rhai".into());
         }
         Some(p)
     } else {
         None
     };
-    let contrib = if man.factory == "slash" {
+    let name = man
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .unwrap_or(id)
+        .to_string();
+    let purpose = man.purpose.as_deref().unwrap_or("").trim().to_string();
+    let contrib = if factory == "slash" {
         let v = json!({
             "command": man.command,
             "kind": man.kind,
@@ -382,64 +381,88 @@ fn load_dir(dir: &Path, id: &str, scope: PersistScope) -> Result<DiskSpec, Strin
             "send": man.send,
             "description": man.description,
         });
-        Some(slash_entry_from_define(&v, &man.purpose)?)
+        Some(slash_entry_from_define(&v, &purpose)?)
     } else if man.command.is_some() || man.kind.is_some() || man.text.is_some() {
         return Err("command/kind/text are only for factory \"slash\"".into());
     } else {
         None
     };
+    let http_allow = man
+        .permissions
+        .http
+        .iter()
+        .map(|raw| normalize_http_entry(raw))
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(DiskSpec {
         id: id.to_string(),
         path: dir.to_path_buf(),
         scope,
-        name: man.name,
-        purpose: man.purpose,
-        factory: man.factory,
-        enabled: man.enabled,
+        name,
+        purpose,
+        factory,
+        enabled: man.enabled.unwrap_or(true),
         source_path,
         contrib,
+        http_allow,
+        warnings,
     })
 }
 
-fn write_plugin(root: &Path, id: &str, pkg: &Package, enabled: bool) -> Result<PathBuf, String> {
-    if !valid_disk_id(id) {
-        return Err(format!(
-            "disk plugin id {id:?} must be 2–32 chars, start with a-z, then a-z0-9-"
-        ));
-    }
-    let dir = root.join(id);
-    std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
-    let mut man = PluginManifest {
-        name: pkg.name.clone(),
-        purpose: pkg.purpose.clone(),
-        factory: pkg.factory.clone(),
-        enabled,
-        command: None,
-        kind: None,
-        text: None,
-        title: None,
-        send: None,
-        description: None,
+/// 把插件目录读成一份源码快照（Rhai 插件），给 define 用。
+fn snapshot(spec: &DiskSpec) -> Result<Option<SourceInput>, String> {
+    let Some(path) = spec.source_path.as_ref() else {
+        return Ok(None);
     };
-    if let Some(c) = &pkg.contrib {
-        man.command = Some(c.command.clone());
-        man.kind = Some(c.kind.as_str().to_string());
-        man.text = Some(c.text.clone());
-        if !c.title.is_empty() {
-            man.title = Some(c.title.clone());
+    Ok(Some(SourceInput::Snapshot {
+        text: read_source_file(path, MAX_FILE_SOURCE, &spec.path)?,
+        dir: spec.path.clone(),
+        http_allow: spec.http_allow.clone(),
+    }))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReloadStatus {
+    Running,
+    /// 起来了，但 `inject` 的名字还没挂上。
+    Waiting,
+    Failed,
+}
+
+impl ReloadStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Waiting => "waiting",
+            Self::Failed => "failed",
         }
-        man.send = Some(c.send);
-        man.description = Some(c.description.clone());
     }
-    let toml = toml::to_string_pretty(&man).map_err(|e| format!("encode plugin.toml: {e}"))?;
-    std::fs::write(dir.join("plugin.toml"), toml).map_err(|e| format!("write plugin.toml: {e}"))?;
-    if pkg.factory == RHAI_FACTORY {
-        // promote 读的是会话包，它的 source_path 当初是按全局 root 授权的。
-        let (src, _) = package_source_text(pkg, None)?;
-        std::fs::write(dir.join("source.rhai"), src)
-            .map_err(|e| format!("write source.rhai: {e}"))?;
-    }
-    Ok(dir)
+}
+
+/// `cordis_plugin reload` 的结果。
+#[derive(Clone, Debug)]
+pub struct ReloadReceipt {
+    pub id: String,
+    pub dir: PathBuf,
+    pub scope: PersistScope,
+    pub status: ReloadStatus,
+    /// 跑不起来的原因（编译错带行列号）。
+    pub error: Option<String>,
+    /// 新版没起来、自动回到并仍在跑的上一版（Package id）。
+    pub kept_previous: Option<String>,
+    /// 这一版（或回滚后的那一版）实际登记的东西。
+    pub surface: Surface,
+    pub waiting_for: Vec<String>,
+    pub warnings: Vec<String>,
+    /// `plugin.toml` 原来写着 `enabled = false`，这次改成了 true。
+    pub enabled_now: bool,
+    pub http_allow: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct DisableReceipt {
+    pub id: String,
+    pub dir: PathBuf,
+    pub was_running: bool,
 }
 
 impl DynamicRunner {
@@ -503,22 +526,13 @@ impl DynamicRunner {
     }
 
     fn install_disk(&self, spec: &DiskSpec) -> Result<DefineReceipt, String> {
-        // 授权边界是这个插件自己的目录，不是全局 root——扫描用的 root 可能是
-        // `boot_disk_from` 传进来的。
-        let source = spec
-            .source_path
-            .as_ref()
-            .map(|p| SourceInput::ResolvedPath {
-                path: p.clone(),
-                dir: Some(spec.path.clone()),
-            });
         self.define_persistent(
             &spec.id,
             &spec.name,
             &spec.purpose,
             &spec.factory,
             spec.contrib.clone(),
-            source,
+            snapshot(spec)?,
             PluginOrigin::Disk {
                 path: spec.path.clone(),
                 scope: spec.scope,
@@ -526,161 +540,160 @@ impl DynamicRunner {
         )
     }
 
-    pub async fn promote(
-        &self,
-        session_id: &str,
-        plugin_id: &str,
-        disk_id: Option<&str>,
-        scope: PersistScope,
-    ) -> Result<PromoteReceipt, String> {
-        self.promote_into(session_id, plugin_id, disk_id, scope, persist_root(scope))
-            .await
-    }
-
-    pub async fn promote_into(
-        &self,
-        session_id: &str,
-        plugin_id: &str,
-        disk_id: Option<&str>,
-        scope: PersistScope,
-        root: PathBuf,
-    ) -> Result<PromoteReceipt, String> {
-        let wanted = disk_id
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| default_disk_id(plugin_id));
-        if !valid_disk_id(&wanted) {
-            return Err(format!(
-                "cordis_promote id {wanted:?} must be 2–32 chars, start with a-z, then a-z0-9-; pass `id` explicitly"
-            ));
-        }
-
-        let pkg = {
+    /// 从插件目录装上 / 热换一个插件（`cordis_plugin reload`、设置页启用）。
+    ///
+    /// - 第一次：读目录、编译、跑。
+    /// - 已经装着（同一个目录）：读成新 Package 换上去；新版跑不起来就回到上一版
+    ///   继续跑——改坏一行不该让用户的工具一起消失。
+    /// - `plugin.toml` 写着 `enabled = false` 的，顺手改成 true（reload 就是启用）。
+    ///
+    /// 只有「同名插件已经从别的目录装上了」这种没法开始的情况才回 `Err`；编译错、
+    /// apply 抛错都在回执里（`status: failed`）。
+    pub async fn reload_disk(&self, spec: &DiskSpec) -> Result<ReloadReceipt, String> {
+        let (exists, prev_running, prev_pkg) = {
             let inner = self.inner.lock().unwrap();
-            let rec = super::owned(&inner.registry, session_id, plugin_id)?;
-            rec.current_package_id
-                .as_ref()
-                .and_then(|id| rec.packages.get(id))
-                .or_else(|| rec.packages.last().map(|(_, p)| p))
-                .cloned()
-                .ok_or_else(|| format!("plugin \"{plugin_id}\" has no Package to promote"))?
-        };
-        let path = write_plugin(&root, &wanted, &pkg, true)?;
-        let origin = PluginOrigin::Disk {
-            path: path.clone(),
-            scope,
-        };
-
-        if plugin_id == wanted {
-            {
-                let mut inner = self.inner.lock().unwrap();
-                if let Some(rec) = inner.registry.get_mut(plugin_id) {
-                    rec.session_id = PERSIST_SESSION.into();
-                    rec.origin = origin;
+            match inner.registry.get(&spec.id) {
+                None => (false, false, None),
+                Some(r) if disk_path_of(r).is_some_and(|p| same_dir(p, &spec.path)) => {
+                    (true, r.run.is_some(), r.current_package_id.clone())
                 }
-            }
-            let running = self
-                .inspect_plugin(PERSIST_SESSION, plugin_id)
-                .ok()
-                .and_then(|r| r.active_run)
-                .is_some();
-            if !running {
-                if let Err(e) = self
-                    .run(PERSIST_SESSION, plugin_id, &pkg.package_id, RunMode::Run)
-                    .await
-                {
+                Some(r) => {
+                    let other = disk_path_of(r)
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "程序侧定义的同名插件".into());
                     return Err(format!(
-                        "wrote {} but autostart failed: {e}",
-                        path.display()
+                        "已经装着同名插件 {}（{other}）。先 cordis_plugin disable 它（scope 指到那一层），或者给这个目录换个名字",
+                        spec.id
                     ));
                 }
             }
-            return Ok(PromoteReceipt {
-                plugin_id: wanted,
-                package_id: pkg.package_id,
-                path,
-                scope,
-                running: true,
-                source_plugin_id: plugin_id.to_string(),
-                stopped_source: false,
-            });
-        }
-
-        let existing_session = {
-            let inner = self.inner.lock().unwrap();
-            inner.registry.get(&wanted).map(|r| r.session_id.clone())
         };
-        let stopped_source = self
-            .stop(session_id, plugin_id)
-            .await
-            .map(|r| r.was_running)
-            .unwrap_or(false);
-        let package_id = match existing_session.as_deref() {
-            None => {
-                let defined = self.define_persistent(
-                    &wanted,
-                    &pkg.name,
-                    &pkg.purpose,
-                    &pkg.factory,
-                    pkg.contrib.clone(),
-                    source_input_for_package(&pkg, None)?,
-                    origin,
-                )?;
-                self.run(
-                    PERSIST_SESSION,
-                    &defined.plugin_id,
-                    &defined.package_id,
-                    RunMode::Run,
-                )
-                .await
-                .map_err(|e| format!("wrote {} but autostart failed: {e}", path.display()))?;
-                defined.package_id
-            }
-            Some(PERSIST_SESSION) => {
-                let defined = self.define(
+        let enabled_now = !spec.enabled;
+        if enabled_now {
+            write_disk_enabled(&spec.path, true)?;
+        }
+        let mut receipt = ReloadReceipt {
+            id: spec.id.clone(),
+            dir: spec.path.clone(),
+            scope: spec.scope,
+            status: ReloadStatus::Failed,
+            error: None,
+            kept_previous: None,
+            surface: Surface::default(),
+            waiting_for: Vec::new(),
+            warnings: spec.warnings.clone(),
+            enabled_now,
+            http_allow: spec.http_allow.clone(),
+        };
+        let defined = snapshot(spec).and_then(|source| {
+            if exists {
+                self.define(
                     PERSIST_SESSION,
                     super::PluginSel::Existing {
-                        plugin_id: wanted.clone(),
+                        plugin_id: spec.id.clone(),
                     },
-                    &pkg.name,
-                    &pkg.purpose,
-                    &pkg.factory,
-                    pkg.contrib.clone(),
-                    source_input_for_package(&pkg, None)?,
-                )?;
-                let mode = {
-                    let inner = self.inner.lock().unwrap();
-                    match inner
-                        .registry
-                        .get(&wanted)
-                        .and_then(|r| r.current_package_id.as_deref())
-                    {
-                        Some(cur) if cur != defined.package_id => RunMode::Update,
-                        _ => RunMode::Run,
-                    }
-                };
-                self.run(PERSIST_SESSION, &wanted, &defined.package_id, mode)
-                    .await
-                    .map_err(|e| format!("wrote {} but reload failed: {e}", path.display()))?;
-                defined.package_id
+                    &spec.name,
+                    &spec.purpose,
+                    &spec.factory,
+                    spec.contrib.clone(),
+                    source,
+                )
+            } else {
+                self.install_disk(spec)
             }
-            Some(_) => {
-                return Err(format!(
-                    "wrote {} but \"{wanted}\" is already a session Plugin; {PROMOTE_SESSION_COLLISION_HINT}",
-                    path.display()
-                ));
+        });
+        let outcome = match defined {
+            // 编译不过：什么都没动，上一版（如果在跑）照跑。
+            Err(e) => Err(e),
+            Ok(defined) => {
+                let mode = if prev_pkg.is_some() {
+                    RunMode::Update
+                } else {
+                    RunMode::Run
+                };
+                match self
+                    .run(PERSIST_SESSION, &spec.id, &defined.package_id, mode)
+                    .await
+                {
+                    Ok(_) => Ok(()),
+                    Err(e) => {
+                        // `update` 起新版之前已经把旧版的 fiber 拆了；current 指针
+                        // 只在成功时才动，所以它还指着上一版，照原样再起一次。
+                        if prev_running {
+                            if let Some(prev) = prev_pkg.as_deref() {
+                                if self
+                                    .run(PERSIST_SESSION, &spec.id, prev, RunMode::Run)
+                                    .await
+                                    .is_ok()
+                                {
+                                    receipt.kept_previous = Some(prev.to_string());
+                                }
+                            }
+                        }
+                        Err(e)
+                    }
+                }
             }
         };
+        if outcome.is_err() && prev_running && receipt.kept_previous.is_none() {
+            // 编译期就失败的：上一版根本没被动过。
+            let still = self
+                .inspect_plugin(PERSIST_SESSION, &spec.id)
+                .ok()
+                .and_then(|r| r.active_run.map(|run| run.package_id));
+            receipt.kept_previous = still;
+        }
+        {
+            let mut inner = self.inner.lock().unwrap();
+            if let Some(rec) = inner.registry.get_mut(&spec.id) {
+                rec.reload_error = outcome.as_ref().err().cloned();
+            }
+        }
+        if let Ok(row) = self.inspect_plugin(PERSIST_SESSION, &spec.id) {
+            if let Some(run) = row.active_run {
+                receipt.surface = run.surface;
+                receipt.waiting_for = run.waiting_for;
+            }
+        }
+        receipt.status = match &outcome {
+            Err(e) => {
+                receipt.error = Some(e.clone());
+                ReloadStatus::Failed
+            }
+            Ok(()) if receipt.waiting_for.is_empty() => ReloadStatus::Running,
+            Ok(()) => ReloadStatus::Waiting,
+        };
+        Ok(receipt)
+    }
 
-        Ok(PromoteReceipt {
-            plugin_id: wanted,
-            package_id,
-            path,
-            scope,
-            running: true,
-            source_plugin_id: plugin_id.to_string(),
-            stopped_source,
+    /// 停用一个磁盘插件：`plugin.toml` 写 `enabled = false`（下次启动不装），装着
+    /// 的话立刻停掉。文件都留着。
+    pub async fn disable_disk(&self, spec: &DiskSpec) -> Result<DisableReceipt, String> {
+        write_disk_enabled(&spec.path, false)?;
+        let ours = {
+            let inner = self.inner.lock().unwrap();
+            inner
+                .registry
+                .get(&spec.id)
+                .is_some_and(|r| disk_path_of(r).is_some_and(|p| same_dir(p, &spec.path)))
+        };
+        let was_running = if ours {
+            self.stop_any(&spec.id).await?.was_running
+        } else {
+            false
+        };
+        if ours {
+            let mut inner = self.inner.lock().unwrap();
+            if let Some(rec) = inner.registry.get_mut(&spec.id) {
+                if let Some(latest) = rec.latest.as_mut() {
+                    latest.status = AttemptStatus::Stopped;
+                }
+            }
+        }
+        Ok(DisableReceipt {
+            id: spec.id.clone(),
+            dir: spec.path.clone(),
+            was_running,
         })
     }
 
@@ -690,68 +703,56 @@ impl DynamicRunner {
 
     pub fn overlay_listing_from(
         &self,
-        session_id: &str,
+        _session_id: &str,
         roots: &[(PersistScope, PathBuf)],
     ) -> String {
-        let live = self.snapshot(session_id);
-        let disk = scan(roots);
+        let views = self.disk_plugins_in(roots);
         let mut lines = vec![
-            "永久插件写在磁盘上，重启后自动加载（启动不走权限 overlay）。".into(),
-            "会话插件只在当前进程：cordis_define → cordis_run。写成永久：cordis_promote。".into(),
+            "插件就是一个目录：.dock/plugins/<id>/（项目级，覆盖同名的用户级）或 ~/.dock/plugins/<id>/。".into(),
+            "启动时自动装上；改了文件让 agent 用 cordis_plugin reload 重载，停用写 enabled = false。".into(),
             String::new(),
-            "永久（磁盘）：".into(),
         ];
-        if disk.is_empty() {
-            lines.push("  （还没有）".into());
-            lines.push("  .dock/plugins/<id>/".into());
-            lines.push("  ~/.dock/plugins/<id>/".into());
+        if views.is_empty() {
+            lines.push("（还没有插件）".into());
+            for (scope, root) in roots {
+                lines.push(format!("  {} {}", scope.as_str(), root.display()));
+            }
         } else {
-            for spec in &disk {
-                let row = live.iter().find(|r| r.plugin_id == spec.id);
-                let state = match row.and_then(|r| r.active_run.as_ref()) {
-                    Some(_) => "运行中",
-                    None if !spec.enabled => "已禁用",
-                    None => "已停止",
+            for v in &views {
+                let state = if v.running {
+                    "运行中"
+                } else if v.error.is_some() {
+                    "出错"
+                } else if !v.enabled {
+                    "已停用"
+                } else if v.shadowed_by.is_some() {
+                    "被同名插件盖住"
+                } else {
+                    "未装载"
+                };
+                let purpose = if v.purpose.is_empty() {
+                    String::new()
+                } else {
+                    format!(" — {}", v.purpose)
                 };
                 lines.push(format!(
-                    "  {} [{}] {} — {} ({state})",
-                    spec.id,
-                    spec.scope.as_str(),
-                    spec.name,
-                    spec.purpose
+                    "  {} [{}] {}{purpose} ({state})",
+                    v.id,
+                    v.scope.as_str(),
+                    v.name
                 ));
-                lines.push(format!("    {}", spec.path.display()));
+                lines.push(format!("    {}", v.path.display()));
+                if let Some(err) = &v.error {
+                    lines.push(format!("    错误：{}", first_line(err)));
+                }
             }
         }
-        lines.push(String::new());
-        lines.push("会话（仅内存）：".into());
-        let session_rows: Vec<_> = live
-            .iter()
-            .filter(|r| !matches!(r.origin, PluginOrigin::Disk { .. }))
-            .collect();
-        if session_rows.is_empty() {
-            lines.push("  （无）".into());
-        } else {
-            for row in session_rows {
-                let state = if row.active_run.is_some() {
-                    "运行中"
-                } else {
-                    "已停止"
-                };
-                let name = row
-                    .packages
-                    .last()
-                    .map(|p| p.name.as_str())
-                    .unwrap_or(row.plugin_id.as_str());
-                lines.push(format!("  {} {name} ({state})", row.plugin_id));
-            }
-        }
-        lines.push(String::new());
-        lines.push(
-            "host.on(\"session/event\", |line| { … }) 观察 user / assistant / tool 行。".into(),
-        );
         lines.join("\n")
     }
+}
+
+fn first_line(text: &str) -> &str {
+    text.lines().next().unwrap_or(text)
 }
 
 /// 设置页「永久插件」的一行：磁盘上的一个插件目录。按**目录**认，不按 id——
@@ -772,27 +773,14 @@ pub struct DiskPluginView {
     pub running: bool,
     /// 同名插件已经从别的目录装上了：这一份装不进来。
     pub shadowed_by: Option<PathBuf>,
-    /// 读不起来或启动失败的原因。
-    pub error: Option<String>,
-}
-
-/// 动态插件：agent 在会话里用 `cordis_define` 定义、只在内存里的插件。
-#[derive(Clone, Debug)]
-pub struct SessionPluginView {
-    pub plugin_id: String,
-    /// 定义它的会话（`Sessions::identity`，如 `main#3`）。
-    pub session_id: String,
-    pub name: String,
-    pub purpose: String,
-    pub factory: String,
-    pub running: bool,
+    /// 读不起来、启动失败、或最近一次 reload 失败的原因。
     pub error: Option<String>,
 }
 
 /// 两个路径是不是同一个目录：先比字面，不同再比规范化后的真实路径（符号链接、
 /// macOS 的 `/var` ↔ `/private/var`）。界面传来的是规范化后的路径，注册表里记的
 /// 是装载时的写法，只比字面会把同一个插件当成「别处的同名插件」。
-fn same_dir(a: &Path, b: &Path) -> bool {
+pub(crate) fn same_dir(a: &Path, b: &Path) -> bool {
     a == b
         || matches!(
             (a.canonicalize(), b.canonicalize()),
@@ -800,7 +788,7 @@ fn same_dir(a: &Path, b: &Path) -> bool {
         )
 }
 
-fn disk_path_of(rec: &super::registry::PluginRec) -> Option<&Path> {
+pub(crate) fn disk_path_of(rec: &super::registry::PluginRec) -> Option<&Path> {
     match &rec.origin {
         PluginOrigin::Disk { path, .. } => Some(path.as_path()),
         PluginOrigin::Session => None,
@@ -808,10 +796,12 @@ fn disk_path_of(rec: &super::registry::PluginRec) -> Option<&Path> {
 }
 
 fn failure(rec: &super::registry::PluginRec) -> Option<String> {
-    rec.latest
-        .as_ref()
-        .filter(|a| a.status == super::AttemptStatus::Failed)
-        .map(|a| a.host_error.clone().unwrap_or_else(|| "启动失败".into()))
+    rec.reload_error.clone().or_else(|| {
+        rec.latest
+            .as_ref()
+            .filter(|a| a.status == AttemptStatus::Failed)
+            .map(|a| a.host_error.clone().unwrap_or_else(|| "启动失败".into()))
+    })
 }
 
 impl DynamicRunner {
@@ -834,7 +824,7 @@ impl DynamicRunner {
                 let shadowed_by = rec.filter(|_| !here).map(|r| {
                     disk_path_of(r)
                         .map(Path::to_path_buf)
-                        .unwrap_or_else(|| PathBuf::from("（会话插件）"))
+                        .unwrap_or_else(|| PathBuf::from("（程序侧定义的插件）"))
                 });
                 out.push(DiskPluginView {
                     id: spec.id,
@@ -867,34 +857,6 @@ impl DynamicRunner {
         out
     }
 
-    /// 动态插件（会话里定义、没写成永久的）。
-    pub fn session_plugins(&self) -> Vec<SessionPluginView> {
-        let inner = self.inner.lock().unwrap();
-        inner
-            .registry
-            .all()
-            .filter(|r| matches!(r.origin, PluginOrigin::Session))
-            .map(|r| {
-                let pkg = r
-                    .current_package_id
-                    .as_ref()
-                    .and_then(|id| r.packages.get(id))
-                    .or_else(|| r.packages.values().last());
-                SessionPluginView {
-                    plugin_id: r.plugin_id.clone(),
-                    session_id: r.session_id.clone(),
-                    name: pkg
-                        .map(|p| p.name.clone())
-                        .unwrap_or_else(|| r.plugin_id.clone()),
-                    purpose: pkg.map(|p| p.purpose.clone()).unwrap_or_default(),
-                    factory: pkg.map(|p| p.factory.clone()).unwrap_or_default(),
-                    running: r.run.is_some(),
-                    error: failure(r),
-                }
-            })
-            .collect()
-    }
-
     /// 按目录找一个磁盘插件（`dir` 必须在某个插件根下）。
     fn disk_spec_at(dir: &Path) -> Result<DiskSpec, String> {
         let id = dir
@@ -910,45 +872,19 @@ impl DynamicRunner {
         load_dir(dir, id, scope)
     }
 
-    /// 启用 / 停用一个磁盘插件：写 `plugin.toml` 的 `enabled`，并立刻装上跑 / 停掉。
+    /// 设置页启用 / 停用一个磁盘插件：启用 = reload（读最新的文件跑起来），
+    /// 停用 = 写 `enabled = false` 并停掉。
     pub async fn set_disk_enabled_at(&self, dir: &Path, enabled: bool) -> Result<(), String> {
         let spec = Self::disk_spec_at(dir)?;
-        let loaded = {
-            let inner = self.inner.lock().unwrap();
-            match inner.registry.get(&spec.id) {
-                Some(r) if disk_path_of(r).is_some_and(|p| same_dir(p, dir)) => Some((
-                    r.run.is_some(),
-                    r.current_package_id
-                        .clone()
-                        .or_else(|| r.packages.keys().last().cloned()),
-                )),
-                Some(r) => {
-                    if enabled {
-                        let other = disk_path_of(r)
-                            .map(|p| p.display().to_string())
-                            .unwrap_or_else(|| "会话里定义的同名插件".into());
-                        return Err(format!("已经装着同名插件 {}（{other}），先停用它", spec.id));
-                    }
-                    None
-                }
-                None => None,
-            }
-        };
-        write_disk_enabled(&spec.path, enabled)?;
         if !enabled {
-            if loaded.is_some() {
-                self.stop_any(&spec.id).await?;
-            }
-            return Ok(());
+            return self.disable_disk(&spec).await.map(|_| ());
         }
-        let package_id = match loaded {
-            Some((true, _)) => return Ok(()),
-            Some((false, Some(pkg))) => pkg,
-            _ => self.install_disk(&spec)?.package_id,
-        };
-        self.run(PERSIST_SESSION, &spec.id, &package_id, RunMode::Run)
-            .await
-            .map(|_| ())
+        let receipt = self.reload_disk(&spec).await?;
+        match (receipt.error, receipt.kept_previous) {
+            (Some(e), Some(prev)) => Err(format!("{e}\n（新版没跑起来，仍在运行上一版 {prev}）")),
+            (Some(e), None) => Err(e),
+            (None, _) => Ok(()),
+        }
     }
 
     /// 删一个磁盘插件：装着就先停、从注册表摘掉，再删目录。
@@ -976,36 +912,6 @@ impl DynamicRunner {
         std::fs::remove_dir_all(dir).map_err(|e| format!("删除 {} 失败：{e}", dir.display()))
     }
 
-    /// 把一个动态插件写成永久插件，写进 `root`（用户级或某个项目的插件根）。
-    pub async fn promote_session(
-        &self,
-        plugin_id: &str,
-        scope: PersistScope,
-        root: PathBuf,
-    ) -> Result<PromoteReceipt, String> {
-        let session = self.session_owner(plugin_id)?;
-        self.promote_into(&session, plugin_id, None, scope, root)
-            .await
-    }
-
-    /// 丢掉一个动态插件：停掉并从注册表删掉（它本来就只在内存里）。
-    pub async fn discard_session(&self, plugin_id: &str) -> Result<(), String> {
-        let session = self.session_owner(plugin_id)?;
-        self.undefine(&session, plugin_id).await.map(|_| ())
-    }
-
-    fn session_owner(&self, plugin_id: &str) -> Result<String, String> {
-        let inner = self.inner.lock().unwrap();
-        let rec = inner
-            .registry
-            .get(plugin_id)
-            .ok_or_else(|| format!("没有叫 {plugin_id} 的插件"))?;
-        if !matches!(rec.origin, PluginOrigin::Session) {
-            return Err(format!("{plugin_id} 已经是永久插件"));
-        }
-        Ok(rec.session_id.clone())
-    }
-
     /// 打开某个项目的会话时装上它的永久插件（同名已装的跳过）。和 TUI 从这个目录
     /// 启动时一样自动跑，不走权限确认。
     pub async fn boot_project(&self, project: &Path) {
@@ -1018,8 +924,8 @@ impl DynamicRunner {
 mod tests {
     use super::*;
 
-    /// 桌面 GUI：进程 cwd 是 App 数据目录，每个会话钉着自己的项目目录。agent 在会话里
-    /// `cordis_promote` 到项目级，要写进**这个会话的**项目，不是进程 cwd。
+    /// 桌面 GUI：进程 cwd 是 App 数据目录，每个会话钉着自己的项目目录。项目级插件根
+    /// 要跟着**这个会话的**项目走，不是进程 cwd。
     #[tokio::test]
     async fn project_root_follows_the_running_session_not_the_process() {
         // 断言里读进程 cwd：拿住进程环境锁，别的用例切 cwd 时不会读到两个不同的目录。
@@ -1045,124 +951,205 @@ mod tests {
     }
 
     #[test]
-    fn default_disk_id_strips_counter() {
-        assert_eq!(default_disk_id("echo-1"), "echo");
-        assert_eq!(default_disk_id("memo-12"), "memo");
-        assert_eq!(default_disk_id("session-memo"), "session-memo");
-        assert_eq!(default_disk_id("hold-1"), "hold");
-    }
-
-    #[test]
     fn valid_disk_id_shape() {
         assert!(valid_disk_id("ab"));
         assert!(valid_disk_id("memo"));
         assert!(valid_disk_id("session-memo"));
+        assert!(valid_disk_id("cyberspace"));
         assert!(!valid_disk_id("a"));
         assert!(!valid_disk_id("Memo"));
         assert!(!valid_disk_id("1abc"));
         assert!(!valid_disk_id(""));
     }
 
+    fn write(dir: &Path, rel: &str, text: &str) {
+        let path = dir.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+
     #[test]
-    fn write_and_scan_roundtrip() {
-        let dir = tempfile::tempdir().unwrap();
-        let pkg = Package {
-            package_id: "pkg-1".into(),
-            name: "便签".into(),
-            purpose: "memo bag".into(),
-            factory: RHAI_FACTORY.into(),
-            provides: Vec::new(),
-            inject: vec!["tools".into()],
-            tools: Vec::new(),
-            contrib: None,
-            source: Some("#{ inject: [\"tools\"], apply: |host| { host.log(\"hi\") } }".into()),
-            source_path: None,
-        };
-        let written = write_plugin(dir.path(), "memo", &pkg, true).unwrap();
-        assert!(written.join("plugin.toml").exists());
-        assert!(written.join("source.rhai").exists());
-        let specs = scan(&[(PersistScope::Project, dir.path().to_path_buf())]);
+    fn a_source_file_alone_is_a_plugin_named_after_its_directory() {
+        let root = tempfile::tempdir().unwrap();
+        write(
+            root.path(),
+            "memo/source.rhai",
+            "#{ inject: [], apply: |host| {} }",
+        );
+        let specs = scan(&[(PersistScope::Project, root.path().to_path_buf())]);
         assert_eq!(specs.len(), 1);
         assert_eq!(specs[0].id, "memo");
-        assert_eq!(specs[0].name, "便签");
+        assert_eq!(specs[0].name, "memo");
+        assert_eq!(specs[0].purpose, "");
         assert_eq!(specs[0].factory, RHAI_FACTORY);
-        let src = std::fs::read_to_string(specs[0].source_path.as_ref().unwrap()).unwrap();
-        assert!(src.contains("apply"));
+        assert!(specs[0].enabled);
+        assert!(specs[0].warnings.is_empty());
+    }
+
+    #[test]
+    fn manifest_keys_are_optional_and_unknown_ones_are_reported() {
+        let root = tempfile::tempdir().unwrap();
+        write(
+            root.path(),
+            "api/source.rhai",
+            "#{ inject: [], apply: |host| {} }",
+        );
+        write(
+            root.path(),
+            "api/plugin.toml",
+            "name = \"接口\"\n[permission]\nhttp = [\"api.example.com\"]\n",
+        );
+        let (spec, _) = find_disk(
+            "api",
+            None,
+            &[(PersistScope::Project, root.path().to_path_buf())],
+        )
+        .unwrap();
+        assert_eq!(spec.name, "接口");
+        assert!(spec.http_allow.is_empty(), "拼错的段不该生效");
+        assert!(
+            spec.warnings[0].contains("permission"),
+            "{:?}",
+            spec.warnings
+        );
+    }
+
+    #[test]
+    fn declared_http_hosts_are_normalized_and_matched() {
+        let root = tempfile::tempdir().unwrap();
+        write(
+            root.path(),
+            "api/source.rhai",
+            "#{ inject: [], apply: |host| {} }",
+        );
+        write(
+            root.path(),
+            "api/plugin.toml",
+            "[permissions]\nhttp = [\"API.Example.com\", \"*.qianxin.com\"]\n",
+        );
+        let (spec, _) = find_disk(
+            "api",
+            None,
+            &[(PersistScope::Project, root.path().to_path_buf())],
+        )
+        .unwrap();
+        assert_eq!(spec.http_allow, vec!["api.example.com", "*.qianxin.com"]);
+        assert!(http_host_allowed(&spec.http_allow, "api.example.com"));
+        assert!(http_host_allowed(&spec.http_allow, "hunter.qianxin.com"));
+        assert!(!http_host_allowed(&spec.http_allow, "qianxin.com"));
+        assert!(!http_host_allowed(&spec.http_allow, "evil-api.example.com"));
+        assert!(!http_host_allowed(&spec.http_allow, "example.com"));
+    }
+
+    #[test]
+    fn a_bare_wildcard_or_a_url_is_not_a_host() {
+        for bad in ["*", "https://api.example.com", "api.example.com/v1", "a:80"] {
+            assert!(normalize_http_entry(bad).is_err(), "{bad}");
+        }
+        assert_eq!(normalize_http_entry("localhost").unwrap(), "localhost");
+    }
+
+    #[test]
+    fn declared_hooks_reads_string_literals() {
+        let src = r#"#{ apply: |host| {
+            host.on("tools/pre-execute", |c| { () });
+            host.on( "agent/turn-end", |t| { () });
+            host.on("tools/pre-execute", |c| { () });
+            host.on(name, |x| { () });
+        } }"#;
+        assert_eq!(
+            declared_hooks(src),
+            vec!["tools/pre-execute", "agent/turn-end"]
+        );
     }
 
     #[test]
     fn project_overlays_user() {
         let user = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
-        let pkg = |name: &str| Package {
-            package_id: "pkg-1".into(),
-            name: name.into(),
-            purpose: "p".into(),
-            factory: "echo".into(),
-            provides: Vec::new(),
-            inject: Vec::new(),
-            tools: Vec::new(),
-            contrib: None,
-            source: None,
-            source_path: None,
-        };
-        write_plugin(user.path(), "echo", &pkg("home"), true).unwrap();
-        write_plugin(project.path(), "echo", &pkg("proj"), true).unwrap();
-        let specs = scan(&[
+        write(
+            user.path(),
+            "echo/plugin.toml",
+            "name = \"home\"\nfactory = \"echo\"\n",
+        );
+        write(
+            project.path(),
+            "echo/plugin.toml",
+            "name = \"proj\"\nfactory = \"echo\"\n",
+        );
+        let roots = [
             (PersistScope::User, user.path().to_path_buf()),
             (PersistScope::Project, project.path().to_path_buf()),
-        ]);
+        ];
+        let specs = scan(&roots);
         assert_eq!(specs.len(), 1);
         assert_eq!(specs[0].name, "proj");
         assert_eq!(specs[0].scope, PersistScope::Project);
+        // 按 id 找也是项目级优先，并报出被盖住的那份；给了 scope 就只看那一层。
+        let (found, shadowed) = find_disk("echo", None, &roots).unwrap();
+        assert_eq!(found.name, "proj");
+        assert_eq!(shadowed.unwrap(), user.path().join("echo"));
+        let (found, shadowed) = find_disk("echo", Some(PersistScope::User), &roots).unwrap();
+        assert_eq!(found.name, "home");
+        assert!(shadowed.is_none());
     }
 
     #[test]
-    fn resolve_source_path_under_root() {
+    fn a_missing_directory_says_where_to_write_it() {
         let root = tempfile::tempdir().unwrap();
-        let plug = root.path().join("demo");
-        std::fs::create_dir_all(&plug).unwrap();
-        let file = plug.join("source.rhai");
-        std::fs::write(&file, "#{ inject: [], apply: |host| { } }").unwrap();
-        let roots = vec![(PersistScope::Project, root.path().to_path_buf())];
-        let got = resolve_source_path_in(file.to_str().unwrap(), &roots).unwrap();
-        assert_eq!(got, file.canonicalize().unwrap());
+        let err = find_disk(
+            "nope",
+            None,
+            &[(PersistScope::Project, root.path().to_path_buf())],
+        )
+        .unwrap_err();
+        assert!(err.contains("source.rhai"), "{err}");
+        assert!(
+            err.contains(&root.path().join("nope").display().to_string()),
+            "{err}"
+        );
+        let err = find_disk("Bad_Id", None, &[]).unwrap_err();
+        assert!(err.contains("不合法"), "{err}");
     }
 
     #[test]
-    fn resolve_source_path_rejects_dotdot() {
-        let roots = vec![(PersistScope::Project, PathBuf::from("/tmp"))];
-        let err = resolve_source_path_in("../etc/passwd", &roots).unwrap_err();
-        assert!(err.contains(".."), "{err}");
-    }
-
-    #[test]
-    fn resolve_source_path_rejects_outside_root() {
+    fn write_disk_enabled_creates_a_manifest_when_there_is_none() {
         let root = tempfile::tempdir().unwrap();
-        let outside = tempfile::NamedTempFile::new().unwrap();
-        let roots = vec![(PersistScope::Project, root.path().to_path_buf())];
-        let err = resolve_source_path_in(outside.path().to_str().unwrap(), &roots).unwrap_err();
-        assert!(err.contains("must resolve under"), "{err}");
+        write(
+            root.path(),
+            "memo/source.rhai",
+            "#{ inject: [], apply: |host| {} }",
+        );
+        let dir = root.path().join("memo");
+        write_disk_enabled(&dir, false).unwrap();
+        let (spec, _) = find_disk(
+            "memo",
+            None,
+            &[(PersistScope::Project, root.path().to_path_buf())],
+        )
+        .unwrap();
+        assert!(!spec.enabled);
     }
 
+    /// 源文件换成指向插件目录外的软链：读快照时要拒，也不能把外面的内容带出来。
     #[test]
-    fn assert_under_plugin_root_rejects_symlink_swap_after_resolve() {
+    fn read_source_file_refuses_a_symlink_out_of_the_plugin_directory() {
         let root = tempfile::tempdir().unwrap();
-        let plug = root.path().join("demo");
-        std::fs::create_dir_all(&plug).unwrap();
-        let file = plug.join("source.rhai");
-        std::fs::write(&file, "#{ inject: [], apply: |host| { } }").unwrap();
-        let roots = vec![(PersistScope::Project, root.path().to_path_buf())];
-        let canon = resolve_source_path_in(file.to_str().unwrap(), &roots).unwrap();
-        assert_eq!(assert_under_plugin_root_in(&canon, &roots).unwrap(), canon);
+        write(
+            root.path(),
+            "demo/source.rhai",
+            "#{ inject: [], apply: |host| {} }",
+        );
+        let dir = root.path().join("demo");
+        let file = dir.join("source.rhai");
+        assert!(read_source_file(&file, MAX_FILE_SOURCE, &dir).is_ok());
 
         let outside = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(outside.path(), "TOP SECRET").unwrap();
         std::fs::remove_file(&file).unwrap();
         std::os::unix::fs::symlink(outside.path(), &file).unwrap();
-
-        let err = assert_under_plugin_root_in(&canon, &roots).unwrap_err();
-        assert!(err.contains("must resolve under"), "{err}");
+        let err = read_source_file(&file, MAX_FILE_SOURCE, &dir).unwrap_err();
+        assert!(err.contains("插件目录"), "{err}");
         assert!(!err.contains("TOP SECRET"), "{err}");
     }
 }

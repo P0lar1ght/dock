@@ -2,7 +2,15 @@
 
 脚本自带 HTTP 和 JSON，一颗插件就能把任意 HTTP 接口变成 Dock 工具。
 本页函数**只在运行期有**：写在 `apply` 或 `execute` / 回调里，不要写在顶层
-（define 期的预检会求值顶层，在那里发请求就绕过了权限门）。
+（编译检查会求值顶层，在那里发请求就绕过了权限门）。
+
+**确认**：每个 host 第一次请求会在发起调用的那一页弹确认。要包的 API 在
+`plugin.toml` 里声明，就不再逐次问（批准加载插件时会列给用户看）：
+
+```toml
+[permissions]
+http = ["api.github.com", "*.qianxin.com"]   # *.x 只配子域
+```
 完整例子：`$SKILL_DIR/examples/api-tool.rhai`。
 
 ## `http_request(#{ … })`

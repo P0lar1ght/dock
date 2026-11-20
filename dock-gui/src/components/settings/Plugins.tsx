@@ -1,28 +1,24 @@
 // 插件与技能（ose / bis / yox）：三个页签。
-// - 插件：永久插件（用户级 + 每个项目，按目录认）+ 动态插件（会话里定义、只在内存里）；
+// - 插件：插件目录（用户级 + 每个项目，按目录认）。插件就是 .dock/plugins/<id>/，没有「只在内存里」的那一种；
 // - 技能：每一层发现的技能，被更高层同名遮住的标出来；
 // - 密钥：插件用 host.secret 读的 $DOCK_HOME/secrets.json（只列名字，值只进不出）。
 
 import { Fragment, useState, type ReactNode } from "react";
 import { usePluginRows, type PluginRowProps } from "../../features/registry";
-import { ChevronDown, FolderOpen, LoaderCircle, Plus, Trash2 } from "lucide-react";
-import { Popover } from "../Popover";
+import { FolderOpen, LoaderCircle, Plus, RotateCw, Trash2 } from "lucide-react";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { useApp } from "../../dock/store";
 import {
   errorText,
   pluginDelete,
-  pluginDiscard,
   pluginEnable,
   pluginList,
-  pluginPromote,
   secretDelete,
   secretList,
   secretSet,
   skillList,
   type DiskPlugin,
   type PluginListing,
-  type SessionPlugin,
   type SkillRow,
 } from "../../dock/settingsApi";
 import {
@@ -48,7 +44,7 @@ type Tab = "plugins" | "skills" | "secrets";
 export function PluginsPane({ initialTab = "plugins" }: { initialTab?: Tab } = {}) {
   const [tab, setTab] = useState<Tab>(initialTab);
   return (
-    <Page title="插件与技能" subtitle="Cordis 动态插件、斜杠技能与插件密钥">
+    <Page title="插件与技能" subtitle="Cordis 插件、斜杠技能与插件密钥">
       <Tabs
         value={tab}
         onChange={setTab}
@@ -66,14 +62,14 @@ export function PluginsPane({ initialTab = "plugins" }: { initialTab?: Tab } = {
 }
 
 const rowClass = "group flex items-center justify-between gap-3 border-b border-[#f0f0f3] px-4 py-3 last:border-b-0";
-/** 行本身（分隔线在外层，下面还要挂设置卡的展开区）。 */
-const rowInner = "group flex items-center justify-between gap-3 px-4 py-3";
 const tilde = (p: string) => p.replace(/^\/Users\/[^/]+/, "~");
 const baseName = (p: string) => p.replace(/\/+$/, "").split("/").pop() || p;
 const dangerButton = "motion-colors flex h-7 items-center rounded-md bg-[#ff3b30] px-3 text-[11.5px] font-medium text-white hover:bg-[#e0352b]";
 
 /** 一个永久插件现在是什么状态：只看 Dock 给的字段，不猜。 */
 function diskState(p: DiskPlugin): { label: string; kind: "green" | "gray" | "orange" | "red"; title?: string } {
+  // 新版没起来、上一版还在跑：功能没断，但要让人看见出过错。
+  if (p.running && p.error) return { label: "运行中 · 上次重载失败", kind: "orange", title: "新版没跑起来，仍在运行上一版" };
   if (p.error) return { label: "加载失败", kind: "red" };
   if (p.shadowedBy) return { label: "被同名插件占用", kind: "orange", title: `已经装着 ${tilde(p.shadowedBy)} 的同名插件` };
   if (!p.enabled) return { label: "已停用", kind: "gray" };
@@ -103,15 +99,15 @@ function PluginsTab() {
   return (
     <>
       <Section
-        title="永久插件"
-        right={<span className="text-[11.5px] text-ink-4">写在磁盘上，启动 / 打开项目的会话时自动加载</span>}
+        title="插件"
+        right={<span className="text-[11.5px] text-ink-4">插件就是 .dock/plugins/&lt;id&gt;/ 目录，启动 / 打开项目的会话时自动加载</span>}
       >
         <div className="flex flex-col gap-3">
           <DiskGroup
             title="用户级"
             root={data.userRoot}
             rows={user}
-            empty="还没有。在会话里让 agent 写一个并 cordis_promote，或把动态插件「保存为永久」。"
+            empty="还没有。在创造模式里让 agent 写一个，或把插件目录放进 ~/.dock/plugins/。"
             busy={busy}
             act={act}
           />
@@ -133,19 +129,6 @@ function PluginsTab() {
         </div>
       </Section>
 
-      <Section
-        title={`动态插件${data.session.length ? ` (${data.session.length})` : ""}`}
-        right={<span className="text-[11.5px] text-ink-4">会话里临时定义，只在内存里，Dock 重启就没了</span>}
-      >
-        <Card>
-          {data.session.length === 0 && (
-            <div className="px-4 py-3 text-[12.5px] text-ink-4">没有。agent 在会话里用 cordis_define 定义的插件会先出现在这里。</div>
-          )}
-          {data.session.map((p) => (
-            <SessionRow key={p.id} plugin={p} busy={busy === p.id} act={act} />
-          ))}
-        </Card>
-      </Section>
     </>
   );
 }
@@ -186,6 +169,8 @@ function DiskGroup({
         {rows.map((p) => {
           const st = diskState(p);
           const canLoad = p.enabled && !p.loaded && !p.shadowedBy && !p.error;
+          // 改了文件之后：按目录里最新的文件重新装一次；新版起不来时上一版照跑。
+          const canReload = p.enabled && p.loaded;
           return (
             <PluginRowSlot key={p.path} pluginId={p.id}>
               {({ action, panel }) => (
@@ -256,10 +241,22 @@ function DiskGroup({
                           立即加载
                         </button>
                       )}
+                      {canReload && (
+                        <button
+                          type="button"
+                          disabled={busy === p.path}
+                          onClick={() => act(p.path, () => pluginEnable(p.path, true))}
+                          className={smallButton}
+                          title="按目录里最新的文件重新加载；新版跑不起来时上一版照跑"
+                        >
+                          {busy === p.path ? <LoaderCircle size={11} className="animate-spin" /> : <RotateCw size={11} />}
+                          重新加载
+                        </button>
+                      )}
                       <Toggle
                         on={p.enabled}
                         label={p.enabled ? "停用" : "启用"}
-                        disabled={busy === p.path || (!!p.error && !p.purpose)}
+                        disabled={busy === p.path || (!!p.error && !p.loaded)}
                         onChange={(v) => act(p.path, () => pluginEnable(p.path, v))}
                       />
                     </div>
@@ -273,113 +270,6 @@ function DiskGroup({
         })}
       </Card>
     </div>
-  );
-}
-
-function SessionRow({
-  plugin: p,
-  busy,
-  act,
-}: {
-  plugin: SessionPlugin;
-  busy: boolean;
-  act: (key: string, f: () => Promise<PluginListing>) => Promise<void>;
-}) {
-  const [confirm, setConfirm] = useState(false);
-  const from = p.threadId ? `来自「${p.threadTitle || "未命名会话"}」${p.cwd ? ` · ${baseName(p.cwd)}` : ""}` : "定义它的会话已经关了";
-  const item = "motion-colors flex w-full flex-col items-start rounded-md px-2.5 py-1.5 text-left hover:bg-hover";
-  return (
-    <PluginRowSlot pluginId={p.id}>
-      {({ action, panel }) => (
-        <div className="flex flex-col border-b border-[#f0f0f3] last:border-b-0">
-          <div className={rowInner}>
-            <div className="flex min-w-0 flex-col gap-0.5">
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="font-mono text-[12.5px] text-ink">{p.id}</span>
-                {p.name && p.name !== p.id && <span className="text-[12.5px] text-ink-2">{p.name}</span>}
-                {p.factory && <Pill>{p.factory}</Pill>}
-                {p.error ? <Pill kind="red">启动失败</Pill> : <Pill kind={p.running ? "green" : "gray"}>{p.running ? "运行中" : "已停止"}</Pill>}
-              </div>
-              {p.purpose && <span className="truncate text-xs text-ink-4">{p.purpose}</span>}
-              <span className="truncate text-[11px] text-ink-4">{from}</span>
-              {p.error && <span className="text-[11px] break-words text-[#d70015]">{p.error}</span>}
-            </div>
-            <div className="flex shrink-0 items-center gap-1.5">
-              {action}
-              {confirm ? (
-                <span className="enter-fade flex items-center gap-1.5">
-                  <span className="text-[12px] text-ink-3">停掉并丢掉？</span>
-                  <button type="button" onClick={() => setConfirm(false)} className={smallButton}>
-                    取消
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setConfirm(false);
-                      void act(p.id, () => pluginDiscard(p.id));
-                    }}
-                    className={dangerButton}
-                  >
-                    丢弃
-                  </button>
-                </span>
-              ) : (
-                <>
-                  <Popover
-                    title="保存为永久"
-                    side="bottom"
-                    align="right"
-                    className={smallButton}
-                    panelClassName="min-w-[220px] px-1"
-                    trigger={
-                      <>
-                        {busy && <LoaderCircle size={11} className="animate-spin" />}
-                        保存为永久
-                        <ChevronDown size={11} />
-                      </>
-                    }
-                  >
-                    {(close) => (
-                      <>
-                        <button
-                          type="button"
-                          className={item}
-                          onClick={() => {
-                            close();
-                            void act(p.id, () => pluginPromote(p.id, "user"));
-                          }}
-                        >
-                          <span className="text-[12.5px] text-ink">用户级</span>
-                          <span className="text-[11px] text-ink-4">~/.dock/plugins，所有项目都加载</span>
-                        </button>
-                        <button
-                          type="button"
-                          disabled={!p.cwd}
-                          className={`${item} disabled:opacity-50`}
-                          onClick={() => {
-                            close();
-                            void act(p.id, () => pluginPromote(p.id, "project"));
-                          }}
-                        >
-                          <span className="text-[12.5px] text-ink">这个项目{p.cwd ? `（${baseName(p.cwd)}）` : ""}</span>
-                          <span className="text-[11px] text-ink-4">
-                            {p.cwd ? `${tilde(p.cwd)}/.dock/plugins，只跟着这个项目` : "会话关了，不知道是哪个项目"}
-                          </span>
-                        </button>
-                      </>
-                    )}
-                  </Popover>
-                  <button type="button" onClick={() => setConfirm(true)} className="rounded-md px-2 py-1 text-[12px] font-medium text-[#ff3b30] hover:bg-[#ff3b3014]">
-                    丢弃
-                  </button>
-                </>
-              )}
-            </div>
-          </div>
-          {panel}
-        </div>
-      )}
-    </PluginRowSlot>
   );
 }
 

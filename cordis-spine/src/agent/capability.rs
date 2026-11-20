@@ -135,13 +135,16 @@ fn class_of(tool: &str) -> Class {
 
         "grep" | "glob" | "web_search" | "web_fetch" => Class::Search,
 
-        "list_dir" | "lsp" | "list_agents" => Class::Inspect,
+        "list_dir" | "lsp" | "list_agents" | "cordis_inspect" => Class::Inspect,
 
         "search_replace" | "write_file" | "memory_write" | "canvas_create" | "canvas_edit"
         | "canvas_data" => Class::Edit,
 
         "bash" | "monitor" | "task" | "interrupt_agent" | "job" | "kill_task" | "workflow"
         | "scheduler_create" | "scheduler_delete" | "scheduler_list" => Class::Execute,
+
+        // 以宿主权限跑插件代码，对所有会话生效：和 bash 同级。
+        "cordis_plugin" => Class::Execute,
 
         "use_tool" => Class::Dispatch,
 
@@ -182,6 +185,7 @@ mod tests {
             "memory_get",
             "skill",
             "search_tool",
+            "cordis_inspect",
         ] {
             assert!(parallel_safe(yes, "{}"), "{yes} 该能并行");
         }
@@ -197,7 +201,7 @@ mod tests {
             "send_message",
             "mcp_browser__browser_snapshot",
             "mcp_other__read",
-            "cordis_run",
+            "cordis_plugin",
         ] {
             assert!(!parallel_safe(no, "{}"), "{no} 不该并行");
         }

@@ -291,8 +291,8 @@ async fn install_fakes_echo_has_no_capability_tools() {
         "enter_plan_mode",
         "job",
         "scheduler_create",
-        "cordis_define",
-        "cordis_run",
+        "cordis_inspect",
+        "cordis_plugin",
         "search_tool",
         "use_tool",
         "browser_open",
@@ -488,11 +488,7 @@ async fn install_app_registers_capability_tools_and_mcp_fail_open() {
         "search_tool",
         "use_tool",
         "cordis_inspect",
-        "cordis_define",
-        "cordis_run",
-        "cordis_call",
-        "cordis_stop",
-        "cordis_promote",
+        "cordis_plugin",
         "propose_preset",
     ] {
         assert!(
@@ -501,12 +497,20 @@ async fn install_app_registers_capability_tools_and_mcp_fail_open() {
         );
     }
     // 合并掉的两颗（inspect_self → inspect 的 pluginId，undefine → stop drop:true）
-    // 不该再出现：八颗挤不进 search_tool 默认的五个命中，define / run 就是这么掉出
-    // 窗口的。要加回来得是有意的决定，不是手滑。
-    for retired in ["cordis_inspect_self", "cordis_undefine"] {
+    // 模型侧只剩查看 + 管理插件目录两颗（对齐 DSH）。退役的那套要加回来得是有意的
+    // 决定，不是手滑：两套生命周期正是插件 id 分裂、一次修改三次调用的来源。
+    for retired in [
+        "cordis_inspect_self",
+        "cordis_undefine",
+        "cordis_define",
+        "cordis_run",
+        "cordis_call",
+        "cordis_stop",
+        "cordis_promote",
+    ] {
         assert!(
             !names.iter().any(|n| n == retired),
-            "{retired} was folded into another cordis tool: {names:?}"
+            "{retired} was retired in favour of cordis_plugin: {names:?}"
         );
     }
     let mcp = root

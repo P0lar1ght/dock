@@ -1,5 +1,5 @@
 // 状态 + 两颗工具 + 斜杠 + 面板。
-// store 被所有闭包共享；只活在这次 Run 里，update / stop / 重启都会清掉。
+// store 被所有闭包共享；只活在这次运行里，reload / disable / 重启都会清掉。
 #{
     inject: ["tools", "slash", "tui.slots"],
     apply: |host| {

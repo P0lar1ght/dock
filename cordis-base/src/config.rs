@@ -483,6 +483,40 @@ struct FileConfig {
     /// `[memory]` — cross-session topics/observations memory (default off).
     #[serde(default)]
     memory: MemorySection,
+    /// `[hooks]` — 要不要也读 Claude Code / Codex 的 hooks 配置（默认都不读）。
+    #[serde(default)]
+    hooks: HooksSection,
+}
+
+/// `[hooks]`：hooks 桥接要读哪些别家的配置。Dock 自己的 `hooks.json` 一直读。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct HooksSection {
+    /// 也读 `~/.claude/settings.json` 和项目 `.claude/settings{,.local}.json` 的 `hooks`。
+    pub claude_code: Option<bool>,
+    /// 也读 `~/.codex/hooks.json` 和项目 `.codex/hooks.json`。
+    pub codex: Option<bool>,
+}
+
+/// 生效的 `[hooks]` 开关。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HooksImport {
+    pub claude_code: bool,
+    pub codex: bool,
+}
+
+/// 现读 `[hooks]`。**只认用户级** `~/.dock/config.toml`：项目里的配置能打开它的话，
+/// 一个克隆来的仓库就能让自己的 `.claude/settings.json` 里的命令在本机跑起来。
+pub fn load_hooks_import() -> HooksImport {
+    load_hooks_import_from(&dock_home().join("config.toml"))
+}
+
+pub fn load_hooks_import_from(path: &Path) -> HooksImport {
+    let section = read_file(path).map(|f| f.hooks).unwrap_or_default();
+    HooksImport {
+        claude_code: section.claude_code.unwrap_or(false),
+        codex: section.codex.unwrap_or(false),
+    }
 }
 
 /// `[toolset.web_fetch]` —— `tool-web` 的运行时旋钮。

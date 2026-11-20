@@ -158,6 +158,24 @@ named service `"tool.views"`：按工具名登记渲染函数，拿这一次调�
   - 最多摆 3 个，按工具栏剩余宽度少摆，多的收进「+N」；连「+N」都放不下就先藏起来；
   - 图标由色调决定（success / warning / danger / accent），default / muted 不带图标。
 
+## 回答下面的卡片
+
+插件挂在**某一轮回答下面**的卡片：标题、正文、可选视图树（同面板的 `view`）、几个按钮。
+MCP App 只能画在它自己的工具结果里；插件可以在任何一轮结束时、工具里、定时器里往那一轮
+下面挂卡（「改了 Rust 文件，还没跑测试 · [跑测试]」）。named service `"turnCards"`：
+
+- Rhai：`host.card(#{ id?, title, text?, tone?, view?, actions?, on_action? })` 发卡（同一轮
+  同 `id` 再发一次是原地更新）、`host.update_card(id, #{…})`、`host.remove_card(id)`。
+  `on_action: |action| { … }` 在卡片所在的那一页上跑（里面 `host.followup` / `call_tool` 都落在
+  那一页），回字符串就给用户弹个提示；
+- 只在内存里：页关了、Dock 重启就没了。插件停了 / 换版了卡片留着，按钮失效（`live: false`）；
+- 终端：发卡时记一条通知（`LogEvent::Notice`，只给人看、跟着会话落盘），按钮只在 GUI 上点；
+- GUI：`turn/cards/list { threadId }` → `{ turns: [{ turnId, cards }] }`，推送
+  `turn/cards/updated { threadId, turnId, cards }`（整轮换掉），点按钮
+  `turn/cards/action { threadId, cardId, action }` → `{ toast }`（只认受信连接）。能力位 `turnCards`；
+- 一张卡：`{ id, plugin, title, text, tone, view, actions: [{ id, label }], live }`。`tone` 同状态项；
+- 一页最多 50 张，多了丢最早的。
+
 ## web 面板
 
 视图树画不了的交互（时间轴拖选、虚拟滚动、搜索框、图表）走 web 面板：插件自带 HTML / JS，

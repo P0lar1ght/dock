@@ -2,7 +2,7 @@
 //!
 //! Pure functions — no I/O, no permission gate. Registered **only on the run
 //! engine** in [`super::rhai_host::apply_rhai`] (same place as `rhai_http`),
-//! not on define-time preflight, so top-level calls during `cordis_define` fail.
+//! not on define-time preflight, so top-level calls during the compile check fail.
 //!
 //! Layer 1 (#99): codecs. Layer 2: `hmac_sha256`. No AES / `host.secret`.
 

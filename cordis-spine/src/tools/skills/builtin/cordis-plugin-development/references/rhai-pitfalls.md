@@ -20,6 +20,14 @@ Rhai 长得像 JS / Rust，但不是。下面每条左边是会报错的写法�
 | `Function not found: is_string` | 没有 `is_string` / `is_map` 这类函数 | `type_of(x) == "string"`；其它类型名：`i64` `f64` `bool` `map` `array` `()` `Fn` `blob` |
 | `Function not found: try_cast` / `key_of` … | Rust API 名，不是脚本函数 | 按类型分支用 `type_of`；遍历 map 用 `for k in m.keys() { … }` |
 | `Function not found: xxx (())` | 参数是 `()`：上一步取了不存在的字段 | 先兜底：`args.q ?? ""`，或 `if x == () { … }` |
+| `Function not found: slice (…)` | 没有 `slice` / `substring` | `s.sub_string(start, len)`；数组用 `a.extract(start, len)` |
+
+## 实测会话里模型专门写探针去试的
+
+| 现象 | 原因 | 对的写法 |
+| --- | --- | --- |
+| `fn fill(m) { m.x = 42; }` 调完 `m.x` 还是空 | 函数参数是**值拷贝**，改的是副本 | 返回新值：`fn fill(m) { m.x = 42; m }` 再 `m = fill(m)`；或者在 `apply` 里用闭包共享同一份 |
+| `parse_json(resp.body)` 报 `Syntax error: Unexpected '…'` | 正文不是 JSON（403 的 HTML 错误页、空串） | 先看 `resp.ok` 和 `resp.headers["content-type"]`，不是 JSON 就把 `resp.status` 和正文前几十个字返回给用户 |
 
 不确定某个函数在不在，查 `cordis_inspect what: "builtins"`（Dock 加的 host 与脚本函数），
 其余是 Rhai 标准库。

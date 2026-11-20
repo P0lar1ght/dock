@@ -258,7 +258,7 @@ npm run pack:skin      # 打包 pet skin
 | 动挂载顺序 | `install_app`（`cordis-spine`）或 `cordis-app` 的 `main` |
 | 回环网关 / `dock.1` | `cordis-gateway/` |
 | 宿主页注入 | `embed-sdk/` |
-| 动态插件（会话内起一颗 Cordis 包） | 内置 skill `cordis-spine/src/tools/skills/builtin/cordis-plugin-development/SKILL.md` |
+| 插件（`.dock/plugins/<id>/`，`cordis_plugin` 热装） | 内置 skill `cordis-spine/src/tools/skills/builtin/cordis-plugin-development/SKILL.md` |
 | Agent 预设 YAML | 内置在 `cordis-spine/presets/`；用户 / 项目覆盖在 `~/.dock/presets/`、`.dock/presets/` |
 
 `.agents/skills/` 与 `skills/` 都会被运行时扫描（前者 Agents scope，后者 Bundled）。同名时项目 `.dock/skills` > `.agents/skills` > `~/.dock/skills` > `skills/` > 内置 `$DOCK_HOME/bundled/skills/`（编译期嵌入，启动物化到缓存）。

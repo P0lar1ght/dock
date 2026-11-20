@@ -161,6 +161,8 @@ pub(super) enum ParentNotice {
     /// 一条后台任务（后台 bash、转入后台的命令、monitor）跑完了。正文已经排好版
     /// （`job-notify` 插件写的）；`job_id` 用来在模型先用 `job` 读到结果时撤掉它。
     JobDone { job_id: String, text: String },
+    /// 一颗插件主动送来的话（`host.followup`）：外部事件、定时检查、面板按钮。
+    Plugin { plugin: String, text: String },
     /// One per finished child turn: the child is idle and can be continued.
     TurnEnd {
         id: String,
@@ -889,6 +891,15 @@ impl ChildStore {
     pub fn push_job_done(&self, page: &str, job_id: &str, text: String, wakes: bool) {
         let notice = ParentNotice::JobDone {
             job_id: job_id.to_string(),
+            text,
+        };
+        self.enqueue(page, notice, wakes);
+    }
+
+    /// 插件送来的话（`host.followup`）。`wakes` 才叫醒那一页。
+    pub fn push_plugin_notice(&self, page: &str, plugin: &str, text: String, wakes: bool) {
+        let notice = ParentNotice::Plugin {
+            plugin: plugin.to_string(),
             text,
         };
         self.enqueue(page, notice, wakes);
