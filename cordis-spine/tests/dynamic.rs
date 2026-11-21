@@ -4144,6 +4144,14 @@ async fn example_guard_enforces_project_rules() {
     )
     .await;
     assert!(out.contains("vendor/ 是冻结副本"), "{out}");
+    // write_file 的路径参数叫 target_file，不是 file_path。
+    let out = exec(
+        &root,
+        "write_file",
+        r#"{"target_file":"vendor/xai/lib.rs","contents":"b"}"#,
+    )
+    .await;
+    assert!(out.contains("vendor/ 是冻结副本"), "{out}");
     let perms = root.require::<Permissions>(PERMISSIONS).unwrap();
     let tools = tools_of(&root);
     let push = tokio::spawn(async move {
@@ -4170,8 +4178,11 @@ async fn example_guard_enforces_project_rules() {
         .contains("ls"));
 }
 
-/// 先改一个 `.rs`，再回正文的模型。
-struct EditRust;
+/// 先用给定的工具改一个 `.rs`，再回正文的模型。
+struct EditRust {
+    tool: &'static str,
+    arguments: serde_json::Value,
+}
 
 impl cordis_spine::Sampler for EditRust {
     fn sample<'a>(
@@ -4188,9 +4199,8 @@ impl cordis_spine::Sampler for EditRust {
                 return cordis_spine::LlmOutput {
                     tool_calls: vec![ToolCall {
                         id: "e1".into(),
-                        name: "search_replace".into(),
-                        arguments: json!({ "file_path": "src/lib.rs", "old_string": "a", "new_string": "b" })
-                            .to_string(),
+                        name: self.tool.into(),
+                        arguments: self.arguments.to_string(),
                     }],
                     ..Default::default()
                 };
@@ -4206,11 +4216,29 @@ impl cordis_spine::Sampler for EditRust {
 /// `done-check.rhai`：改了 `.rs` 没跑测试，回合想收尾时被拦回去一次，并挂一张「跑测试」卡片。
 #[tokio::test]
 async fn example_done_check_holds_the_turn_until_tests_run() {
+    done_check_holds_after(EditRust {
+        tool: "search_replace",
+        arguments: json!({ "file_path": "src/lib.rs", "old_string": "a", "new_string": "b" }),
+    })
+    .await;
+}
+
+/// 同上，但用 `write_file` 改：它的路径参数叫 `target_file`。
+#[tokio::test]
+async fn example_done_check_counts_write_file_edits() {
+    done_check_holds_after(EditRust {
+        tool: "write_file",
+        arguments: json!({ "target_file": "src/lib.rs", "contents": "b" }),
+    })
+    .await;
+}
+
+async fn done_check_holds_after(edit: EditRust) {
     let _env = cordis_base::test_env::scoped().home();
     let root = boot().await;
     root.provide(
         cordis_spine::LLM,
-        cordis_spine::Llm::from_sampler(root.clone(), std::sync::Arc::new(EditRust)),
+        cordis_spine::Llm::from_sampler(root.clone(), std::sync::Arc::new(edit)),
     )
     .unwrap();
     root.plugin(agent_loop(), ()).unwrap().wait().await.unwrap();

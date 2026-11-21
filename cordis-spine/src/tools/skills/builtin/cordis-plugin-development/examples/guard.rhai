@@ -41,7 +41,8 @@ fn frozen_path(path) {
                 }
             }
             if c.name == "search_replace" || c.name == "write_file" {
-                let path = c.args?.file_path ?? "";
+                // search_replace 的路径参数叫 file_path，write_file 的叫 target_file。
+                let path = c.args?.file_path ?? c.args?.target_file ?? "";
                 let dir = frozen_path(path);
                 if dir != () {
                     return #{ deny: dir + " 是冻结副本，不许直接改。要改就把代码复制到自己的模块里。" };

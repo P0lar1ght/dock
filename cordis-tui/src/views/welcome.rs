@@ -37,7 +37,7 @@ const LOGO_SMALL: &str = include_str!("../../assets/logo/logo07.txt");
 const TITLE: &str = "Dock";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const SUBTITLE: &str = "Cordis 插件树 · 反馈用 /help";
-const TIP: &str = "Shift+Tab 切换询问 / 始终允许";
+const TIP: &str = "Shift+Tab 切换询问 / 计划 / 始终允许";
 
 /// Side-by-side hero box (Grok `HERO_BOX_MIN_WIDTH` is 90; Dock is a bit tighter).
 const HERO_MIN_WIDTH: u16 = 64;
@@ -546,6 +546,27 @@ mod tests {
             }
         }
         painted.chars().filter(|c| !c.is_whitespace()).collect()
+    }
+
+    /// 欢迎页的 Shift+Tab 提示要列出循环里的每一档（询问 → 计划 → 始终允许），
+    /// 不能只写两档权限。
+    #[test]
+    fn shift_tab_tip_names_every_mode_in_the_cycle() {
+        use crate::app::mode_cycle::cycle_session_mode;
+        use cordis_spine::PermissionMode;
+
+        let (buf, _) = paint(80, 30, None);
+        let text = compact(&buf);
+        let (mut plan, mut perm) = (false, PermissionMode::Ask);
+        for _ in 0..3 {
+            (plan, perm, _) = cycle_session_mode(plan, perm);
+            let label = match (plan, perm) {
+                (true, _) => "计划",
+                (false, PermissionMode::Allow) => "始终允许",
+                (false, PermissionMode::Ask) => "询问",
+            };
+            assert!(text.contains(label), "提示里少了「{label}」：{text}");
+        }
     }
 
     #[test]

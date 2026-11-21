@@ -17,7 +17,8 @@
             if !r.main || r.is_error { return (); }
             let page = pages[r.identity] ?? #{ edited: [], tested: false };
             if r.name == "search_replace" || r.name == "write_file" {
-                let path = r.args?.file_path ?? "";
+                // search_replace 的路径参数叫 file_path，write_file 的叫 target_file。
+                let path = r.args?.file_path ?? r.args?.target_file ?? "";
                 if path.ends_with(".rs") && !page.edited.contains(path) {
                     page.edited.push(path);
                     page.tested = false;
