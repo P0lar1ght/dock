@@ -117,10 +117,13 @@ fn choice(provider: &str, provider_name: &str, model: &RemoteModel) -> ModelChoi
         api_model: Some(model.slug.clone()),
         prompt_cache: None,
         max_output_tokens: None,
-        // 上游列了档位就是会推理的模型；没说就跟着 `/think` 走。
-        reasoning: efforts.as_ref().map(|e| !e.is_empty()).filter(|r| *r),
+        // 上游说了会不会推理就照它；没说时列了档位就是会推理的模型，否则跟着 `/think` 走。
+        reasoning: model
+            .reasoning
+            .or_else(|| efforts.as_ref().map(|e| !e.is_empty()).filter(|r| *r)),
         reasoning_effort: model.default_reasoning_effort.clone(),
-        reasoning_efforts: efforts.filter(|e| !e.is_empty()),
+        // 空列表原样留着 = 会推理但没有档位（菜单不列）；`None` 才是「不知道」（通用四档）。
+        reasoning_efforts: efforts,
         supports_images: model.supports_images,
         // 用的是套餐额度：没有按量单价。
         pricing: None,
@@ -150,9 +153,23 @@ mod tests {
                         reasoning_efforts: Some(vec!["low".into(), "max".into()]),
                         default_reasoning_effort: Some("medium".into()),
                         supports_images: Some(true),
+                        reasoning: None,
                     },
                     RemoteModel {
                         slug: "bare".into(),
+                        ..Default::default()
+                    },
+                    // 会推理但没有档位（xAI 的 grok-4.20-reasoning）。
+                    RemoteModel {
+                        slug: "no-levels".into(),
+                        reasoning_efforts: Some(vec![]),
+                        reasoning: Some(true),
+                        ..Default::default()
+                    },
+                    // 不推理的模型（grok-4.20-non-reasoning）。
+                    RemoteModel {
+                        slug: "plain".into(),
+                        reasoning: Some(false),
                         ..Default::default()
                     },
                 ],
@@ -169,7 +186,7 @@ mod tests {
         // 开关是环境变量：拿着环境锁读，别被同进程里改它的测试干扰。
         let _env = crate::test_env::scoped().remove("DOCK_CHATGPT_SUBSCRIPTION");
         let list = catalog_entries(&cache());
-        assert_eq!(list.len(), 2);
+        assert_eq!(list.len(), 4);
         let luna = &list[0];
         assert_eq!(luna.id, "chatgpt/gpt-6-luna");
         assert_eq!(luna.name, "GPT-6-Luna");
@@ -194,6 +211,20 @@ mod tests {
         assert_eq!(bare.name, "bare");
         assert_eq!(bare.reasoning, None);
         assert_eq!(bare.reasoning_efforts, None);
+        assert_eq!(bare.effort_choices(), crate::config::DEFAULT_EFFORT_CHOICES);
+
+        // 明说「没有档位」：菜单是空的，不能退回通用四档（以前空列表被当成「不知道」）。
+        let no_levels = &list[2];
+        assert_eq!(no_levels.reasoning, Some(true));
+        assert_eq!(no_levels.reasoning_efforts, Some(vec![]));
+        assert!(no_levels.supports_reasoning());
+        assert!(no_levels.effort_choices().is_empty());
+
+        // 不推理的模型：不发推理字段、没有档位。
+        let plain = &list[3];
+        assert_eq!(plain.reasoning, Some(false));
+        assert!(!plain.supports_reasoning());
+        assert!(plain.effort_choices().is_empty());
     }
 
     /// 订阅通道被开关关掉时，它自动发现的模型不进目录（审阅 #282 第 7 条）：
@@ -204,7 +235,10 @@ mod tests {
         assert!(catalog_entries(&cache()).is_empty());
         drop(_env);
         let _env = crate::test_env::scoped().remove("DOCK_CHATGPT_SUBSCRIPTION");
-        assert_eq!(catalog_entries(&cache()).len(), 2);
+        assert_eq!(
+            catalog_entries(&cache()).len(),
+            cache().providers["chatgpt"].models.len()
+        );
     }
 
     #[test]

@@ -1303,6 +1303,8 @@ fn parse_models(v: &Value) -> Vec<RemoteModel> {
                 reasoning_efforts: efforts,
                 default_reasoning_effort: text(m, "default_reasoning_level"),
                 supports_images: images,
+                // 上游不单独说会不会推理：列了档位就是会（见目录合并）。
+                reasoning: None,
                 slug,
             })
         })

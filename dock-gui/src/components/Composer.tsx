@@ -24,6 +24,8 @@ import { useComposerItems, useThreadWatchers } from "../features/registry";
 import { ImageViewer } from "./ImageViewer";
 import { MAX_IMAGES, describeImage, prepareImage } from "./imageInput";
 import { MenuButton } from "./Popover";
+import { PlanUsageBadge } from "./PlanUsage";
+import { refreshPlanUsage, usePlanUsage } from "../dock/planUsage";
 import { imeComposing } from "../dock/ime";
 
 const MAX_HEIGHT = 200;
@@ -32,12 +34,24 @@ const APPROVAL = [
   { id: "ask", label: "请求批准", hint: "逐次确认" },
   { id: "auto", label: "自动批准", hint: "不再询问" },
 ];
-const EFFORT: Record<string, string> = { "": "默认", none: "关", minimal: "极低", low: "低", medium: "中", high: "高", xhigh: "极高" };
+const EFFORT: Record<string, string> = {
+  "": "默认",
+  none: "关",
+  minimal: "极低",
+  low: "低",
+  medium: "中",
+  high: "高",
+  xhigh: "极高",
+  max: "最高",
+  ultra: "极致",
+};
 
-/** 用量页（官方指定的「Manage usage」入口）。 */
-const USAGE_URL = "https://chatgpt.com/settings/usage";
-/** 订阅通道的 provider id → 标识上的名字（官方原文是「Using ChatGPT plan」）。 */
-const planName = (provider?: string | null) => (provider === "chatgpt" ? "ChatGPT" : (provider ?? ""));
+/** 用量页（ChatGPT 官方指定的「Manage usage」入口）。Grok 没有公开的固定用量页。 */
+const USAGE_URLS: Record<string, string> = { chatgpt: "https://chatgpt.com/settings/usage" };
+/** 订阅通道的 provider id → 标识上的名字（ChatGPT 官方原文是「Using ChatGPT plan」）。 */
+const PLAN_NAMES: Record<string, string> = { chatgpt: "ChatGPT", grok: "Grok" };
+const planName = (provider?: string | null) => (provider ? (PLAN_NAMES[provider] ?? provider) : "");
+const usageUrl = (provider?: string | null) => (provider ? USAGE_URLS[provider] : undefined);
 
 export interface ComposerActions {
   /** 成功回 true，输入框才清空（失败时文字和图都留着，改改再发）。 */
@@ -121,6 +135,15 @@ export function Composer({
   const fileRef = useRef<HTMLInputElement>(null);
   // 当前模型是不是走订阅通道（`auth = "chatgpt"`）。是就标出「Using ChatGPT plan」（官方 UI 规范）。
   const planModel = settings.models.find((m) => m.id === settings.modelId && m.authProvider);
+  // 查得到额度的（Grok）：标识换成剩余额度的小圆环；查不了的（ChatGPT）照旧「Using … plan」。
+  const planProvider = planModel?.authProvider ?? null;
+  const planUsage = usePlanUsage(planProvider);
+  // 一轮跑完：额度多半变了，重查一次（最短间隔由 planUsage 管）。
+  const wasRunning = useRef(running);
+  useEffect(() => {
+    if (wasRunning.current && !running && planProvider) void refreshPlanUsage(planProvider);
+    wasRunning.current = running;
+  }, [running, planProvider]);
 
   // 别的面板填进来的话（如浏览器面板的示例）：换掉当前草稿并聚焦，不发送。
   useEffect(
@@ -586,13 +609,22 @@ export function Composer({
               }
             />
           )}
-          {/* 走订阅通道的模型：官方要求标出「Using ChatGPT plan」，并给用量页入口（Manage usage）。 */}
-          {planModel && (
+          {/* 查得到额度：剩余额度圆环，点开是详情卡。 */}
+          {planModel && planProvider && planUsage.usage && (
+            <PlanUsageBadge provider={planProvider} providerName={planName(planProvider)} state={planUsage} />
+          )}
+          {/* 走订阅通道的模型：标出「Using … plan」；有用量页的（ChatGPT）点它打开（Manage usage）。 */}
+          {planModel && !planUsage.usage && (
             <button
               type="button"
-              title={`请求用的是 ${planName(planModel.authProvider)} 套餐额度 · Manage usage`}
+              title={`请求用的是 ${planName(planModel.authProvider)} 套餐额度${
+                usageUrl(planModel.authProvider) ? " · Manage usage" : ""
+              }`}
               className="flex h-7 shrink-0 items-center gap-1 rounded-full bg-[#f5f5f7] px-2.5 text-xs font-medium text-ink-3 hover:bg-[#ececf0]"
-              onClick={() => void openUrl(USAGE_URL).catch(() => window.open(USAGE_URL, "_blank", "noopener"))}
+              onClick={() => {
+                const url = usageUrl(planModel.authProvider);
+                if (url) void openUrl(url).catch(() => window.open(url, "_blank", "noopener"));
+              }}
             >
               <span className="hidden @[30rem]:inline">Using {planName(planModel.authProvider)} plan</span>
               <span className="@[30rem]:hidden">套餐</span>

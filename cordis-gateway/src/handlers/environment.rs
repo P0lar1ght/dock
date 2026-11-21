@@ -38,19 +38,21 @@ pub fn set_reasoning(gateway: &GatewayHandle, params: Value) -> Result<Value, Rp
         .ok_or_else(|| RpcError::invalid_params("effort is required"))?;
     let page = threads::resolve_param(gateway, &params)?;
     let settings = settings(&page.ctx)?;
+    let choices = settings.effort_choices();
     match effort {
         "none" => {
             settings.set_thinking(false);
             settings.set_effort("none");
         }
-        "minimal" | "low" | "medium" | "high" | "xhigh" | "max" => {
+        effort if accepts_effort(effort, &choices) => {
             settings.set_thinking(true);
             settings.set_effort(effort);
         }
         _ => {
-            return Err(RpcError::invalid_params(
-                "effort must be none, low, medium, high, or similar",
-            ))
+            return Err(RpcError::invalid_params(format!(
+                "这个模型没有「{effort}」这一档（可选：none、{}）",
+                choices.join("、")
+            )))
         }
     }
     // 切了就落盘：会话下次开还是这一档。
@@ -301,17 +303,22 @@ fn environment_fields(ctx: &Context) -> Result<serde_json::Map<String, Value>, R
             "options": ["ask", "auto"]
         }),
     );
+    // 推理档位跟着当前模型走（以前写死 none/low/medium/high，GUI 里每个模型都一样）。
+    let reasoning_on = settings.reasoning_available();
+    let subscription =
+        cordis_base::config::lookup_model(&model).is_some_and(|c| c.auth_provider().is_some());
+    let effort_options = effort_menu(reasoning_on, settings.effort_choices(), subscription);
     map.insert(
         "reasoning".into(),
         json!({
-            "supported": true,
+            "supported": reasoning_on,
             "effort": if settings.thinking() {
                 settings.effort()
             } else {
                 "none".into()
             },
-            "canChange": true,
-            "options": ["none", "low", "medium", "high"]
+            "canChange": !effort_options.is_empty(),
+            "options": effort_options
         }),
     );
     map.insert("goal".into(), goal_object(ctx));
@@ -370,4 +377,68 @@ fn environment_fields(ctx: &Context) -> Result<serde_json::Map<String, Value>, R
     }
     map.insert("context".into(), context);
     Ok(map)
+}
+
+/// 推理菜单列哪几档：当前模型声明的档位，前面加「关」（none）。
+///
+/// - 不推理的模型、或会推理但明说没有档位的（`reasoning_efforts = []`）：空菜单；
+/// - 订阅模型的档位来自上游 / 模型目录：列表里有 `none` 才给「关」——不收 none 的模型
+///   （grok-4.6）给了也关不掉；
+/// - 自己配的模型照旧总给「关」：DeepSeek 这类用单独的开关关推理，不在档位表里。
+fn effort_menu(reasoning_on: bool, choices: Vec<String>, subscription: bool) -> Vec<String> {
+    if !reasoning_on || choices.is_empty() {
+        return Vec::new();
+    }
+    let mut menu = Vec::with_capacity(choices.len() + 1);
+    if !subscription && !choices.iter().any(|c| c == "none") {
+        menu.push("none".to_string());
+    }
+    menu.extend(choices);
+    menu
+}
+
+/// `thread/reasoning/set` 认不认这一档：当前模型声明过的都认（`ultra` 这种也行）；
+/// 老客户端发的那几档通用值照旧认（不认得的模型档位，推理层会去掉重发）。
+fn accepts_effort(effort: &str, choices: &[String]) -> bool {
+    const COMMON: &[&str] = &["minimal", "low", "medium", "high", "xhigh", "max"];
+    choices.iter().any(|c| c == effort) || COMMON.contains(&effort)
+}
+
+#[cfg(test)]
+mod effort_tests {
+    use super::*;
+
+    fn v(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn the_menu_follows_the_model() {
+        // ChatGPT 订阅：上游给的就是这些，没有 none 就不给「关」。
+        assert_eq!(
+            effort_menu(true, v(&["low", "medium", "high", "xhigh", "max"]), true),
+            v(&["low", "medium", "high", "xhigh", "max"])
+        );
+        // 订阅模型列了 none：照列。
+        assert_eq!(
+            effort_menu(true, v(&["none", "low", "high"]), true),
+            v(&["none", "low", "high"])
+        );
+        // 自己配的模型（deepseek-flash）：前面加「关」。
+        assert_eq!(
+            effort_menu(true, v(&["low", "high", "max"]), false),
+            v(&["none", "low", "high", "max"])
+        );
+        // 会推理但没有档位、不推理：空菜单。
+        assert!(effort_menu(true, vec![], true).is_empty());
+        assert!(effort_menu(false, v(&["low"]), false).is_empty());
+    }
+
+    #[test]
+    fn set_accepts_the_models_own_levels() {
+        let terra = v(&["low", "medium", "high", "xhigh", "max", "ultra"]);
+        assert!(accepts_effort("ultra", &terra), "模型自己声明的档位要认");
+        assert!(accepts_effort("high", &v(&["low"])), "通用值照旧认");
+        assert!(!accepts_effort("turbo", &terra));
+    }
 }

@@ -56,7 +56,7 @@
 | `/new` | 归档当前会话并清空。账本用量一并清零。归档写入 `$DOCK_HOME/sessions/<cwd>/` |
 | `/model` `/m` | 切换当前模型。**目录只来自 config.toml**，没写就是空的（会提示去 `config.toml.example` 抄）——内置那几条没端点的假条目已删。目录 `[model.<id>].api_backends`（列表，第一条=默认；单数 `api_backend`=只支持这一条；**都不写默认 `responses`**）声明这个端点支持哪几条 HTTP 线，声明多条时 picker 里会带出来；`api_model` 是发给上游的 slug（省略=目录 id）；`auth_scheme` 不写就跟着当前协议走（messages→`x-api-key`，另两条→Bearer；第三方网关的 /messages 多半仍要 `bearer`）。同一端点各协议入口不同时写协议块 `[model."<id>".<协议>]`，只覆盖连接三件套 `api_base_url` / `auth_scheme` / `api_model`（DeepSeek 的 Anthropic 侧是 `…/anthropic`）。能力与默认值不随协议变，只写模型级：`context_window` / `max_output_tokens` / `reasoning` / `reasoning_effort` / `reasoning_efforts` / `supports_images` / `prompt_cache`，**不写就不发那个参数**。切模型会按新模型重新播种推理默认值与协议 |
 | `/protocol`（`proto` `wire`） | 在**当前模型声明过的**协议之间切（`responses` / `chat_completions` / `messages`）。空参数或名字打错开 picker，不猜一条发出去；切到没声明的那条会被挡下并提示去 config 里补 `api_backends`。一个端点同时开着 /responses 和 /chat/completions 时用这个，不用再配一个只有协议不同的重复模型条目。运行时状态，不落盘；`/model` 换模型即按新模型的默认重新播种。浏览器 companion 也支持：空参数回一条 notice 列出可选协议 |
-| `/auth` | 订阅通道（ChatGPT 套餐）：`login` / `logout` / `cancel` / `status` / `list` / `use` / `models` / `import`。**不带参数 = 直接开始登录**（打开官方授权页；本地 `127.0.0.1` 回环 + PKCE，登录在后台跑，不占着命令，完成后弹一条提示；同一家同时只跑一个登录，再发起一次 = 换成新的，`/auth cancel` 中断）。`/auth login` 默认重新登录活动账号（登出了也复用它原来的注册），`/auth login new` 再加一个账号，`/auth login <账号>` 指定账号，`identity` = 只要身份不要套餐额度。凭据存 `$DOCK_HOME/credentials/chatgpt/<client_id>.json`（0600，目录 0700），本机 host id 在 `$DOCK_HOME/host_id`。`/auth logout [账号]` 撤销 refresh token、清本地 token，**注册留着**（官方：登出不删已注册的 client）。`/auth use <账号>` 只能切到还登着的账号。**登录后活动账号能用的模型自动并入模型目录**（`chatgpt/<slug>`，存 `$DOCK_HOME/auth_models.json`；切账号重拉、登出 / 没开套餐额度就拿掉，`/auth models` 手动重拉并列出 id；config 里同 id 的 `[model."chatgpt/<slug>"]` 可以逐字段覆盖）。手写的模型条目写了 `auth = "chatgpt"` 也走这条通道（不写照旧走 `api_key` / `env_key`；两者不能同时写）。`/auth import <文件> [provider]` 是 VPS 场景：本地登录后把凭据传过去，远端用它自己的 host_id 接管刷新。整个通道可以用 `DOCK_CHATGPT_SUBSCRIPTION=off` 关掉 |
+| `/auth` | 订阅通道（ChatGPT 套餐；Grok 订阅见下）：`login` / `logout` / `cancel` / `status` / `list` / `use` / `models` / `import`。**不带参数 = 直接开始登录**（打开官方授权页；本地 `127.0.0.1` 回环 + PKCE，登录在后台跑，不占着命令，完成后弹一条提示；同一家同时只跑一个登录，再发起一次 = 换成新的，`/auth cancel` 中断）。`/auth login` 默认重新登录活动账号（登出了也复用它原来的注册），`/auth login new` 再加一个账号，`/auth login <账号>` 指定账号，`identity` = 只要身份不要套餐额度。凭据存 `$DOCK_HOME/credentials/chatgpt/<client_id>.json`（0600，目录 0700），本机 host id 在 `$DOCK_HOME/host_id`。`/auth logout [账号]` 撤销 refresh token、清本地 token，**注册留着**（官方：登出不删已注册的 client）。`/auth use <账号>` 只能切到还登着的账号。**登录后活动账号能用的模型自动并入模型目录**（`chatgpt/<slug>`，存 `$DOCK_HOME/auth_models.json`；切账号重拉、登出 / 没开套餐额度就拿掉，`/auth models` 手动重拉并列出 id；config 里同 id 的 `[model."chatgpt/<slug>"]` 可以逐字段覆盖）。手写的模型条目写了 `auth = "chatgpt"` 也走这条通道（不写照旧走 `api_key` / `env_key`；两者不能同时写）。`/auth import <文件> [provider]` 是 VPS 场景：本地登录后把凭据传过去，远端用它自己的 host_id 接管刷新。整个通道可以用 `DOCK_CHATGPT_SUBSCRIPTION=off` 关掉 |
 | `/resume` | 打开会话 picker，恢复本工作区已落盘的会话（进程重启后仍在）。模型与推理强度切回那个会话记的（模型已不在 `config.toml` 目录里就不切）。用量账本不随归档恢复（Grok：新进程 resume 清零）。进程入口 `--resume` / `--resume <id>` 启动时直接恢复 |
 | `/pair`（`pairing`） | 浏览器 Origin 配对：第一行开启/关闭回环网关（默认不监听；首选 `127.0.0.1:18991`，占用往上找，同端口再试 `[::1]`）。开启后待批请求可批准，已绑来源可撤销。overlay 显示实际监听地址。首次连接弹出「允许浏览器连接？」；Enter 批准 / `x` 拒绝或撤销（在网关行上 `x` 关闭监听）。浏览器 companion 的 list/execute 限制见上文。CORS 反射任意 Origin：鉴权靠配对 + 回环。Approved 的 poll **不**回 ticket 明文；`POST /v1/pairing/exchanges` 校验 TTL、一次性消费 |
 | `/loop` `/cron` | 空命令在输入框留下用法（`用法: /loop [间隔] <提问>` + `/loop `）。有参数则用户气泡是 `/loop {参数}`，模型看到 `loop_schedule_instruction`（须 `scheduler_create`，`fire_immediately: true`，不要当场执行提问）。没有间隔就问用户，不要自己编。任务属于这个会话、落盘跨重启继续跑（到点时会话关着就后台开页），7 天后自动过期。查看 / 关闭：`/tasks` Watchers，`x` 或 `[✗]` |
@@ -93,7 +93,7 @@
 | `/remember` / `/remember <note>` | 无参留下用法；有参写一条 global observation |
 | `/theme` `/t` | 切换配色 |
 | `/timestamps` | 开关滚动区时间戳 |
-| `/effort` | 设置推理强度。**菜单来自当前模型的 `[model.<id>].reasoning_efforts`**，不写才列通用四档（low / medium / high / xhigh），写 `[]` 表示会推理但不接受档位参数（菜单空着、永不发 effort）——各家认识的档位不一样，列死一份会让人选到上游不认的值。不选就用 `reasoning_effort`，那个也没写就不发这个参数（上游默认）。`reasoning = false` 的模型这一项与 `/think` 都置灰，菜单只给一条说明、回车不会填进输入框 |
+| `/effort` | 设置推理强度（桌面端菜单同源，见下）。**菜单来自当前模型的 `[model.<id>].reasoning_efforts`**，不写才列通用四档（low / medium / high / xhigh），写 `[]` 表示会推理但不接受档位参数（菜单空着、永不发 effort）——各家认识的档位不一样，列死一份会让人选到上游不认的值。不选就用 `reasoning_effort`，那个也没写就不发这个参数（上游默认）。`reasoning = false` 的模型这一项与 `/think` 都置灰，菜单只给一条说明、回车不会填进输入框 |
 | `/export [path]` | 把对话导出到文件 |
 | `/cd` | 切换**当前这一页**的工作目录：相对路径按这页的 cwd 展开，之后这页的工具、`AGENTS.md`、状态栏、`@` 补全、`/lsp`、会话面板都按新目录走；别的页与进程 cwd 不动，从这页开出的新分页继承它。项目级 `.dock/config.toml`、skills、动态插件只认**启动目录**——目标目录里有这些时 flash 会注明「只在启动目录生效」。只在 Dock 终端生效；浏览器 companion 会拒绝 |
 | `/help` | 显示斜杠命令 |
@@ -111,6 +111,25 @@
 - 输入框下沿计时器旁标「正在压缩」。
 - 完成那行：自动的写「上下文已自动压缩」，这次进程里看着压完的带 `· 182K → 21K`。
   - 重开历史只剩「✓ 上下文已压缩」，前后占用不落盘。
+
+推理档位从哪来（终端 `/effort` 与桌面端输入框旁的「推理」菜单同一份）：
+
+- 自己配的模型：`[model.<id>].reasoning_efforts`；不写是通用档位 low / medium / high / xhigh。
+- 桌面端从 models.dev 目录开模型时照目录写好（DeepSeek：low / high / max）；已配的用「按目录补全推理档位」或编辑页「按目录填」。
+- ChatGPT 订阅：上游 `/v1/models` 给的（如 low…max、ultra）；Grok 订阅：按 models.dev 的 xai 条目（grok-4.6 是 low…xhigh）。
+- 桌面端菜单前面的「关」：自己配的模型总有；订阅模型只有档位表里有 none 才有。
+
+`/auth` 的 Grok 订阅（SuperGrok / X Premium）：
+
+- provider id 是 `grok`：`/auth login grok`、`/auth models grok`、`/auth logout grok`。
+- 登录走 device code：打开填好用户码的 xAI 授权页，提示里也报出用户码。
+  - 不起回环监听，VPS / SSH 上一样用（在任何设备上打开那个地址就行）。
+  - Dock 最多等 10 分钟；`/auth cancel grok` 中断。
+- 登录后模型自动并入目录：`grok/<slug>`（如 `grok/grok-4.6`），推理打 `https://api.x.ai/v1/responses`。
+- 凭据存 `$DOCK_HOME/credentials/grok/<账号>.json`（按 xAI 账号 id 分文件，0600）。
+- `/auth logout <账号|grok>`：给 `grok` 就是 Grok 的活动账号。
+- `/auth usage [grok]`：订阅额度还剩多少（本周期已用 / 剩余百分比、多久后重置）；没写 provider 就列每一家登着的。
+- `DOCK_GROK_SUBSCRIPTION=off` 关掉整个通道。细节见 `docs/GROK-SUBSCRIPTION.md`。
 
 `/browser` 细节：
 

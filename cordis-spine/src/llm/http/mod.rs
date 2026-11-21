@@ -373,7 +373,8 @@ async fn sample_http(
     let cancel = turn.as_ref().map(|t| t.token());
     // 三种重试各有各的预算，互不挤占：
     // - 传输失败 / 503：最多 3 次（`attempt`）；
-    // - 订阅通道 401：换一份 token 重发**一次**——换完还 401 就是账号本身的问题；
+    // - 订阅通道 401（或 provider 认作 token 失效的 403）：换一份 token 重发
+    //   **一次**——换完还被拒就是账号本身的问题；
     // - 订阅通道 400 `…_unsupported_capability`：按 `error.param` 去掉那一项再发
     //   （官方：去掉再重试，但**绝不原样重发**），最多 [`MAX_STRIP_RETRIES`] 次。
     let mut attempt = 0u32;
@@ -430,9 +431,13 @@ async fn sample_http(
                     ..LlmOutput::default()
                 };
             }
-            // 401：token 不好使了。问 provider「换一份还是放弃」——换到了就用新
-            // 的重发一次。
-            Ok(r) if r.status().as_u16() == 401 && !auth_retried && subscription.is_some() => {
+            // 401（有的通道是 403）：token 不好使了。问 provider「换一份还是放弃」
+            // ——换到了就用新的重发一次。
+            Ok(r)
+                if matches!(r.status().as_u16(), 401 | 403)
+                    && !auth_retried
+                    && subscription.is_some() =>
+            {
                 auth_retried = true;
                 let Some(sub) = subscription.as_mut() else {
                     break r;
@@ -443,13 +448,25 @@ async fn sample_http(
                 let Some(provider) = provider else {
                     break r;
                 };
+                // 是不是 token 失效要看 body（xAI 的 403 既可能是 token 校验不过，
+                // 也可能是套餐档位不够）。body 读出来就没了：不是就在这里把错报完。
+                let status = r.status();
+                let request_id = response_request_id(r.headers());
+                let text = r.text().await.unwrap_or_default();
+                let give_up = || {
+                    let classified = provider.classify(status.as_u16(), text.as_bytes());
+                    http_error_output(status, request_id.clone(), &text, classified)
+                };
+                if !provider.token_rejected(status.as_u16(), text.as_bytes()) {
+                    return give_up();
+                }
                 match provider.on_unauthorized(&sub.lease).await {
                     Ok(cordis_base::auth::Retry::WithLease(fresh)) => {
                         api_key = fresh.bearer.clone();
                         sub.bearer = fresh.bearer.clone();
                         sub.lease = fresh;
                     }
-                    Ok(cordis_base::auth::Retry::GiveUp) => break r,
+                    Ok(cordis_base::auth::Retry::GiveUp) => return give_up(),
                     // 刷新只是网络抖了：照实说，别叫用户重新登录。
                     Err(e) => {
                         return LlmOutput {
@@ -888,10 +905,10 @@ async fn resolve_subscription(
     };
     let Some(provider) = manager.provider(provider_id) else {
         // 开关关掉是最常见的一种「没装」：给一句能照着做的提示。
-        if crate::auth::subscription_disabled() {
+        if cordis_base::auth::subscription_disabled(provider_id) {
             return Err(format!(
                 "订阅通道被开关关掉了（{} = off）：这条模型改用 api_key，或把开关放开。",
-                crate::auth::SUBSCRIPTION_ENV
+                cordis_base::auth::subscription_env(provider_id)
             ));
         }
         return Err(format!(

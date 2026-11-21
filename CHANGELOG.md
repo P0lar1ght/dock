@@ -58,6 +58,11 @@
 
 ### 修复
 
+- **桌面端的推理强度菜单每个模型都一样**：网关把档位写死成 none / low / medium / high，ChatGPT 的 xhigh / max / ultra、自己配的 `reasoning_efforts`（如 DeepSeek 的 max）在桌面端都选不到，终端 `/effort` 却是对的。现在两边同一份：当前模型的档位，前面加「关」（订阅模型只有档位表里有 none 才给「关」）；明说没有档位的模型不显示菜单。切档也认模型自己声明的值（如 `ultra`）。
+  - 从 models.dev 目录开模型时把推理档位写进 `reasoning_efforts`（以前漏写，一律通用档位）；已配的模型在供应商卡片上「按目录补全推理档位」，编辑页「按目录填」。目录缓存升了版本，会重拉一次。
+  - 编辑页的「可选档位」补上 none / minimal / max（以前只有 low / medium / high / xhigh，手动也勾不出 max）。
+- **全新安装时先登录订阅，不用重启就能用**：以前启动时目录里一个模型都没有（没写 config、还没登录），Dock 就定死用离线的假采样器；之后 `/auth login` 登上了、模型也出现在 `/model` 里，发出去的话收到的却是假回复（`no workspace tool for: …`），要重启才好。现在每次采样都再看一眼目录，有能连的模型就走真的请求。ChatGPT 和 Grok 两条订阅通道都受益。
+- 订阅通道的「token 失效、换一份重试」以前只认 401；provider 现在能自己认（Grok 的 token 校验不过回的是 403 `unauthenticated:*`）。
 - **hooks / 插件定时器遇到超大秒数不再 panic**：hooks 在项目确认前解析 `timeout: 1e20` / `1e308` 时改用可失败的转换，最多 24 小时；正数超限或换算后不足 1 纳秒的命令跳过并记警告。`host.every` / `host.after` 最多 30 天，超限返回脚本错误，不占定时器名额。不改项目 hooks 的信任流程。
 
 - **插件里的确认框弹在发起调用的那一页**：插件脚本里 `host.call_tool`（比如调 `bash`）和 `http_request` 的确认以前取插件所在的根页，桌面 GUI 里那一页没人看，调用一直挂着（实测会话里 `bash git status` 挂了 307 秒、调 FOFA 挂了 95 秒，用户反馈「卡住了，没有弹框」）。现在落在发起调用的会话页上。
@@ -82,6 +87,19 @@
 
 ### 新增
 
+- **Grok 订阅通道（SuperGrok / X Premium）**：登录 xAI 账号后，模型用订阅额度推理，不需要 API key。
+  - 和 xAI 点名接入的 OpenCode、Kilo Code 走同一条路：`auth.x.ai` 的 OAuth，推理打公开 API `https://api.x.ai/v1/responses`。
+  - 不打 Grok Build 自用的 `cli-chat-proxy.grok.com`，不带它的身份头，不读 `~/.grok/auth.json`。
+  - 登录：`/auth login grok`，走 device code（不起回环监听，VPS 上一样用）；`/auth logout grok`、`/auth models grok`。
+  - 登录后 `grok/<slug>` 模型自动出现在 `/model` 里（上下文长度、能否收图取上游给的）。
+  - 带 `prompt_cache_key`（取会话 id）：实测后续请求 34 次中 27 次命中，命中时约占输入的 95% 以上；不带只中 1/3。
+  - 推理档位按 models.dev 的 xai 条目填：grok-4.6 是 low…xhigh（没有 max），grok-4.20-reasoning 不列档位，non-reasoning 不发推理字段。
+  - 模型仍不收某一档时（目录过时、拉不到目录），去掉 `reasoning.effort` 重发一次并记住。
+  - 凭据存 `$DOCK_HOME/credentials/grok/<账号>.json`（0600）。`DOCK_GROK_SUBSCRIPTION=off` 关掉整个通道。
+  - **剩余额度**：终端 `/auth usage`；桌面端输入框旁是剩余额度的小圆环（点开看详情），设置 › 模型 › 订阅通道里有一张额度卡（水球、剩余 / 已用、多久后重置、计费周期）。
+    - 公开 API 查不到订阅额度，只读查 Grok Build 自用后端的 `/billing?format=credits`（只带 Bearer，推理仍走 `api.x.ai`）。
+    - 上游只给百分比，界面上不编 token 数。网关新方法 `auth/usage`（只认受信连接）。
+  - 实测记录见 `docs/GROK-SUBSCRIPTION.md`。
 - **插件脚本能力补强**：
   - `host.call_tool_result(name, args)`：同 `host.call_tool`，但回 `#{ name, text, json, is_error, images }`——知道这次调用是不是失败了（被拒、被拦、报错、非零退出），工具回的是 JSON 时直接拿到解析好的值。插件要读文件、抓网页、操作浏览器、调 MCP 服务器，直接调对应的工具就行，不用等新的宿主函数。`host.call_tool` 不变。
   - 脚本里多了两个只做计算的 Rhai 生态包：`rhai-url`（`Url("…")` 解析、改查询参数）和 `rhai-rand`（随机数、打乱、抽样）。读写文件、发请求这类包没有加——它们会绕过权限门。

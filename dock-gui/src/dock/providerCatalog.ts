@@ -7,10 +7,18 @@
 import { useEffect, useState } from "react";
 import { EMPTY_MODEL, providerCatalogFetch, type ModelEntry } from "./settingsApi";
 
+/** 推理能力：`{ type: "effort", values: ["low", …, "max"] }`、`{ type: "toggle" }`（能关推理）。 */
+export interface ReasoningOption {
+  type: string;
+  values?: string[];
+}
+
 export interface CatalogModel {
   id: string;
   name?: string;
   reasoning?: boolean;
+  /** 推理档位（Dock 0.3 起才带；更早的目录缓存里没有）。 */
+  reasoning_options?: ReasoningOption[];
   tool_call?: boolean;
   attachment?: boolean;
   modalities?: { input?: string[]; output?: string[] };
@@ -32,7 +40,9 @@ export interface CatalogProvider {
 
 export type Catalog = Record<string, CatalogProvider>;
 
-const CACHE_KEY = "dock.providerCatalog";
+/** v3：带上推理档位（reasoning_options）、留着下架的模型。旧缓存换个键重拉一次。 */
+const CACHE_KEY = "dock.providerCatalog.v3";
+const OLD_CACHE_KEYS = ["dock.providerCatalog", "dock.providerCatalog.v2"];
 
 interface CatalogState {
   catalog: Catalog;
@@ -46,6 +56,7 @@ const listeners = new Set<() => void>();
 
 function readCache(): CatalogState | null {
   try {
+    for (const old of OLD_CACHE_KEYS) localStorage.removeItem(old);
     const raw = localStorage.getItem(CACHE_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as CatalogState;
@@ -88,7 +99,7 @@ async function fetchCatalog(): Promise<CatalogState> {
   // 只留连得上的供应商和能用的模型：整份三四 MB，localStorage 放不下。
   const slim: Catalog = {};
   for (const p of supportedProviders(catalog as Catalog)) {
-    slim[p.id] = { ...p, models: Object.fromEntries(usableModels(p).map((m) => [m.id, m])) };
+    slim[p.id] = { ...p, models: Object.fromEntries(storedModels(p).map((m) => [m.id, m])) };
   }
   const next = { catalog: slim, fetchedAt: Date.now() };
   try {
@@ -214,6 +225,14 @@ export function providerIdFor(base: string, taken: string[]): string {
 
 // ---- 模型 ----
 
+/** 存进缓存的：会调工具、出文字。**下架的也留着**——已经配了的模型可能后来才下架，
+ *  「按目录补全推理档位」还要找得到它；选模型的列表照旧用 [`usableModels`] 滤掉。 */
+function storedModels(p: CatalogProvider): CatalogModel[] {
+  return Object.values(p.models ?? {})
+    .filter((m) => m && m.id && m.tool_call !== false)
+    .filter((m) => !m.modalities?.output || m.modalities.output.includes("text"));
+}
+
 /** 能当 Agent 用的：会调工具、出文字、没下架。 */
 export function usableModels(p: CatalogProvider): CatalogModel[] {
   return Object.values(p.models ?? {})
@@ -251,7 +270,55 @@ export function modelEntryFor(
     contextWindow: m?.limit?.context || info.contextWindow || null,
     maxOutputTokens: backends[0] === "messages" ? m?.limit?.output || null : null,
     reasoning: m?.reasoning === false ? false : null,
+    // 目录里有档位就照抄（`/effort` 菜单才列得对）；目录没说就不写，用通用档位。
+    reasoningEfforts: catalogEfforts(m),
     supportsImages: m?.modalities?.input ? (m.modalities.input.includes("image") ? null : false) : null,
     pricing: pricing && Object.values(pricing).some((v) => v !== null) ? pricing : null,
   };
+}
+
+/**
+ * 目录里这个模型的推理档位，写进 `reasoning_efforts` 用。
+ * - 有 `effort` 那一项：就是它的 values（DeepSeek：low / high / max）；
+ * - 会推理、但目录明写没有任何档位（`reasoning_options: []`）：`[]`（菜单不列）；
+ * - 目录没说、只有 `toggle`（只能开关）、或不推理：`null`（不写，用通用档位）。
+ */
+export function catalogEfforts(m: CatalogModel | undefined): string[] | null {
+  if (!m || m.reasoning === false || !Array.isArray(m.reasoning_options)) return null;
+  const effort = m.reasoning_options.find((o) => o?.type === "effort");
+  if (effort) {
+    const values = (effort.values ?? []).filter((v): v is string => typeof v === "string" && !!v.trim()).map((v) => v.trim());
+    return values;
+  }
+  return m.reasoning_options.length === 0 ? [] : null;
+}
+
+/** 两份档位表一样（null 和 null 算一样）。 */
+export function sameEfforts(a: string[] | null, b: string[] | null): boolean {
+  if (a === null || b === null) return a === b;
+  return a.length === b.length && a.every((x, i) => x === b[i]);
+}
+
+/**
+ * 按目录给一个已配的模型找推理档位：按上游模型名在各供应商里找。
+ * 同名的有好几家：地址和它的接口地址同一个 host 的优先；各家档位都一样也行；否则算认不准。
+ */
+export function catalogEffortsFor(
+  catalog: Catalog,
+  upstream: string,
+  apiBaseUrl: string | null,
+): { efforts: string[] | null; source: string } | "ambiguous" | null {
+  const host = apiBaseUrl ? safeHost(apiBaseUrl.trim()) : "";
+  const hits: { provider: CatalogProvider; efforts: string[] | null }[] = [];
+  for (const p of Object.values(catalog)) {
+    const m = p?.models?.[upstream];
+    if (!m) continue;
+    const efforts = catalogEfforts(m);
+    if (efforts !== null) hits.push({ provider: p, efforts });
+  }
+  if (hits.length === 0) return null;
+  const sameHost = host ? hits.find((h) => connectionFor(h.provider) && safeHost(connectionFor(h.provider)!.apiBaseUrl) === host) : undefined;
+  if (sameHost) return { efforts: sameHost.efforts, source: sameHost.provider.name };
+  if (hits.every((h) => sameEfforts(h.efforts, hits[0].efforts))) return { efforts: hits[0].efforts, source: hits[0].provider.name };
+  return "ambiguous";
 }

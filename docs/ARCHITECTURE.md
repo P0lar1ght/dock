@@ -81,8 +81,8 @@ config.toml.example      用户 / 项目模型目录样例
 
 订阅通道（`[model.<id>].auth = "chatgpt"`）走同一条线：类型与 trait 在
 `cordis-base/src/auth.rs`（`Lease` / `WirePolicy` / `AuthProvider`），服务本体在
-`cordis-spine/src/auth/`（named service `"auth"`）。provider 插件（`chatgpt-auth`）
-把自己注册进 `"auth"`，采样侧只经它拿短期 access token——**refresh token 不出
+`cordis-spine/src/auth/`（named service `"auth"`）。provider 插件（`chatgpt-auth`、
+`grok-auth`）把自己注册进 `"auth"`，采样侧只经它拿短期 access token——**refresh token 不出
 provider**，子代理与 workflow 也拿不到。通道对请求体的硬约束（`store: false`、
 system 走 `instructions`、上游不收的字段）写成 `WirePolicy` 数据，由
 `responses.rs` 统一改写；没写 `auth` 的模型请求体与以前逐字节相同。

@@ -30,8 +30,9 @@ pub use agent::presets::{
 pub use agent::runtime::{BoxFuture, Driver, GrokStep, LoopHandle};
 pub use agent::turn::{steer, turn, TurnControl};
 pub use auth::{
-    auth_commands, auth_manager, chatgpt_auth, chatgpt_policy, register_provider, AuthManager,
-    BrowserLoginUi, ChatGptProvider, Credential, CredentialStore, LoginState,
+    auth_commands, auth_manager, chatgpt_auth, chatgpt_policy, grok_auth, grok_policy,
+    register_provider, AuthManager, BrowserLoginUi, ChatGptProvider, Credential, CredentialStore,
+    GrokProvider, LoginState,
 };
 pub use bundle::{
     install_app, install_core, install_fakes, install_foundation, install_spine,

@@ -1,7 +1,7 @@
 //! 统一鉴权（Auth Manager）。
 //!
 //! 一家订阅一个 provider 实现（`cordis_base::auth::AuthProvider`）。模型条目
-//! 写 `auth = "chatgpt"` 就走订阅通道，没写的老配置一点不变——密钥照旧从
+//! 写 `auth = "chatgpt"` / `auth = "grok"` 就走订阅通道，没写的老配置一点不变——密钥照旧从
 //! `api_key` / `env_key` / `secrets.json` 取。
 //!
 //! 推理侧只经 [`AuthManager`] 拿 [`cordis_base::auth::Lease`]：短期 access
@@ -14,20 +14,24 @@ mod callback_page;
 mod chatgpt;
 mod commands;
 mod credentials;
+mod grok;
 mod jwt;
 mod manager;
 pub(crate) mod oauth;
 
 pub use chatgpt::{chatgpt_auth, ChatGptProvider};
-pub use chatgpt::{subscription_disabled, SUBSCRIPTION_ENV};
+pub use grok::{grok_auth, GrokProvider};
 // 上游错误 → AuthError 的分类（官方那套 `subscription_sharing_*` 错误码）。
 // 生产路径经 provider 的 `classify`；推理层的测试用真的分类逻辑配假 provider。
 #[cfg(test)]
 pub(crate) use chatgpt::classify as classify_upstream_error;
+// Grok 那条的分类与「token 失效」判定：推理层的测试配假 provider 用真的逻辑。
 pub use commands::auth_commands;
 #[cfg(test)]
 pub(crate) use credentials::now_unix as credentials_now;
 pub use credentials::{Credential, CredentialStore};
+#[cfg(test)]
+pub(crate) use grok::{classify as classify_grok_error, token_rejected as grok_token_rejected};
 pub use manager::{auth_manager, register_provider, AuthManager, LoginState};
 
 /// 登录界面：打开系统浏览器 + 记一句状态。
@@ -127,9 +131,36 @@ pub fn chatgpt_policy() -> WirePolicy {
     }
 }
 
+/// Grok 订阅（`api.x.ai` + `auth.x.ai` 的 OAuth token）那条通道的 wire 约束。
+///
+/// `api.x.ai/v1/responses` 就是公开 API 那一套 Responses，请求体**不用改**，
+/// 只多带 `prompt_cache_key`（xAI 文档：它等同于 `x-grok-conv-id` 头，把同一会话
+/// 路由到同一台机器）。2026-11-21 实测（grok-4.6，约 6.2k token 的前缀，连发 4 步、
+/// 后一步追加前一步的输出）：带了之后 3 步全中（每次 96–98%），不带只中 1 步。
+pub fn grok_policy() -> WirePolicy {
+    WirePolicy {
+        prompt_cache_key: true,
+        ..WirePolicy::default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Grok 那条只加 `prompt_cache_key`，别的一概不改：多改一样就不是公开 API 的请求了。
+    #[test]
+    fn grok_policy_only_adds_the_cache_key() {
+        let policy = grok_policy();
+        assert!(policy.prompt_cache_key);
+        assert_eq!(
+            policy,
+            WirePolicy {
+                prompt_cache_key: true,
+                ..WirePolicy::default()
+            }
+        );
+    }
 
     /// 官方不收的字段一个都不能少：少一个就是 400。
     #[test]

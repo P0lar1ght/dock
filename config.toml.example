@@ -44,7 +44,9 @@
 #   reasoning_effort   切到该模型时的默认强度。不写 = 不发，用上游默认。
 #   reasoning_efforts  /effort 菜单列哪几档。不写 = 列通用四档
 #                      (low/medium/high/xhigh)；写 [] = 会推理但不接受档位参数，
-#                      菜单空着、永不发 effort。
+#                      菜单空着、永不发 effort。各家不一样（DeepSeek 是 low/high/max）：
+#                      桌面端从 models.dev 开模型时会照目录写好，已配的模型可在
+#                      设置 › 模型 › 供应商「按目录补全推理档位」。
 #   supports_images    false = 纯文本模型，图片（用户发的、工具结果里的截图）都不进请求体，
 #                      模型会收到一句「图被拿掉了」的说明。
 #                      不写 = 当作支持。
@@ -60,7 +62,7 @@
 #                      cache_control 断点，长会话每轮省掉重复前缀的计费。自建
 #                      /v1/messages 代理不认这个字段时置 false。另两条 wire 的
 #                      前缀缓存由上游自动做，这个键对它们无效。
-#   auth               走**订阅通道**：值是鉴权 provider id（如 "chatgpt"）。
+#   auth               走**订阅通道**：值是鉴权 provider id（"chatgpt" 或 "grok"）。
 #                      写了它，密钥不再从 api_key / env_key / secrets.json 取，
 #                      而是向 Auth Manager 要一份短期 access token；那条通道对
 #                      请求体的硬约束（store: false、system 走 instructions…）

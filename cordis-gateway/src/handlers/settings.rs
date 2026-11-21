@@ -633,6 +633,32 @@ fn auth_models_json(provider: &str, models: &[cordis_base::auth::RemoteModel]) -
         .collect()
 }
 
+/// `auth/usage { provider? }`：活动账号的订阅额度（每次都问上游，不缓存）。
+///
+/// 回 `{ provider, usage }`；这一家没有额度接口（ChatGPT）时 `usage` 是 `null`。
+/// 没登录、没资格、上游失败都是错误（`details.code` 是归一后的码）。
+pub async fn auth_usage(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
+    let provider_id = auth_provider_param(&params);
+    let manager = auth_manager(gateway)?;
+    // 这份额度是哪个账号的：界面按它分开存，切了账号不会先画上一个账号的数。
+    let account = manager.active_account(&provider_id).map(|a| a.client_id);
+    let usage = manager
+        .usage(&provider_id)
+        .await
+        .map_err(|e| RpcError::app(usage_error_code(&e), e.message()))?;
+    Ok(serde_json::json!({ "provider": provider_id, "account": account, "usage": usage }))
+}
+
+/// `auth/usage` 失败时的码：没登录 / 没资格时界面要把旧的额度清掉，别的（网络、上游
+/// 5xx）留着上次的数。
+fn usage_error_code(e: &cordis_base::auth::AuthError) -> &'static str {
+    match e {
+        cordis_base::auth::AuthError::NeedsLogin { .. } => "needs_login",
+        cordis_base::auth::AuthError::NotEligible { .. } => "not_eligible",
+        _ => "usage_failed",
+    }
+}
+
 /// `auth/models { provider? }`：重拉活动账号能用的模型，写进模型目录，回这份列表。
 ///
 /// 登出了 / 没开套餐额度：那一家的模型从目录里拿掉，回错误。
@@ -739,8 +765,12 @@ pub async fn auth_logout(gateway: &GatewayHandle, params: Value) -> Result<Value
         .map_err(|e| RpcError::app("logout_failed", e.message()))?;
     let mut status = auth_status(gateway)?;
     if let cordis_base::auth::LogoutOutcome::LocalOnly { reason } = outcome {
+        let name = manager
+            .provider(&provider_id)
+            .map(|p| p.info().display_name)
+            .unwrap_or("这一家");
         status["warning"] = Value::String(format!(
-            "本地 token 已清，但远端撤销没确认（{reason}）。可以到 ChatGPT 设置里手动断开 Dock。"
+            "本地 token 已清，但远端撤销没确认（{reason}）。可以到 {name} 的账号设置里手动断开 Dock。"
         ));
     }
     Ok(status)
@@ -1425,6 +1455,11 @@ pub fn gateway_settings() -> Plugin {
                         method(|gw, params| async move { auth_models(&gw, params).await }),
                     ),
                     (
+                        protocol::AUTH_USAGE,
+                        TRUSTED_DETACHED,
+                        method(|gw, params| async move { auth_usage(&gw, params).await }),
+                    ),
+                    (
                         protocol::PLUGIN_ENABLE,
                         TRUSTED_DETACHED,
                         method(|gw, params| async move { plugin_enable(&gw, params).await }),
@@ -1453,6 +1488,24 @@ pub fn gateway_settings() -> Plugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 没登录 / 没资格要让界面清掉旧额度，别的失败留着上次的数。
+    #[test]
+    fn usage_errors_say_whether_to_drop_the_old_numbers() {
+        use cordis_base::auth::AuthError;
+        assert_eq!(
+            usage_error_code(&AuthError::NeedsLogin { reason: "x".into() }),
+            "needs_login"
+        );
+        assert_eq!(
+            usage_error_code(&AuthError::NotEligible { code: "x".into() }),
+            "not_eligible"
+        );
+        assert_eq!(
+            usage_error_code(&AuthError::Transport("x".into())),
+            "usage_failed"
+        );
+    }
 
     #[test]
     fn profile_round_trips_both_files_and_rejects_unknown_kinds() {

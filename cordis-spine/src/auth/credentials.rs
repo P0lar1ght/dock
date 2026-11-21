@@ -1,4 +1,7 @@
-//! ChatGPT 订阅凭据的落盘。
+//! 订阅凭据的落盘（一家一个目录：`credentials/chatgpt/`、`credentials/grok/`）。
+//!
+//! 文件名是这个账号在本机的标识：ChatGPT 是它的正式 client id；Grok 所有账号共用
+//! 一个 OAuth client，按账号（ID token 的 `sub`）分。下面以 ChatGPT 为例。
 //!
 //! 布局（设计稿定的那套，**凭据只在用户自己控制的本机**）：
 //!
@@ -135,7 +138,12 @@ impl CredentialStore {
 
     /// `$DOCK_HOME/credentials/chatgpt`。
     pub fn default_store() -> Self {
-        Self::new(dock_home().join("credentials").join("chatgpt"))
+        Self::for_provider("chatgpt")
+    }
+
+    /// `$DOCK_HOME/credentials/<provider>`：一家订阅一个目录。
+    pub fn for_provider(provider: &str) -> Self {
+        Self::new(dock_home().join("credentials").join(sanitize(provider)))
     }
 
     pub fn root(&self) -> &Path {
@@ -285,7 +293,7 @@ pub fn now_unix() -> u64 {
 
 /// client_id 进文件名的部分。官方那串形如 `oaiapp_…`，没有斜杠；这里仍然滤一遍，
 /// 免得哪天来了个带路径分隔符的值把文件写到别处。
-fn sanitize(client_id: &str) -> String {
+pub(crate) fn sanitize(client_id: &str) -> String {
     let cleaned: String = client_id
         .chars()
         .map(|c| {

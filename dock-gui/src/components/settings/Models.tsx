@@ -6,6 +6,9 @@ import { ChevronDown, FolderOpen, GripVertical, LoaderCircle, MoreHorizontal, Pe
 import { openPath, openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { formatTokens } from "../chrome";
 import { Popover } from "../Popover";
+import { PlanUsageCard } from "../PlanUsage";
+import { usePlanUsage } from "../../dock/planUsage";
+import { catalogEffortsFor, useCatalog } from "../../dock/providerCatalog";
 import { useApp, type ModelInfo } from "../../dock/store";
 import {
   EMPTY_MODEL,
@@ -59,7 +62,10 @@ import {
 
 const BACKENDS = ["responses", "chat_completions", "messages"] as const;
 const SHORT: Record<string, string> = { responses: "responses", chat_completions: "chat", messages: "messages" };
-const EFFORTS = ["low", "medium", "high", "xhigh"];
+/** 不写 `reasoning_efforts` 时 Dock 列的通用档位（同 cordis-base 的 DEFAULT_EFFORT_CHOICES）。 */
+const DEFAULT_EFFORTS = ["low", "medium", "high", "xhigh"];
+/** 编辑页能勾的档位（各家用到的都在这）；模型自带的别的值（如 ultra）接在后面。 */
+const KNOWN_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 const TEMPLATES: { label: string; entry: Partial<ModelEntry> }[] = [
   {
@@ -570,6 +576,7 @@ function ProviderAccounts({
           </span>
         ),
       )}
+      {canUseModels && <ProviderUsage id={p.id} name={name} />}
       {canUseModels && (
         <div className="mt-1.5 flex flex-col gap-1.5">
           <div className="flex items-center gap-2">
@@ -605,6 +612,17 @@ function ProviderAccounts({
           <span>已并入模型目录：输入框旁的模型菜单、终端 /model 都能直接选；用的是 {name} 套餐额度。</span>
         </div>
       )}
+    </div>
+  );
+}
+
+/** 订阅额度卡：查得到额度的那家才画（ChatGPT 没有额度接口，不占地方）。 */
+function ProviderUsage({ id, name }: { id: string; name: string }) {
+  const state = usePlanUsage(id);
+  if (!state.usage && (state.unsupported || (!state.loading && !state.error))) return null;
+  return (
+    <div className="mt-1.5">
+      <PlanUsageCard provider={id} providerName={name} state={state} />
     </div>
   );
 }
@@ -858,6 +876,17 @@ function ModelEditor({
   const [envSet, setEnvSet] = useState<boolean | null>(null);
   const isNew = originalId === null;
   const set = <K extends keyof ModelEntry>(k: K, v: ModelEntry[K]) => setE((x) => ({ ...x, [k]: v }));
+  // 推理档位：照目录填（按上游模型名找；同名的好几家时优先接口地址同 host 的）。
+  const catalog = useCatalog()?.catalog ?? null;
+  const [effortNote, setEffortNote] = useState<string | null>(null);
+  const fillEffortsFromCatalog = () => {
+    const upstream = (e.apiModel || e.id.split("/").pop() || "").trim();
+    const hit = catalog && upstream ? catalogEffortsFor(catalog, upstream, e.apiBaseUrl) : null;
+    if (hit === null) return setEffortNote(`目录里没有「${upstream}」的推理档位`);
+    if (hit === "ambiguous") return setEffortNote(`目录里有好几家「${upstream}」，档位不一样：请手动勾选`);
+    set("reasoningEfforts", hit.efforts);
+    setEffortNote(`已按目录（${hit.source}）填：${hit.efforts?.length ? hit.efforts.join(" / ") : "没有档位"}`);
+  };
 
   // 变量名停手 400ms 后问一次 Dock 有没有这个环境变量。
   useEffect(() => {
@@ -1096,22 +1125,27 @@ function ModelEditor({
                     <Select
                       value={e.reasoningEffort ?? ""}
                       placeholder="上游默认"
-                      options={(e.reasoningEfforts ?? EFFORTS).map((x) => ({ value: x, label: x }))}
+                      options={(e.reasoningEfforts ?? DEFAULT_EFFORTS).map((x) => ({ value: x, label: x }))}
                       onChange={(v) => set("reasoningEffort", v || null)}
                     />
                   </Row>
-                  <Row label="可选档位" desc="/effort 菜单列哪几档">
-                    <div className="flex gap-1">
-                      {EFFORTS.map((x) => {
-                        const list = e.reasoningEfforts ?? EFFORTS;
+                  <Row label="可选档位" desc="/effort 菜单列哪几档；没勾过 = 通用档位">
+                    <div className="flex flex-col items-end gap-1">
+                    <div className="flex flex-wrap justify-end gap-1">
+                      {[...KNOWN_EFFORTS, ...(e.reasoningEfforts ?? []).filter((x) => !KNOWN_EFFORTS.includes(x))].map((x) => {
+                        const list = e.reasoningEfforts ?? DEFAULT_EFFORTS;
                         const on = list.includes(x);
                         return (
                           <button
                             key={x}
                             type="button"
                             onClick={() => {
-                              const next = on ? list.filter((y) => y !== x) : EFFORTS.filter((y) => y === x || list.includes(y));
-                              set("reasoningEfforts", next.length === EFFORTS.length ? null : next);
+                              const all = [...KNOWN_EFFORTS, ...list.filter((y) => !KNOWN_EFFORTS.includes(y))];
+                              const next = all.filter((y) => (y === x ? !on : list.includes(y)));
+                              // 正好是通用档位就不写（config 里干净些）。
+                              const isDefault = next.length === DEFAULT_EFFORTS.length && next.every((y, i) => y === DEFAULT_EFFORTS[i]);
+                              set("reasoningEfforts", isDefault ? null : next);
+                              setEffortNote(null);
                             }}
                             className={`motion-colors rounded-full px-2 py-0.5 text-[11px] font-medium ${on ? "bg-[#0a84ff1a] text-accent" : "bg-[#f2f2f7] text-ink-3"}`}
                           >
@@ -1119,6 +1153,15 @@ function ModelEditor({
                           </button>
                         );
                       })}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {effortNote && <span className="enter-fade text-[11px] text-ink-4">{effortNote}</span>}
+                      {catalog && (
+                        <button type="button" onClick={fillEffortsFromCatalog} className="text-[11px] text-accent hover:underline">
+                          按目录填
+                        </button>
+                      )}
+                    </div>
                     </div>
                   </Row>
                 </>
