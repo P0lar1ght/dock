@@ -255,8 +255,11 @@ fn job_cwd(job: &CronJob) -> PathBuf {
 
 fn expand(raw: &str, cwd: &Path) -> PathBuf {
     let raw = raw.trim();
-    if let Some(rest) = raw.strip_prefix("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
+    if let Some(home) = std::env::var_os("HOME") {
+        if raw == "~" {
+            return PathBuf::from(home);
+        }
+        if let Some(rest) = raw.strip_prefix("~/") {
             return PathBuf::from(home).join(rest);
         }
     }
@@ -272,9 +275,71 @@ fn has_glob(s: &str) -> bool {
     s.contains(['*', '?', '[', '{'])
 }
 
+/// 一条监听路径真正挂上去的根：按任务目录展开，glob 取前面不带通配的那段，
+/// 字面去掉 `.` / `..`。另给一份 canonicalize 过的（路径在的话），符号链接指出去也看得见。
+fn roots_of(raw: &str, cwd: &Path) -> (PathBuf, Option<PathBuf>) {
+    let mut root = PathBuf::new();
+    for comp in expand(raw, cwd).components() {
+        if has_glob(&comp.as_os_str().to_string_lossy()) {
+            break;
+        }
+        match comp {
+            Component::ParentDir => {
+                root.pop();
+            }
+            Component::CurDir => {}
+            other => root.push(other),
+        }
+    }
+    let canon = root.canonicalize().ok();
+    (root, canon)
+}
+
+fn home_dir() -> Option<PathBuf> {
+    let home = PathBuf::from(std::env::var_os("HOME")?);
+    Some(home.canonicalize().unwrap_or(home))
+}
+
+/// 监听范围太大的拒掉：文件系统根、家目录本身和它的上级（`/Users`）。目录都是递归听的，
+/// 这些等于盯着整台机器 / 整个家目录（含 `~/.ssh`），notify 也会被打满。
+pub fn check_scope(paths: &[String], cwd: &Path) -> Result<(), String> {
+    let home = home_dir();
+    for raw in paths {
+        let (root, canon) = roots_of(raw, cwd);
+        let too_broad = [Some(&root), canon.as_ref()]
+            .into_iter()
+            .flatten()
+            .any(|r| r.parent().is_none() || home.as_ref().is_some_and(|home| home.starts_with(r)));
+        if too_broad {
+            return Err(format!(
+                "监听范围太大：{raw}（{}）。换成具体的子目录或文件",
+                root.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// 落在任务目录（项目）外面的路径，原样列出。符号链接指到外面的也算外面。
+pub fn outside_project(paths: &[String], cwd: &Path) -> Vec<String> {
+    let cwd_canon = cwd.canonicalize().ok();
+    paths
+        .iter()
+        .filter(|raw| {
+            let (root, canon) = roots_of(raw, cwd);
+            let inside = root.starts_with(cwd)
+                && canon.is_none_or(|c| c.starts_with(cwd_canon.as_deref().unwrap_or(cwd)));
+            !inside
+        })
+        .cloned()
+        .collect()
+}
+
 /// 一条路径变成规则：glob 的话取它前面不带通配的那段目录当根。根都要先 canonicalize
 /// （macOS 的 FSEvents 报的是真实路径，`/var` 会变成 `/private/var`）。
 fn rule_for(raw: &str, cwd: &Path) -> Result<Rule, String> {
+    // 建任务时已经挡过；这里再挡一次，手改的 schedules.json 也挂不上。
+    check_scope(&[raw.to_string()], cwd)?;
     let full = expand(raw, cwd);
     let text = full.to_string_lossy().to_string();
     if !has_glob(&text) {
@@ -375,6 +440,62 @@ mod tests {
             )
         })
         .unwrap()
+    }
+
+    /// 太宽的根拒掉（目录是递归听的）：`/`、家目录和它的上级；glob 按它前面那段目录算，
+    /// `..` 走到根上也算。项目里的、家目录下具体的子目录照常（#310 审阅）。
+    #[test]
+    fn too_broad_roots_are_rejected() {
+        // 读 HOME：和改 HOME 的用例（`tilde_expands_to_home`）互斥，不然家目录中途换了。
+        let _env = cordis_base::test_env::scoped();
+        let dir = tempfile::tempdir().unwrap();
+        let mut bad = vec!["/".to_string(), "/**/*.md".into(), "../".repeat(64)];
+        let mut fine = vec!["docs".to_string(), "docs/**/*.md".into(), "/tmp/x".into()];
+        if let Some(home) = home_dir() {
+            bad.extend(["~".into(), "~/".into(), "~/**/*.md".into()]);
+            bad.extend(home.parent().map(|p| p.display().to_string()));
+            bad.push(home.display().to_string());
+            fine.push("~/notes".into());
+        }
+        for raw in bad {
+            let err = check_scope(std::slice::from_ref(&raw), dir.path()).unwrap_err();
+            assert!(err.contains("监听范围太大"), "{raw}: {err}");
+        }
+        for raw in fine {
+            assert!(
+                check_scope(std::slice::from_ref(&raw), dir.path()).is_ok(),
+                "{raw}"
+            );
+        }
+    }
+
+    /// 项目外的路径列出来（权限要另问）：`..` 出去的、绝对路径、`~/`，以及项目里指向
+    /// 外面的符号链接。
+    #[cfg(unix)]
+    #[test]
+    fn paths_outside_the_project_are_listed() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("p");
+        let other = dir.path().join("other");
+        std::fs::create_dir_all(project.join("docs")).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        std::os::unix::fs::symlink(&other, project.join("link")).unwrap();
+        let other = other.display().to_string();
+        let paths: Vec<String> = [
+            "docs",
+            "docs/**/*.md",
+            "./docs/../docs",
+            "../other",
+            "~/notes",
+            other.as_str(),
+            "link",
+        ]
+        .map(String::from)
+        .to_vec();
+        assert_eq!(
+            outside_project(&paths, &project),
+            vec!["../other", "~/notes", other.as_str(), "link"]
+        );
     }
 
     async fn wait_ready(watches: &mut FileWatches) -> Vec<FilesReady> {

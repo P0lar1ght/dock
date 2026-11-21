@@ -51,6 +51,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::names::CRON;
 
+pub(crate) use files::outside_project;
 pub use files::{FileWatches, FilesReady};
 use schedule::{cron_next_after, DAY_MS};
 pub use schedule::{
@@ -709,6 +710,46 @@ fn ms(d: Duration) -> u64 {
     d.as_millis().min(u128::from(u64::MAX)) as u64
 }
 
+/// 又来一次触发、上一次还没送：合成一次。两段说明都留着（文件改动攒在一起、手动运行
+/// 附的话不丢）；理由取占次数的那个——条件命令 / 文件变化在等着时点了「立即运行」，
+/// 送出去的仍是那次条件触发、照样占次数，`max_runs` 不会因此多跑一次。
+fn merge_pending(
+    old: Option<PendingFire>,
+    reason: FireReason,
+    context: Option<String>,
+    now: u64,
+) -> PendingFire {
+    let Some(old) = old else {
+        return PendingFire {
+            reason,
+            context,
+            requested_at_ms: now,
+        };
+    };
+    let reason = if old.reason.counts() && !reason.counts() {
+        old.reason
+    } else {
+        reason
+    };
+    let context = match (old.context, context) {
+        (Some(old), Some(new)) if old != new => Some(format!("{old}\n\n{new}")),
+        (Some(old), None) => Some(old),
+        (_, new) => new,
+    };
+    PendingFire {
+        reason,
+        context,
+        requested_at_ms: old.requested_at_ms,
+    }
+}
+
+/// 任务的工作目录；老任务 / 没记归属的按进程 cwd（同 `files::job_cwd`）。
+fn cwd_or_process(cwd: Option<&Path>) -> PathBuf {
+    cwd.filter(|c| !c.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
+}
+
 /// `session` 给了就只认它名下的任务（模型工具不能动别的会话的）。
 fn scoped<'a>(
     tasks: &'a mut [Task],
@@ -815,6 +856,11 @@ impl Cron {
             return Err(CronError::EmptyPrompt);
         }
         check_max_runs(max_runs)?;
+        if let CronSchedule::Files(spec) = &schedule {
+            let cwd = owner.as_ref().map(|o| o.cwd.as_path());
+            files::check_scope(&spec.paths, &cwd_or_process(cwd))
+                .map_err(CronError::InvalidSchedule)?;
+        }
         let sched = Sched::from(&schedule);
         let me = self.me;
         let seq = &self.seq;
@@ -897,6 +943,10 @@ impl Cron {
         let sched = patch.schedule.as_ref().map(Sched::from);
         let updated = self.transact(|tasks| {
             let task = scoped(tasks, id, session)?;
+            if let Some(CronSchedule::Files(spec)) = &patch.schedule {
+                files::check_scope(&spec.paths, &cwd_or_process(task.cwd.as_deref()))
+                    .map_err(CronError::InvalidSchedule)?;
+            }
             let now = self.now();
             let mut rearm = patch.max_runs.is_some();
             if let Some(sched) = sched.filter(|s| *s != task.schedule) {
@@ -976,22 +1026,8 @@ impl Cron {
             if reason != FireReason::Manual && (task.paused || task.done) {
                 return Ok(false);
             }
-            let context = match (task.pending.take(), context) {
-                // 上一次还没送：两段说明都留着（文件改动攒在一起）。
-                (
-                    Some(PendingFire {
-                        context: Some(old), ..
-                    }),
-                    Some(new),
-                ) if old != new => Some(format!("{old}\n\n{new}")),
-                (Some(old), None) => old.context,
-                (_, new) => new,
-            };
-            task.pending = Some(PendingFire {
-                reason,
-                context,
-                requested_at_ms: self.now(),
-            });
+            let now = self.now();
+            task.pending = Some(merge_pending(task.pending.take(), reason, context, now));
             Ok(true)
         })?
     }
@@ -1031,11 +1067,12 @@ impl Cron {
             let fires = fires && may_fire && !task.paused && !task.done;
             if fires {
                 let context = observation.context(command, when);
-                task.pending = Some(PendingFire {
-                    reason: FireReason::Watch,
-                    context: Some(context),
-                    requested_at_ms: now,
-                });
+                task.pending = Some(merge_pending(
+                    task.pending.take(),
+                    FireReason::Watch,
+                    Some(context),
+                    now,
+                ));
             }
             task.watch = Some(CronWatchState {
                 checked_at_ms: now,
@@ -2180,6 +2217,63 @@ mod tests {
         assert_eq!(tick.fires[0].context.as_deref(), Some("- a.md\n\n- b.md"));
         assert!(cron.due().unwrap().fires.is_empty());
         assert!(!cron.get(&id).unwrap().done, "文件变化一直盯着");
+    }
+
+    /// 文件变化已经在等着送，又点了「立即运行」：还是一次文件触发（占次数），两段说明都在。
+    /// 以前理由被改成手动，这次不算次数，`max_runs` 的任务就多跑一次（#310 审阅）。
+    #[test]
+    fn a_manual_run_on_top_of_a_waiting_event_fire_still_counts() {
+        let cron = Cron::new();
+        let id = cron
+            .create(NewCronTask {
+                max_runs: Some(2),
+                ..NewCronTask::new(
+                    CronSchedule::files(vec!["docs".into()], DEFAULT_FILES_DEBOUNCE).unwrap(),
+                    "同步翻译",
+                )
+            })
+            .unwrap();
+        cron.trigger(&id, None, FireReason::Files, Some("- a.md".into()))
+            .unwrap();
+        cron.trigger(&id, None, FireReason::Manual, Some("Input: 先看 a".into()))
+            .unwrap();
+        let tick = cron.due().unwrap();
+        assert_eq!(tick.fires.len(), 1);
+        assert_eq!(tick.fires[0].reason, FireReason::Files);
+        assert_eq!(
+            tick.fires[0].context.as_deref(),
+            Some("- a.md\n\nInput: 先看 a")
+        );
+        assert_eq!(cron.get(&id).unwrap().runs, 1, "文件触发占次数");
+    }
+
+    /// 手动运行在等着送时条件命令满足了：合成一次条件触发，手动运行附的话不丢。
+    #[test]
+    fn a_watch_fire_keeps_the_input_of_a_waiting_manual_run() {
+        let cron = Cron::new();
+        let id = watch_task(&cron, WatchWhen::Succeeds);
+        cron.trigger(&id, None, FireReason::Manual, Some("Input: v1.2".into()))
+            .unwrap();
+        assert!(cron.observe(&id, &seen(0, "deployed"), true).unwrap());
+        let tick = cron.due().unwrap();
+        assert_eq!(tick.fires.len(), 1);
+        assert_eq!(tick.fires[0].reason, FireReason::Watch);
+        let context = tick.fires[0].context.as_deref().unwrap();
+        assert!(context.starts_with("Input: v1.2\n\n"), "{context}");
+        assert!(context.contains("deployed"), "{context}");
+    }
+
+    /// 「成功时」建好时就已经成功：第一次检查就触发一次（不用等它先失败再成功），
+    /// 之后一直成功不再叫。工具说明写的就是这个。
+    #[test]
+    fn a_watch_condition_that_already_holds_fires_on_the_first_check_once() {
+        let cron = Cron::new();
+        let id = watch_task(&cron, WatchWhen::Succeeds);
+        let fired: Vec<bool> = [0, 0, 0]
+            .into_iter()
+            .map(|exit| cron.observe(&id, &seen(exit, ""), true).unwrap())
+            .collect();
+        assert_eq!(fired, vec![true, false, false]);
     }
 
     /// 暂停期间的时刻不跑；继续以后跳过它们、按原相位排下一次，不补。

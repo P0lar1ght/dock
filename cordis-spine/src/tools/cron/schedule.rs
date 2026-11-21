@@ -108,6 +108,12 @@ impl CronSchedule {
         if command.is_empty() {
             return Err(CronError::InvalidSchedule("条件命令不能为空".into()));
         }
+        if every < MIN_CHECK_EVERY {
+            return Err(CronError::InvalidSchedule(format!(
+                "条件命令最快每分钟查一次（收到 {} 秒）",
+                every.as_secs()
+            )));
+        }
         if let WatchWhen::Matches { pattern } = &when {
             regex::Regex::new(pattern).map_err(|e| {
                 CronError::InvalidSchedule(format!("正则 /{pattern}/ 写得不对：{e}"))
@@ -115,7 +121,7 @@ impl CronSchedule {
         }
         Ok(Self::Watch(WatchSpec {
             command: command.to_string(),
-            every: every.max(MIN_CHECK_EVERY),
+            every,
             when,
         }))
     }
@@ -578,13 +584,13 @@ mod tests {
 
     #[test]
     fn watch_and_files_validate_and_describe() {
+        // 短于一分钟的报错，不悄悄提到一分钟（#310 审阅）。
+        assert!(matches!(
+            CronSchedule::watch("gh pr checks 12", Duration::from_secs(10), WatchWhen::Fails),
+            Err(CronError::InvalidSchedule(m)) if m.contains("每分钟")
+        ));
         let watch =
-            CronSchedule::watch("gh pr checks 12", Duration::from_secs(10), WatchWhen::Fails)
-                .unwrap();
-        let CronSchedule::Watch(spec) = &watch else {
-            panic!("{watch:?}");
-        };
-        assert_eq!(spec.every, MIN_CHECK_EVERY, "短于一分钟的提到一分钟");
+            CronSchedule::watch("gh pr checks 12", MIN_CHECK_EVERY, WatchWhen::Fails).unwrap();
         assert_eq!(watch.label(), "命令 · 每分钟查一次，失败时触发");
         assert!(
             watch.human().contains("`gh pr checks 12` fails"),

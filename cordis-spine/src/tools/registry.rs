@@ -717,7 +717,9 @@ fn permission_request(exec: &Context, name: &str, arguments: &str) -> (String, S
         return crate::tools::tool_cordis::permission_request(exec, arguments);
     }
     if name == "scheduler_create" {
-        if let Some(asked) = scheduler_watch_request(arguments) {
+        if let Some(asked) =
+            scheduler_watch_request(arguments).or_else(|| scheduler_files_request(exec, arguments))
+        {
             return asked;
         }
     }
@@ -741,13 +743,45 @@ fn scheduler_watch_request(arguments: &str) -> Option<(String, String)> {
         "$ {}\n定时任务：每 {every} 在这个项目里跑一次这条命令，满足条件就发提问",
         command.replace('\n', " ")
     );
+    push_prompt(&mut summary, &v);
+    summary.push_str("\n选「始终允许」= 以后建任何条件命令任务都不再问（不只这一条命令）");
+    Some(("scheduler_create:watch".to_string(), summary))
+}
+
+/// 监听项目目录外的文件变化（`files`）：改动的路径会写进发给模型的提问，所以和
+/// 条件命令一样单独一个权限键，摘要列出项目外的路径。都在项目里的照常按工具名问。
+/// 太宽的根（`/`、家目录）这里照样问，点了允许工具也会拒（`Cron::create` 里挡）。
+fn scheduler_files_request(exec: &Context, arguments: &str) -> Option<(String, String)> {
+    let v: serde_json::Value = serde_json::from_str(arguments).ok()?;
+    let paths: Vec<String> = v
+        .get("files")?
+        .as_array()?
+        .iter()
+        .filter_map(|p| p.as_str())
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .collect();
+    let cwd = crate::session::cwd::session_cwd(exec);
+    let outside = crate::tools::cron::outside_project(&paths, &cwd);
+    if outside.is_empty() {
+        return None;
+    }
+    let mut summary = format!(
+        "监听项目外的文件：{}\n定时任务：这些文件有改动就发提问（改了哪些会写进提问）",
+        outside.join("、")
+    );
+    push_prompt(&mut summary, &v);
+    summary.push_str("\n选「始终允许」= 以后监听项目外的任何文件都不再问");
+    Some(("scheduler_create:files".to_string(), summary))
+}
+
+fn push_prompt(summary: &mut String, v: &serde_json::Value) {
     if let Some(prompt) = v.get("prompt").and_then(|p| p.as_str()) {
         summary.push_str(&format!(
             "：{}",
             prompt.split_whitespace().collect::<Vec<_>>().join(" ")
         ));
     }
-    Some(("scheduler_create:watch".to_string(), summary))
 }
 
 fn permission_summary(name: &str, arguments: &str) -> String {
@@ -971,12 +1005,42 @@ mod tests {
         assert_eq!(key, "scheduler_create:watch");
         assert!(summary.starts_with("$ gh pr checks 12\n"), "{summary}");
         assert!(summary.contains("每 2m"), "{summary}");
+        assert!(
+            summary.contains("「始终允许」= 以后建任何条件命令任务都不再问"),
+            "点一次始终允许放行的是以后所有条件命令，要写明：{summary}"
+        );
         let (plain, _) = permission_request(
             &exec,
             "scheduler_create",
             r#"{"interval":"5m","prompt":"x"}"#,
         );
         assert_eq!(plain, "scheduler_create");
+    }
+
+    /// 文件变化监听到项目外（`~/notes`、绝对路径）也单独一个权限键：改了哪些文件会写进
+    /// 发给模型的提问，对 `scheduler_create` 的「始终允许」不该顺带放行（#310 审阅）。
+    /// 都在项目里的照常按工具名问。
+    #[test]
+    fn a_scheduler_files_watch_outside_the_project_asks_under_its_own_key() {
+        let exec = cordis::Context::new();
+        let (key, summary) = permission_request(
+            &exec,
+            "scheduler_create",
+            r#"{"files":["docs","~/notes"],"prompt":"整理笔记"}"#,
+        );
+        assert_eq!(key, "scheduler_create:files");
+        assert!(
+            summary.starts_with("监听项目外的文件：~/notes\n"),
+            "只列项目外的：{summary}"
+        );
+        assert!(summary.contains("整理笔记"), "{summary}");
+        assert!(summary.contains("始终允许"), "{summary}");
+        let (inside, _) = permission_request(
+            &exec,
+            "scheduler_create",
+            r#"{"files":["docs/**/*.md","./src"],"prompt":"x"}"#,
+        );
+        assert_eq!(inside, "scheduler_create");
     }
 
     use super::*;

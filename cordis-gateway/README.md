@@ -902,13 +902,14 @@ bash 里改的不算。轮次用投影里的 `turnId`（和 `item/user_message` 
   - 触发方式只给一个：`interval`（同 `/loop`：`5m` / `2h` / `1d`）或 `everySecs`（最小 60）、
     `cron`（`0 9 * * 1-5`）、`atMs`（毫秒时间戳）或 `at`（`30m` / `2026-11-23 09:00`，本机时区）、
     `watch: { command, everySecs?（默认 300，最小 60）, when?（默认 changed）, pattern? }`、
-    `files: { paths, debounceSecs?（默认 10） }`、`manual: true`。
-    给两个、表达式 / 正则不对、时间已过、路径为空都回 `invalid_params`。
+    `files: { paths, debounceSecs?（默认 10） }`（目录递归听，`/`、家目录这类太宽的根报错）、`manual: true`。
+    给两个、表达式 / 正则不对、时间已过、路径为空或范围太大都回 `invalid_params`。
   - `expiresAtMs` 省略 = 默认（比一天还勤的 7 天后过期，其余不过期），`null` = 不过期。
   - `catchUp` 省略 = 按种类（cron / 一次性补，其余不补）。`fireImmediately` 额外马上跑一次，不占次数。
   - `target: "newSession"` 且没给 `preset`：照这个会话现在的预设开。
   - `threadId` 开着的页（含 `live`）取它正在写的会话；关着的按会话列表找。还没落盘的回 `invalid_params`。
-  - 这里是用户自己建的，不过权限门；模型的 `scheduler_create` 带 `watch` 时另有权限键 `scheduler_create:watch`。
+  - 这里是用户自己建的，不过权限门；模型的 `scheduler_create` 带 `watch` 时另有权限键 `scheduler_create:watch`，
+    监听项目外的文件时另有 `scheduler_create:files`。
 - `schedule/update { id, <触发方式>?, prompt?, expiresAtMs?, maxRuns?, catchUp?, target?, preset?, paused? }` → `{ task }`：
   固定间隔改间隔保持相位；换种类从现在起重排；不续期（只有给了 `expiresAtMs` 才动）。`maxRuns: null` = 不限，
   `preset: null` = 不指定。`paused: false` 继续时跳过暂停期间的时刻。

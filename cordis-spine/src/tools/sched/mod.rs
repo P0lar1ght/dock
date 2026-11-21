@@ -34,7 +34,7 @@ pub enum SchedulerError {
     InvalidInterval(String),
 }
 
-const CREATE_PARAMS: &str = r#"{"type":"object","properties":{"interval":{"type":"string","description":"Recurring interval for polling loops, e.g. 5m, 2h, 1d (min 60s). Phase is kept from creation."},"cron":{"type":"string","description":"Recurring calendar schedule: a 5-field cron expression (minute hour day-of-month month day-of-week) in the user's local time, e.g. \"0 9 * * 1-5\" = weekdays at 09:00, \"0 10 * * 1\" = Mondays at 10:00, \"0 9 1 * *\" = the 1st of each month."},"at":{"type":"string","description":"Run once: a delay such as 30m or 2h, or a local date-time such as 2026-11-23 09:00 (RFC 3339 also accepted)."},"watch":{"type":"string","description":"Watch: a shell command run in this session's directory every watch_every; the prompt fires only when its result meets fire_when (checking costs no tokens). E.g. \"gh pr checks 123\", \"curl -s https://example.com/status\"."},"watch_every":{"type":"string","description":"How often to run the watch command, e.g. 2m, 1h (min 60s, default 5m)."},"fire_when":{"type":"string","enum":["changed","succeeds","fails","matches"],"description":"When a watch fires: changed = output differs from the last check (default; the first check only sets the baseline); succeeds / fails = exit code becomes 0 / non-zero; matches = output starts matching `match`. Except changed, it fires once when the condition becomes true, not on every check while it stays true."},"match":{"type":"string","description":"Regex for fire_when: matches."},"files":{"type":"array","items":{"type":"string"},"description":"Fire when files change: paths relative to this session's directory (directories, files, or globs like docs/**/*.md; ~/ for home). Changes inside .git, node_modules, target, and changes made while this task's own run is going are ignored."},"debounce":{"type":"string","description":"For files: wait this long without further changes before firing, e.g. 10s (default), 2m."},"manual":{"type":"boolean","description":"Only run when started by hand (the desktop app's Run now, or `dock schedule run <id>` from a script, git hook, or CI)."},"prompt":{"type":"string","description":"Prompt to run on each fire. Watch output, changed files, or text passed to a manual run are attached to it."},"task_id":{"type":"string","description":"Existing id to update in place. Omitted fields stay unchanged; an interval change keeps the phase."},"fire_immediately":{"type":"boolean","description":"If true, also fire once right away (an extra run, not counted in max_runs). Default false. Ignored when updating."},"new_session":{"type":"boolean","description":"Run each fire in a fresh session in this project (clean context, good for daily reports) instead of as a new turn here. Default false."},"paused":{"type":"boolean","description":"Pause (true) or resume (false). A resumed task skips the slots it missed while paused."},"expires_in":{"type":"string","description":"Stop the task after this long, e.g. 30d, or \"never\". Default: 7d for schedules that fire or check more often than daily, otherwise never."},"max_runs":{"type":"integer","minimum":1,"description":"Stop after this many automatic runs (e.g. 1 for \"tell me once when CI passes\")."},"catch_up":{"type":"boolean","description":"If a run is missed because Dock was closed or the computer was asleep, run once when Dock is back (missed runs are never replayed one by one). Default: true for cron and at, false for interval."}}}"#;
+const CREATE_PARAMS: &str = r#"{"type":"object","properties":{"interval":{"type":"string","description":"Recurring interval for polling loops, e.g. 5m, 2h, 1d (min 60s). Phase is kept from creation."},"cron":{"type":"string","description":"Recurring calendar schedule: a 5-field cron expression (minute hour day-of-month month day-of-week) in the user's local time, e.g. \"0 9 * * 1-5\" = weekdays at 09:00, \"0 10 * * 1\" = Mondays at 10:00, \"0 9 1 * *\" = the 1st of each month."},"at":{"type":"string","description":"Run once: a delay such as 30m or 2h, or a local date-time such as 2026-11-23 09:00 (RFC 3339 also accepted)."},"watch":{"type":"string","description":"Watch: a shell command run in this session's directory every watch_every; the prompt fires only when its result meets fire_when (checking costs no tokens). E.g. \"gh pr checks 123\", \"curl -s https://example.com/status\"."},"watch_every":{"type":"string","description":"How often to run the watch command, e.g. 2m, 1h (at least 1m, default 5m; shorter is an error)."},"fire_when":{"type":"string","enum":["changed","succeeds","fails","matches"],"description":"When a watch fires: changed = output differs from the last check (default; the first check only sets the baseline); succeeds / fails = exit code becomes 0 / non-zero; matches = output starts matching `match`. Except changed, it fires once when the condition becomes true, not on every check while it stays true; if it already holds at the first check, that first check fires."},"match":{"type":"string","description":"Regex for fire_when: matches."},"files":{"type":"array","items":{"type":"string"},"description":"Fire when files change: paths relative to this session's directory (directories, files, or globs like docs/**/*.md; ~/ for home). Directories are watched recursively, so / and the home directory itself are rejected; paths outside this project need the user's separate approval. Changes inside .git, node_modules, target, and changes made while this task's own run is going are ignored."},"debounce":{"type":"string","description":"For files: wait this long without further changes before firing, e.g. 10s (default), 2m."},"manual":{"type":"boolean","description":"Only run when started by hand (the desktop app's Run now, or `dock schedule run <id>` from a script, git hook, or CI)."},"prompt":{"type":"string","description":"Prompt to run on each fire. Watch output, changed files, or text passed to a manual run are attached to it."},"task_id":{"type":"string","description":"Existing id to update in place. Omitted fields stay unchanged; an interval change keeps the phase."},"fire_immediately":{"type":"boolean","description":"If true, also fire once right away (an extra run, not counted in max_runs). Default false. Ignored when updating."},"new_session":{"type":"boolean","description":"Run each fire in a fresh session in this project (clean context, good for daily reports) instead of as a new turn here. Default false."},"paused":{"type":"boolean","description":"Pause (true) or resume (false). A resumed task skips the slots it missed while paused."},"expires_in":{"type":"string","description":"Stop the task after this long, e.g. 30d, or \"never\". Default: 7d for schedules that fire or check more often than daily, otherwise never."},"max_runs":{"type":"integer","minimum":1,"description":"Stop after this many automatic runs (e.g. 1 for \"tell me once when CI passes\")."},"catch_up":{"type":"boolean","description":"If a run is missed because Dock was closed or the computer was asleep, run once when Dock is back (missed runs are never replayed one by one). Default: true for cron and at, false for interval."}}}"#;
 const LIST_PARAMS: &str = r#"{"type":"object","properties":{}}"#;
 const DELETE_PARAMS: &str = r#"{"type":"object","properties":{"id":{"type":"string","description":"Task id from scheduler_create."}},"required":["id"]}"#;
 
@@ -154,7 +154,8 @@ fn given(v: &Value, key: &str) -> bool {
     }
 }
 
-/// 防抖时长：`10s` / `2m` / 纯数字算秒。不像 `parse_interval` 那样有 60 秒下限。
+/// 时长（防抖、条件命令的检查间隔）：`10s` / `2m` / `1h` / `1d` / 纯数字算秒。
+/// 不像 `parse_interval` 那样把短于 60 秒的悄悄提上去，下限由调用方各自判。
 fn parse_short(raw: &str) -> Result<Duration, String> {
     let raw = raw.trim();
     let (digits, unit) = match raw.char_indices().last() {
@@ -169,6 +170,7 @@ fn parse_short(raw: &str) -> Result<Duration, String> {
         's' => n,
         'm' => n.saturating_mul(60),
         'h' => n.saturating_mul(3600),
+        'd' => n.saturating_mul(86_400),
         _ => return Err(format!("看不懂时长 {raw:?}（例如 10s、2m）")),
     };
     Ok(Duration::from_secs(secs))
@@ -197,10 +199,9 @@ fn schedule_arg(v: &Value, now: u64) -> Result<Option<CronSchedule>, String> {
             .map_err(err);
     }
     if let Some(command) = text_arg(v, "watch") {
+        // 不走 `parse_interval`：它把短于一分钟的悄悄提到一分钟，这里要报错。
         let every = match text_arg(v, "watch_every") {
-            Some(raw) => Duration::from_secs(
-                parse_interval(raw).map_err(|e| format!("Error: watch_every: {e}"))?,
-            ),
+            Some(raw) => parse_short(raw).map_err(|e| format!("Error: watch_every: {e}"))?,
             None => DEFAULT_CHECK_EVERY,
         };
         let when = match text_arg(v, "fire_when").unwrap_or("changed") {
@@ -729,6 +730,8 @@ mod tests {
 
     #[test]
     fn watch_and_files_arguments_are_validated() {
+        // `~` 要读 HOME：和改 HOME 的用例互斥。
+        let _env = cordis_base::test_env::scoped();
         let ctx = ctx_with_cron();
         for args in [
             r#"{"watch":"ls","fire_when":"matches","prompt":"x"}"#,
@@ -737,6 +740,12 @@ mod tests {
             r#"{"files":[],"prompt":"x"}"#,
             r#"{"files":["a"],"debounce":"soon","prompt":"x"}"#,
             r#"{"watch":"ls","manual":true,"prompt":"x"}"#,
+            // 短于一分钟报错，不悄悄提到一分钟（#310 审阅）。
+            r#"{"watch":"ls","watch_every":"30s","prompt":"x"}"#,
+            // 监听范围太大（目录递归听）：根、家目录。
+            r#"{"files":["/"],"prompt":"x"}"#,
+            r#"{"files":["~"],"prompt":"x"}"#,
+            r#"{"files":["docs","~/**/*.md"],"prompt":"x"}"#,
         ] {
             let result = create_job(&ctx, call(args));
             assert!(
@@ -746,6 +755,23 @@ mod tests {
             );
         }
         assert!(ctx.get::<Cron>(CRON).unwrap().list().is_empty());
+
+        // 改成太宽的根也一样拒；`1d` 这种检查间隔照常认。
+        let made = create_job(
+            &ctx,
+            call(r#"{"watch":"ls","watch_every":"1d","prompt":"x"}"#),
+        );
+        assert!(!made.content.starts_with("Error"), "{}", made.content);
+        let id = ctx.get::<Cron>(CRON).unwrap().list()[0].id.clone();
+        let widened = create_job(
+            &ctx,
+            call(&format!(r#"{{"task_id":"{id}","files":["/"]}}"#)),
+        );
+        assert!(
+            widened.content.contains("监听范围太大"),
+            "{}",
+            widened.content
+        );
     }
 
     #[test]

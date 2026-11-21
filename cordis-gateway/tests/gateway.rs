@@ -7086,6 +7086,10 @@ async fn schedules_take_watch_files_manual_and_run_now() {
         json!({ "threadId": id, "prompt": "x", "watch": { "everySecs": 120 } }),
         json!({ "threadId": id, "prompt": "x", "watch": { "command": "ls", "when": "matches" } }),
         json!({ "threadId": id, "prompt": "x", "files": { "paths": [] } }),
+        // 监听范围太大（目录递归听）：文件系统根、家目录。
+        json!({ "threadId": id, "prompt": "x", "files": { "paths": ["/"] } }),
+        json!({ "threadId": id, "prompt": "x", "files": { "paths": ["~"] } }),
+        json!({ "threadId": id, "prompt": "x", "watch": { "command": "ls", "everySecs": 30 } }),
         json!({ "threadId": id, "prompt": "x", "manual": true, "target": "elsewhere" }),
         json!({ "threadId": id, "prompt": "x", "manual": true, "interval": "5m" }),
     ] {
