@@ -49,6 +49,11 @@ schemars = "0.8"
 # 校验要另一颗；版本与 grok 对齐。
 jsonschema = { version = "0.30", default-features = false }
 libc = "0.2"
+# 定时任务的 cron 表达式：按本机时区算下一次（夏令时由它处理）。chrono 树里本来就有（tui / dock-memory）。
+croner = "4"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+# 定时任务的「文件变化」触发。和 dock-memory 同一个版本（Cargo.lock 里已有）。
+notify = "7"
 xai-workflow = { path = "../vendor/xai/workflow" }
 ignore = "0.4"
 globset = "0.4"

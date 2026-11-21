@@ -866,7 +866,12 @@ pub(super) fn any_live_task(ctx: &Context) -> bool {
         || ctx
             .get::<Subagents>(SUBAGENTS)
             .is_some_and(|s| s.list().iter().any(|a| !a.done))
-        || ctx.get::<Cron>(CRON).is_some_and(|c| !c.list().is_empty())
+        // 只算有倒计时在走的：跑完了的、暂停的、等文件改动 / 手动的没有下一次时刻，不用一直重绘。
+        || ctx.get::<Cron>(CRON).is_some_and(|c| {
+            c.list()
+                .iter()
+                .any(|j| !j.finished() && !j.paused && j.next_at_ms.is_some())
+        })
         || ctx
             .get::<Workflows>(WORKFLOWS)
             .is_some_and(|w| w.list().into_iter().any(|r| to_tui_workflow(r).is_active()))
@@ -1388,6 +1393,39 @@ pub(super) fn cancel_scheduled(ctx: &Context, id: &str) {
     match cron.cancel(id) {
         Ok(true) => flash(ctx, format!("已关闭 {id}")),
         Ok(false) => flash(ctx, format!("没有定时任务 {id}")),
+        Err(e) => flash(ctx, e.to_string()),
+    }
+}
+
+/// `/tasks` 里的 `p`：暂停 / 继续一个定时任务。
+pub(super) fn toggle_scheduled_pause(ctx: &Context, id: &str) {
+    let Some(cron) = ctx.get::<Cron>(CRON) else {
+        flash(ctx, "cron 未挂载");
+        return;
+    };
+    let Some(job) = cron.get(id) else {
+        flash(ctx, format!("没有定时任务 {id}"));
+        return;
+    };
+    let patch = cordis_spine::CronPatch {
+        paused: Some(!job.paused),
+        ..Default::default()
+    };
+    match cron.patch(id, None, patch) {
+        Ok(job) if job.paused => flash(ctx, format!("已暂停 {id}")),
+        Ok(_) => flash(ctx, format!("已继续 {id}")),
+        Err(e) => flash(ctx, e.to_string()),
+    }
+}
+
+/// `/tasks` 里的 `r`：马上跑一次定时任务（不占次数、不动排期）。
+pub(super) fn run_scheduled_now(ctx: &Context, id: &str) {
+    let Some(cron) = ctx.get::<Cron>(CRON) else {
+        flash(ctx, "cron 未挂载");
+        return;
+    };
+    match cron.trigger(id, None, cordis_spine::FireReason::Manual, None) {
+        Ok(_) => flash(ctx, format!("{id} 马上跑一次")),
         Err(e) => flash(ctx, e.to_string()),
     }
 }
@@ -2098,6 +2136,27 @@ mod tests {
 
         assert!(cron.cancel(&id).unwrap());
         assert!(!live_redraw(&root, &Overlay::None), "取消后要停下来");
+
+        // 没有倒计时的（只手动、暂停着的）不用一直重绘；但照样出现在任务条上。
+        cron.create(cordis_spine::NewCronTask::new(
+            cordis_spine::CronSchedule::Manual,
+            "发版前检查",
+        ))
+        .unwrap();
+        let paused = cron
+            .add(std::time::Duration::from_secs(600), "暂停的")
+            .unwrap();
+        cron.patch(
+            &paused,
+            None,
+            cordis_spine::CronPatch {
+                paused: Some(true),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(!live_redraw(&root, &Overlay::None), "没有倒计时在走");
+        assert!(!task_dock_rows(&root).is_empty());
     }
 
     /// 前台 bash 不进任务条，也就不该单独把重绘拉起来 —— turn status 那一行

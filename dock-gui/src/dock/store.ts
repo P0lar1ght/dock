@@ -522,6 +522,16 @@ export class DockStore {
     }
     this.client.onNotification((n) => {
       const id = typeof n.params.threadId === "string" ? n.params.threadId : "";
+      // Dock 那边关了这一页（终端 /tab close、定时任务收闲页、本页的 thread/close）：当成已关，
+      // 拉下来的记录留着、正在看的画面不变；再发消息时 ensureOpen 先 thread/open。
+      if (n.method === "thread/closed") {
+        if (id) {
+          this.forgetAside(id, true);
+          this.subscribed.delete(id);
+          this.refreshThreads().catch(() => {});
+        }
+        return;
+      }
       const event = id ? parseEvent(n.method, n.params) : null;
       if (!event) return;
       // 子代理的推送不属于会话自己的时间线，也不进拉历史时的缓冲。

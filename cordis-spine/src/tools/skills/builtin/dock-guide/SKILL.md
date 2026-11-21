@@ -57,7 +57,7 @@ Dock 是跑在终端里的编码 agent。底部输入框发消息，`/` 唤出�
   回车或点击子代理行进入其对话视图，底部输入框可以直接给它发消息。
 - `/goal <目标>` 设一个持续目标，模型会跨多轮推进直到完成；
   `/goal status` 查看进度，`/goal pause` / `/goal clear` 暂停或清除。
-- `/loop [间隔] <提问>` 建定时任务，`/tasks` 的 Watchers 里关闭。
+- `/loop [间隔、时间或条件] <提问>` 建定时任务（`/loop 工作日 9 点 汇总提交`、`/loop 明天 10:00 提醒我回邮件`、`/loop CI 挂了就叫我`、`/loop docs 有改动就同步英文版`），`/tasks` 的 Watchers 里 `x` 关闭、`p` 暂停、`r` 立即运行；桌面端侧栏「定时任务」；脚本里 `dock schedule run <id>`。
 
 ## 技能与 workflow
 

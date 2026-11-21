@@ -29,6 +29,7 @@ enum Mode {
     McpBrowser,
     McpWhiteboard,
     Device(DeviceCmd),
+    Schedule(cordis_app::ScheduleCmd),
     Init,
     Doctor,
     Upgrade(cordis_app::UpgradeArgs),
@@ -134,6 +135,14 @@ fn parse_args() -> (Mode, ResumeArg) {
         }
         return (Mode::Device(cmd), resume);
     }
+    if args.peek().is_some_and(|a| a == "schedule") {
+        args.next();
+        let rest: Vec<String> = args.by_ref().collect();
+        return match cordis_app::parse_schedule_args(&rest) {
+            Ok(cmd) => (Mode::Schedule(cmd), resume),
+            Err(e) => usage_error(&e),
+        };
+    }
     let serve = args.peek().is_some_and(|a| a == "serve");
     if serve {
         args.next();
@@ -228,6 +237,7 @@ Usage:
   dock serve --origin <origin> [--application <id>] [--bind <addr>] [options]
   dock serve --remote [--bind <addr>] [options]
   dock device add <name> | list | revoke <name|id>
+  dock schedule list | run <id> [--input <text>] | pause <id> | resume <id>
   dock mcp browser
   dock mcp whiteboard
 
@@ -354,6 +364,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         run_device(cmd);
         return Ok(());
     }
+    if let Mode::Schedule(cmd) = mode {
+        let path = cordis_base::config::dock_home().join(cordis_spine::SCHEDULES_FILE);
+        let cron = cordis_spine::Cron::at(path);
+        if let Err(e) = cordis_app::run_schedule_cmd(&cron, cmd, &mut std::io::stdout()) {
+            eprintln!("dock schedule: {e}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
     // 内置浏览器行拉起的就是自己这个二进制（`dock mcp browser`）。
     if let Ok(exe) = std::env::current_exe() {
         cordis_spine::register_builtin_browser_mcp(exe);
@@ -436,6 +455,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Mode::McpBrowser
         | Mode::McpWhiteboard
         | Mode::Device(_)
+        | Mode::Schedule(_)
         | Mode::Init
         | Mode::Doctor
         | Mode::Upgrade(_) => {

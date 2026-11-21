@@ -716,7 +716,38 @@ fn permission_request(exec: &Context, name: &str, arguments: &str) -> (String, S
     if name == crate::tools::tool_cordis::PLUGIN {
         return crate::tools::tool_cordis::permission_request(exec, arguments);
     }
+    if name == "scheduler_create" {
+        if let Some(asked) = scheduler_watch_request(arguments) {
+            return asked;
+        }
+    }
     (name.to_string(), permission_summary(name, arguments))
+}
+
+/// 带条件命令（`watch`）的 `scheduler_create`：等于以后无人看着时反复跑这条 shell，
+/// 所以单独一个权限键，摘要首行是完整命令（同 bash）。对 `scheduler_create` 的「始终允许」
+/// 不覆盖它——不然点过一次「允许建定时任务」，模型就能借它绕开 bash 的门跑任意命令。
+fn scheduler_watch_request(arguments: &str) -> Option<(String, String)> {
+    let v: serde_json::Value = serde_json::from_str(arguments).ok()?;
+    let command = v.get("watch")?.as_str()?.trim();
+    if command.is_empty() {
+        return None;
+    }
+    let every = v
+        .get("watch_every")
+        .and_then(|e| e.as_str())
+        .unwrap_or("5m");
+    let mut summary = format!(
+        "$ {}\n定时任务：每 {every} 在这个项目里跑一次这条命令，满足条件就发提问",
+        command.replace('\n', " ")
+    );
+    if let Some(prompt) = v.get("prompt").and_then(|p| p.as_str()) {
+        summary.push_str(&format!(
+            "：{}",
+            prompt.split_whitespace().collect::<Vec<_>>().join(" ")
+        ));
+    }
+    Some(("scheduler_create:watch".to_string(), summary))
 }
 
 fn permission_summary(name: &str, arguments: &str) -> String {
@@ -927,6 +958,27 @@ pub fn workspace_tools() -> Plugin {
 
 #[cfg(test)]
 mod tests {
+    /// 带条件命令的 `scheduler_create` 单独一个权限键、摘要首行是命令：对
+    /// `scheduler_create` 点过「始终允许」也挡得住它（它等于以后反复跑这条 shell）。
+    #[test]
+    fn a_scheduler_watch_asks_under_its_own_key_with_the_command_first() {
+        let exec = cordis::Context::new();
+        let (key, summary) = permission_request(
+            &exec,
+            "scheduler_create",
+            r#"{"watch":"gh pr checks 12","watch_every":"2m","prompt":"CI 挂了就看看"}"#,
+        );
+        assert_eq!(key, "scheduler_create:watch");
+        assert!(summary.starts_with("$ gh pr checks 12\n"), "{summary}");
+        assert!(summary.contains("每 2m"), "{summary}");
+        let (plain, _) = permission_request(
+            &exec,
+            "scheduler_create",
+            r#"{"interval":"5m","prompt":"x"}"#,
+        );
+        assert_eq!(plain, "scheduler_create");
+    }
+
     use super::*;
 
     fn stub_body() -> ToolBody {

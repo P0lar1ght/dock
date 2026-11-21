@@ -718,9 +718,10 @@ body {
 [data-material="glass"] .glass-pane {
   background-color: var(--glass-pane);
 }
-/* 整页（Pull Request、定时任务、预设编辑器）盖在会话区上：玻璃是半透的，后面的兄弟节点（会话区、面板）藏起来，
-   不卸载、状态都在（同设置页的 settings-open）。 */
-[data-material="glass"] .glass-page ~ * {
+/* 整页（Pull Request、定时任务、预设编辑器）盖在会话区上：后面的兄弟节点（会话区、面板）藏起来，
+   不卸载、状态都在（同设置页的 settings-open）。玻璃是半透的要藏；平面也要藏——会话区里自带
+   z-index 的东西（左边的消息导航 TurnNav 是 z-20，和整页同层、DOM 在后）会叠到整页上面。 */
+.glass-page ~ * {
   visibility: hidden;
 }
 /* 工作台的格子：只画玻璃边 + 顶边一道光 + 落影（拖动时的强调色边照旧）。
