@@ -215,6 +215,67 @@ body {
   }
 }
 
+/* 订阅额度的水球 / 小圆环（PlanUsage.tsx）：两层水波反向慢漂，水面高度与圆弧随数值缓动。 */
+@keyframes water-drift {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(-100px);
+  }
+}
+@keyframes water-drift-back {
+  from {
+    transform: translateX(-100px);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+@keyframes orb-bubbles {
+  0% {
+    transform: translateY(0);
+    opacity: 0;
+  }
+  20% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(-34px);
+    opacity: 0;
+  }
+}
+.water-drift {
+  animation: water-drift 5.5s linear infinite;
+}
+.water-drift-slow {
+  animation: water-drift-back 9s linear infinite;
+}
+.orb-bubbles {
+  animation: orb-bubbles 4.2s var(--ease-out) infinite;
+}
+.orb-level {
+  transition: transform 900ms cubic-bezier(0.34, 1.2, 0.64, 1);
+}
+.ring-arc {
+  transition: stroke-dashoffset 700ms var(--ease-out);
+}
+.usage-bar {
+  transition: width 700ms var(--ease-out);
+}
+@media (prefers-reduced-motion: reduce) {
+  .water-drift,
+  .water-drift-slow,
+  .orb-bubbles {
+    animation: none;
+  }
+  .orb-level,
+  .ring-arc,
+  .usage-bar {
+    transition: none;
+  }
+}
+
 /* 运行中脉冲点。 */
 @keyframes pulse-halo {
   0% {

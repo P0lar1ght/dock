@@ -633,6 +633,20 @@ fn auth_models_json(provider: &str, models: &[cordis_base::auth::RemoteModel]) -
         .collect()
 }
 
+/// `auth/usage { provider? }`：活动账号的订阅额度（每次都问上游，不缓存）。
+///
+/// 回 `{ provider, usage }`；这一家没有额度接口（ChatGPT）时 `usage` 是 `null`。
+/// 没登录、没资格、上游失败都是错误（`details.code` 是归一后的码）。
+pub async fn auth_usage(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
+    let provider_id = auth_provider_param(&params);
+    let manager = auth_manager(gateway)?;
+    let usage = manager
+        .usage(&provider_id)
+        .await
+        .map_err(|e| RpcError::app("usage_failed", e.message()))?;
+    Ok(serde_json::json!({ "provider": provider_id, "usage": usage }))
+}
+
 /// `auth/models { provider? }`：重拉活动账号能用的模型，写进模型目录，回这份列表。
 ///
 /// 登出了 / 没开套餐额度：那一家的模型从目录里拿掉，回错误。
@@ -739,8 +753,12 @@ pub async fn auth_logout(gateway: &GatewayHandle, params: Value) -> Result<Value
         .map_err(|e| RpcError::app("logout_failed", e.message()))?;
     let mut status = auth_status(gateway)?;
     if let cordis_base::auth::LogoutOutcome::LocalOnly { reason } = outcome {
+        let name = manager
+            .provider(&provider_id)
+            .map(|p| p.info().display_name)
+            .unwrap_or("这一家");
         status["warning"] = Value::String(format!(
-            "本地 token 已清，但远端撤销没确认（{reason}）。可以到 ChatGPT 设置里手动断开 Dock。"
+            "本地 token 已清，但远端撤销没确认（{reason}）。可以到 {name} 的账号设置里手动断开 Dock。"
         ));
     }
     Ok(status)
@@ -1423,6 +1441,11 @@ pub fn gateway_settings() -> Plugin {
                         protocol::AUTH_MODELS,
                         TRUSTED_DETACHED,
                         method(|gw, params| async move { auth_models(&gw, params).await }),
+                    ),
+                    (
+                        protocol::AUTH_USAGE,
+                        TRUSTED_DETACHED,
+                        method(|gw, params| async move { auth_usage(&gw, params).await }),
                     ),
                     (
                         protocol::PLUGIN_ENABLE,

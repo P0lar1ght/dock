@@ -1016,6 +1016,13 @@ async fn reasoning_and_goal_project_dock_services() {
         )
         .await;
     assert_eq!(reasoning["result"]["reasoning"]["effort"], "high");
+    // 档位跟着当前模型走：目录里没有这个模型 = 通用档位（含 xhigh）+「关」。
+    // 以前写死 none/low/medium/high，GUI 里每个模型的菜单都一样。
+    assert_eq!(
+        reasoning["result"]["reasoning"]["options"],
+        json!(["none", "low", "medium", "high", "xhigh"]),
+        "{reasoning}"
+    );
     let settings = h.ctx.require::<AppSettings>(SETTINGS).unwrap();
     assert_eq!(settings.effort(), "high");
     assert!(settings.thinking());
@@ -6224,6 +6231,12 @@ async fn auth_status_is_for_the_trusted_gui_only() {
         !status.to_string().contains("SECRET"),
         "不给任何 token：{status}"
     );
+    // ChatGPT 那条没有额度接口：`usage` 是 null（不是错误），也不发网络请求。
+    let usage = gui
+        .call("auth/usage", json!({ "provider": "chatgpt" }))
+        .await;
+    assert_eq!(usage["result"]["provider"], "chatgpt", "{usage}");
+    assert!(usage["result"]["usage"].is_null(), "{usage}");
 
     // 配对来的网页：GUI 批准一次配对，拿网页的 ticket。
     let http = reqwest::Client::new();
@@ -6264,6 +6277,7 @@ async fn auth_status_is_for_the_trusted_gui_only() {
         "auth/logout",
         "auth/cancel",
         "auth/models",
+        "auth/usage",
     ] {
         let denied = page.call(method, json!({})).await;
         assert_eq!(

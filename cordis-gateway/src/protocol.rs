@@ -265,6 +265,8 @@ pub const AUTH_LOGOUT: &str = "auth/logout";
 pub const AUTH_CANCEL: &str = "auth/cancel";
 /// 重拉活动账号能用的模型并入模型目录（`auth/models`）。
 pub const AUTH_MODELS: &str = "auth/models";
+/// 活动账号的订阅额度（`auth/usage`）：已用百分比、周期、套餐名。查不了是 `usage: null`。
+pub const AUTH_USAGE: &str = "auth/usage";
 /// 连接级推送（只推受信连接）：订阅通道的账号或登录状态变了（`{ provider }`），
 /// 重拉 `auth/status`。
 pub const AUTH_CHANGED: &str = "auth/changed";

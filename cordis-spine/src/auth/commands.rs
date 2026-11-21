@@ -5,12 +5,13 @@
 //! /auth login [new|identity|<账号>] [provider]
 //!                                    登录：默认重新登录活动账号（登出了也算，复用原注册）；
 //!                                    new = 再加一个账号；identity = 只要身份，不要套餐额度
-//! /auth logout [账号]                撤销 refresh token、清本地 token（注册与 host_id 留着）
+//! /auth logout [账号|provider]       撤销 refresh token、清本地 token（注册与 host_id 留着）
 //! /auth cancel [provider]            中断正在等授权的登录
 //! /auth status                       各 provider 的活动账号、套餐授权、token 剩余时间
 //! /auth list                         列出已保存的账号，标出活动账号与已登出的
 //! /auth use <账号>                   切活动账号
 //! /auth models [provider]            重拉可用模型并入模型目录（/model <provider>/<slug>）
+//! /auth usage [provider]             订阅额度还剩多少（本周期已用百分比、重置时间）
 //! /auth import <文件> [provider]     导入从别处传来的凭据（VPS 场景），用本机 host_id
 //! ```
 //!
@@ -27,7 +28,7 @@ use crate::host::slash::{register_commands, Slash, SlashCommand, SlashOutcome};
 use crate::names::{AUTH, SLASH};
 use cordis_base::auth::{LoginRequest, LoginTarget, LogoutOutcome, ScopeMode};
 
-const SUBCOMMANDS: &str = "login / logout / cancel / status / list / use / models / import";
+const SUBCOMMANDS: &str = "login / logout / cancel / status / list / use / models / usage / import";
 
 pub fn auth_commands() -> Plugin {
     plugin(
@@ -66,6 +67,7 @@ async fn run(page: Context, args: String) -> SlashOutcome {
         "list" => list(&manager),
         "use" => use_account(&manager, rest.first().copied()),
         "models" => models(&manager, rest.first().copied()).await,
+        "usage" => usage(&manager, rest.first().copied()).await,
         "import" => import(&manager, &rest),
         other => SlashOutcome::Applied(format!("未知子命令 {other}。可用：{SUBCOMMANDS}")),
     }
@@ -125,22 +127,28 @@ fn login(manager: &Arc<AuthManager>, page: &Context, args: &[&str]) -> SlashOutc
     }
 }
 
-/// `/auth logout [账号]`：没给就是默认 provider 的活动账号。
+/// `/auth logout [账号|provider]`：没给就是默认 provider 的活动账号；给的是 provider
+/// id（`grok`）就是那一家的活动账号。
 async fn logout(manager: &AuthManager, account: Option<&str>) -> SlashOutcome {
-    let provider = match account {
+    let (provider, account) = match account {
+        Some(id) if manager.provider_ids().iter().any(|p| p == id) => (id.to_string(), None),
         Some(id) => match manager.find_account(id) {
-            Some((owner, _)) => owner,
+            Some((owner, _)) => (owner, Some(id)),
             None => return SlashOutcome::Applied(format!("本机没有这个账号：{id}")),
         },
-        None => default_provider(manager),
+        None => (default_provider(manager), None),
     };
+    let name = manager
+        .provider(&provider)
+        .map(|p| p.info().display_name)
+        .unwrap_or("这一家");
     match manager.logout(&provider, account, true).await {
         Ok((acct, LogoutOutcome::Revoked)) => SlashOutcome::Applied(format!(
-            "已登出并撤销 {}。注册还留着：/auth login 直接复用。",
-            acct.client_id
+            "已登出并撤销 {}（{provider}）。账号还在 /auth list 里：/auth login {} 重新登录。",
+            acct.client_id, acct.client_id
         )),
         Ok((acct, LogoutOutcome::LocalOnly { reason })) => SlashOutcome::Applied(format!(
-            "已清掉 {} 的本地 token，但远端撤销没确认（{reason}）。可以到 ChatGPT 设置里手动断开 Dock。",
+            "已清掉 {} 的本地 token，但远端撤销没确认（{reason}）。可以到 {name} 的账号设置里手动断开 Dock。",
             acct.client_id
         )),
         Err(e) => SlashOutcome::Applied(e.message()),
@@ -285,6 +293,87 @@ async fn models(manager: &AuthManager, provider: Option<&str>) -> SlashOutcome {
     }
 }
 
+/// `/auth usage [provider]`：订阅额度还剩多少。没写 provider 就列每一家登着的。
+async fn usage(manager: &AuthManager, provider: Option<&str>) -> SlashOutcome {
+    let ids: Vec<String> = match provider {
+        Some(p) => vec![p.to_string()],
+        None => manager
+            .provider_ids()
+            .into_iter()
+            .filter(|id| manager.active_account(id).is_some())
+            .collect(),
+    };
+    if ids.is_empty() {
+        return SlashOutcome::Applied("还没有登录任何订阅通道：/auth login".into());
+    }
+    let now = crate::auth::credentials::now_unix();
+    let mut lines = Vec::new();
+    for id in ids {
+        let name = manager
+            .provider(&id)
+            .map(|p| p.info().display_name)
+            .unwrap_or("这一家");
+        lines.push(match manager.usage(&id).await {
+            Ok(Some(u)) => usage_line(name, &u, now),
+            Ok(None) => format!("{name}：这一家查不了额度，到它的用量页看。"),
+            Err(e) => format!("{name}：{}", e.message()),
+        });
+    }
+    SlashOutcome::notice("订阅额度", lines.join("\n"))
+}
+
+/// 一家的额度，一行：`Grok（SuperGrok）：本周已用 27%，还剩 73% · 2 天 14 小时后重置`。
+fn usage_line(name: &str, u: &cordis_base::auth::PlanUsage, now: u64) -> String {
+    let who = match &u.plan {
+        Some(plan) => format!("{name}（{plan}）"),
+        None => name.to_string(),
+    };
+    let period = match u.period.as_ref().and_then(|p| p.kind.as_deref()) {
+        Some("weekly") => "本周",
+        Some("monthly") => "本月",
+        _ => "本周期",
+    };
+    let mut line = match u.used_percent {
+        Some(used) => format!(
+            "{who}：{period}已用 {}%，还剩 {}%",
+            percent(used),
+            percent(100.0 - used)
+        ),
+        None => format!("{who}：上游没给已用多少"),
+    };
+    if let Some(end) = u.period.as_ref().and_then(|p| p.end) {
+        if end > now {
+            line.push_str(&format!(" · {}后重置", span(end - now)));
+        }
+    }
+    if let Some(cents) = u.prepaid_balance_cents.filter(|c| *c > 0) {
+        line.push_str(&format!(" · 预付余额 ${:.2}", cents as f64 / 100.0));
+    }
+    line
+}
+
+/// 百分比：整数就不带小数，否则一位。
+fn percent(p: f64) -> String {
+    let p = p.clamp(0.0, 100.0);
+    if (p - p.round()).abs() < 0.05 {
+        format!("{}", p.round() as i64)
+    } else {
+        format!("{p:.1}")
+    }
+}
+
+/// 一段时长：`2 天 14 小时` / `5 小时 3 分` / `12 分`。
+fn span(secs: u64) -> String {
+    let (d, h, m) = (secs / 86_400, secs % 86_400 / 3600, secs % 3600 / 60);
+    if d > 0 {
+        format!("{d} 天 {h} 小时")
+    } else if h > 0 {
+        format!("{h} 小时 {m} 分")
+    } else {
+        format!("{} 分", m.max(1))
+    }
+}
+
 /// `/auth import <文件> [provider]`：把别处传来的凭据装进来（VPS 场景）。
 ///
 /// 官方那套是「本地登录 → 经 SSH 之类的安全通道传凭据 → 远端用自己的 host id
@@ -307,5 +396,49 @@ fn import(manager: &AuthManager, args: &[&str]) -> SlashOutcome {
             key.client_id
         )),
         Err(e) => SlashOutcome::Applied(e.message()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cordis_base::auth::{PlanUsage, UsagePeriod};
+
+    #[test]
+    fn a_usage_line_says_what_is_left_and_when_it_resets() {
+        let now = 1_000_000;
+        let u = PlanUsage {
+            plan: Some("SuperGrok".into()),
+            used_percent: Some(27.0),
+            period: Some(UsagePeriod {
+                kind: Some("weekly".into()),
+                start: None,
+                end: Some(now + 2 * 86_400 + 14 * 3600 + 59),
+            }),
+            prepaid_balance_cents: Some(0),
+            fetched_at: now,
+        };
+        assert_eq!(
+            usage_line("Grok", &u, now),
+            "Grok（SuperGrok）：本周已用 27%，还剩 73% · 2 天 14 小时后重置"
+        );
+        let u = PlanUsage {
+            plan: None,
+            used_percent: Some(12.34),
+            period: None,
+            prepaid_balance_cents: Some(1250),
+            fetched_at: now,
+        };
+        assert_eq!(
+            usage_line("Grok", &u, now),
+            "Grok：本周期已用 12.3%，还剩 87.7% · 预付余额 $12.50"
+        );
+        let u = PlanUsage {
+            used_percent: None,
+            ..PlanUsage::default()
+        };
+        assert_eq!(usage_line("Grok", &u, now), "Grok：上游没给已用多少");
+        assert_eq!(span(59), "1 分");
+        assert_eq!(span(3 * 3600 + 120), "3 小时 2 分");
     }
 }

@@ -1,8 +1,9 @@
 //! ID token（JWT）的读取与校验。
 //!
 //! 官方文档写的是「验签名不可省」，这里照做：拿 OIDC discovery 的
-//! `jwks_uri` 里的 RSA 公钥验 RS256 签名（`ring` 验，ring 早就在依赖树里——
-//! rustls 带的），再校验声明（iss / aud / exp / nonce）。
+//! `jwks_uri` 里的公钥验签名（`ring` 验，ring 早就在依赖树里——rustls 带的），
+//! 再校验声明（iss / aud / exp / nonce）。ChatGPT 用 RSA（RS256），xAI 用 P-256
+//! 椭圆曲线（ES256）。
 //!
 //! 顺序不能反：**先验签名再看声明**——没验过签名的声明就是攻击者写的。
 
@@ -23,15 +24,46 @@ pub struct Claims {
     pub scope: Option<String>,
 }
 
-/// 声明校验：签发方 / 受众 / 过期 / nonce。
+/// 声明校验（ChatGPT 那条）：签发方 / 受众 / 过期 / nonce。生产路径经
+/// [`verify_id_token`] 走同一份 [`validate_claims_for`]；这个入口给测试单独看声明。
 ///
 /// **`exp` 与 `nonce` 必须有**：少了就说明这不是这次授权发出来的那张 token。
 /// 早先当可选处理，缺了也能过——nonce 是这次授权与那张 token 的唯一绑定。
+#[cfg(test)]
 fn validate_claims(claims: &Claims, expected_audience: &str, nonce: &str) -> Result<(), String> {
-    if claims.issuer != ISSUER {
+    validate_claims_for(
+        claims,
+        &Expected {
+            issuer: ISSUER,
+            audience: expected_audience,
+            nonce: Some(nonce),
+            alg: "RS256",
+        },
+    )
+}
+
+/// 这张 ID token 该长什么样。
+#[derive(Debug, Clone, Copy)]
+pub struct Expected<'a> {
+    /// 签发方（`iss`）。
+    pub issuer: &'a str,
+    /// 受众（`aud` 里要有它）：这次授权用的 client。
+    pub audience: &'a str,
+    /// 这次授权带的 nonce。`None` = 这条流程**本来就没有** nonce（device code
+    /// 授权：没有浏览器回调，token 由 Dock 自己直接向 token 端点换来）——不是
+    /// 「有就查、没有就算」：带了 nonce 的流程必须传 `Some`。
+    pub nonce: Option<&'a str>,
+    /// 只认的签名算法（`RS256` / `ES256`）。
+    pub alg: &'a str,
+}
+
+/// 按 [`Expected`] 校验声明。
+fn validate_claims_for(claims: &Claims, want: &Expected<'_>) -> Result<(), String> {
+    let expected_audience = want.audience;
+    if claims.issuer != want.issuer {
         return Err(format!(
-            "ID token 的签发方不对（{}，期望 {ISSUER}）",
-            claims.issuer
+            "ID token 的签发方不对（{}，期望 {}）",
+            claims.issuer, want.issuer
         ));
     }
     if !claims.audience.iter().any(|a| a == expected_audience) {
@@ -47,10 +79,12 @@ fn validate_claims(claims: &Claims, expected_audience: &str, nonce: &str) -> Res
     if exp <= now {
         return Err("ID token 已经过期".into());
     }
-    match &claims.nonce {
-        Some(n) if n == nonce => {}
-        Some(_) => return Err("ID token 的 nonce 对不上".into()),
-        None => return Err("ID token 里没有 nonce".into()),
+    if let Some(nonce) = want.nonce {
+        match &claims.nonce {
+            Some(n) if n == nonce => {}
+            Some(_) => return Err("ID token 的 nonce 对不上".into()),
+            None => return Err("ID token 里没有 nonce".into()),
+        }
     }
     Ok(())
 }
@@ -64,21 +98,37 @@ struct Jwk {
     e: Vec<u8>,
 }
 
+/// 一把公钥（P-256 椭圆曲线）。
+#[derive(Debug, Clone)]
+struct EcJwk {
+    kid: Option<String>,
+    alg: Option<String>,
+    /// 未压缩的公钥点：`0x04 || x || y`（ring 要的格式）。
+    point: Vec<u8>,
+}
+
 /// JWKS：授权服务器的公钥集。
 #[derive(Debug, Clone, Default)]
 pub struct Jwks {
     keys: Vec<Jwk>,
+    ec_keys: Vec<EcJwk>,
 }
 
 impl Jwks {
-    /// 解析 JWKS 文档。只收 RSA 用的（`kty == "RSA"`）。
+    /// 解析 JWKS 文档。收 RSA（`kty == "RSA"`）与 P-256 椭圆曲线
+    /// （`kty == "EC"`、`crv == "P-256"`）的公钥，别的跳过。
     pub fn parse(v: &Value) -> Result<Self, String> {
         let list = v
             .get("keys")
             .and_then(|k| k.as_array())
             .ok_or("JWKS 里没有 keys")?;
         let mut keys = Vec::new();
+        let mut ec_keys = Vec::new();
         for k in list {
+            if let Some(ec) = parse_ec_key(k) {
+                ec_keys.push(ec);
+                continue;
+            }
             if k.get("kty").and_then(|t| t.as_str()) != Some("RSA") {
                 continue;
             }
@@ -103,10 +153,39 @@ impl Jwks {
                 e: strip_leading_zeros(&e),
             });
         }
-        if keys.is_empty() {
-            return Err("JWKS 里没有可用的 RSA 公钥".into());
+        if keys.is_empty() && ec_keys.is_empty() {
+            return Err("JWKS 里没有可用的公钥（只认 RSA 与 P-256）".into());
         }
-        Ok(Self { keys })
+        Ok(Self { keys, ec_keys })
+    }
+
+    /// 验 ES256 签名（JWS 规定签名是定长的 `r || s`，64 字节）。
+    fn verify_es256(
+        &self,
+        kid: Option<&str>,
+        message: &[u8],
+        signature: &[u8],
+    ) -> Result<(), String> {
+        let mut tried = 0usize;
+        for key in &self.ec_keys {
+            if key.alg.as_deref().is_some_and(|a| a != "ES256") {
+                continue;
+            }
+            if let (Some(want), Some(have)) = (kid, key.kid.as_deref()) {
+                if want != have {
+                    continue;
+                }
+            }
+            tried += 1;
+            let public = ring::signature::UnparsedPublicKey::new(
+                &ring::signature::ECDSA_P256_SHA256_FIXED,
+                &key.point,
+            );
+            if public.verify(message, signature).is_ok() {
+                return Ok(());
+            }
+        }
+        Err(format!("ID token 签名验不过（试了 {tried} 把公钥）"))
     }
 
     /// 验 RS256 签名。
@@ -174,6 +253,33 @@ pub fn parse_claims(token: &str) -> Result<Claims, String> {
     })
 }
 
+/// JWKS 里的一把 P-256 公钥。不是这种钥匙（或坐标解不开、长度不对）就 `None`。
+fn parse_ec_key(k: &Value) -> Option<EcJwk> {
+    if k.get("kty").and_then(|t| t.as_str()) != Some("EC")
+        || k.get("crv").and_then(|c| c.as_str()) != Some("P-256")
+    {
+        return None;
+    }
+    let coord = |name: &str| {
+        let raw = k.get(name)?.as_str()?;
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(raw.as_bytes())
+            .ok()?;
+        // P-256 的坐标是 32 字节定长；长度不对的不是这条曲线上的点。
+        (bytes.len() == 32).then_some(bytes)
+    };
+    let (x, y) = (coord("x")?, coord("y")?);
+    let mut point = Vec::with_capacity(65);
+    point.push(0x04);
+    point.extend_from_slice(&x);
+    point.extend_from_slice(&y);
+    Some(EcJwk {
+        kid: k.get("kid").and_then(|x| x.as_str()).map(str::to_string),
+        alg: k.get("alg").and_then(|x| x.as_str()).map(str::to_string),
+        point,
+    })
+}
+
 /// 去掉大端整数的前导零字节。
 fn strip_leading_zeros(v: &[u8]) -> Vec<u8> {
     let first = v.iter().position(|b| *b != 0).unwrap_or(v.len());
@@ -203,6 +309,20 @@ pub fn verify_id_token(
     nonce: &str,
     jwks: &Jwks,
 ) -> Result<Claims, String> {
+    verify_jwt(
+        token,
+        &Expected {
+            issuer: ISSUER,
+            audience: expected_audience,
+            nonce: Some(nonce),
+            alg: "RS256",
+        },
+        jwks,
+    )
+}
+
+/// 校验一张 ID token：先按 `want.alg` 验签名，再按 `want` 看声明。
+pub fn verify_jwt(token: &str, want: &Expected<'_>, jwks: &Jwks) -> Result<Claims, String> {
     let mut parts = token.split('.');
     let header_b64 = parts.next().ok_or("ID token 不是 JWT")?;
     let payload_b64 = parts.next().ok_or("ID token 不是 JWT")?;
@@ -217,8 +337,8 @@ pub fn verify_id_token(
     let header: Value =
         serde_json::from_slice(&header_raw).map_err(|e| format!("ID token 头不是 JSON：{e}"))?;
     match header["alg"].as_str() {
-        Some("RS256") => {}
-        Some(other) => return Err(format!("ID token 的算法不对（{other}，只认 RS256）")),
+        Some(alg) if alg == want.alg => {}
+        Some(other) => return Err(format!("ID token 的算法不对（{other}，只认 {}）", want.alg)),
         None => return Err("ID token 头里没有 alg".into()),
     }
     let kid = header["kid"].as_str();
@@ -227,10 +347,14 @@ pub fn verify_id_token(
         .map_err(|e| format!("ID token 签名解不开：{e}"))?;
     // 签名盖的是前两段原文。
     let signing_input = format!("{header_b64}.{payload_b64}");
-    jwks.verify_rs256(kid, signing_input.as_bytes(), &signature)?;
+    match want.alg {
+        "RS256" => jwks.verify_rs256(kid, signing_input.as_bytes(), &signature)?,
+        "ES256" => jwks.verify_es256(kid, signing_input.as_bytes(), &signature)?,
+        other => return Err(format!("不支持的签名算法：{other}")),
+    }
 
     let claims = parse_claims(token)?;
-    validate_claims(&claims, expected_audience, nonce)?;
+    validate_claims_for(&claims, want)?;
     Ok(claims)
 }
 
@@ -355,6 +479,128 @@ mod tests {
         }));
         let err = verify_id_token(&token, "oaiapp_test", "n1", &jwks()).expect_err("假签名必须拒");
         assert!(err.contains("验签") || err.contains("签名"), "{err}");
+    }
+
+    /// 线上 `auth.x.ai/.well-known/jwks.json`（公钥不是秘密）：两把 P-256 的 EC 钥匙。
+    const XAI_JWKS: &str = r#"{"keys":[{"kty":"EC","crv":"P-256","use":"sig","alg":"ES256","kid":"oauth2-production-2026-02-19","x":"-m5WdZbaehSO0yesg3a9FsZV1m-F5uQSIO87UBwA8Nk","y":"_-hhOxLm_1V83mLmXv83rYS7u_Hli3Okv56THqf9YCg"},{"kty":"EC","crv":"P-256","use":"sig","alg":"ES256","kid":"ia-20260825-prod","x":"0hPZqAZVcxjCzHq102VS_YAOqxvTFfHYmCqxMZfFNj4","y":"MX-CkaPg-imLhMXn00Rjr9izW_NomW9WqZS6s-XQglY"}]}"#;
+
+    #[test]
+    fn parses_the_real_xai_jwks_shape() {
+        let keys = Jwks::parse(&serde_json::from_str(XAI_JWKS).unwrap()).unwrap();
+        assert!(keys.keys.is_empty(), "xAI 那份里没有 RSA 钥匙");
+        assert_eq!(keys.ec_keys.len(), 2);
+        assert_eq!(
+            keys.ec_keys[0].kid.as_deref(),
+            Some("oauth2-production-2026-02-19")
+        );
+        // 未压缩点：0x04 + 32 字节 x + 32 字节 y。
+        assert_eq!(keys.ec_keys[0].point.len(), 65);
+        assert_eq!(keys.ec_keys[0].point[0], 0x04);
+    }
+
+    const XAI_ISSUER: &str = "https://auth.x.ai";
+
+    fn device_expect<'a>() -> Expected<'a> {
+        Expected {
+            issuer: XAI_ISSUER,
+            audience: "grok-client",
+            nonce: None,
+            alg: "ES256",
+        }
+    }
+
+    /// 现场造一把 P-256 钥匙，签一张 ES256 的 token：回（只含这把公钥的 JWKS，token）。
+    fn es256_signed(payload: Value) -> (Jwks, String) {
+        use base64::Engine;
+        use ring::signature::{EcdsaKeyPair, KeyPair, ECDSA_P256_SHA256_FIXED_SIGNING};
+        let enc = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng).unwrap();
+        let pair = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8.as_ref(), &rng)
+            .unwrap();
+        let point = pair.public_key().as_ref().to_vec();
+        let jwks = json!({"keys": [{
+            "kty": "EC", "crv": "P-256", "alg": "ES256", "kid": "k1",
+            "x": enc.encode(&point[1..33]),
+            "y": enc.encode(&point[33..65]),
+        }]});
+        let input = format!(
+            "{}.{}",
+            enc.encode(br#"{"alg":"ES256","kid":"k1","typ":"JWT"}"#),
+            enc.encode(serde_json::to_vec(&payload).unwrap())
+        );
+        let sig = pair.sign(&rng, input.as_bytes()).unwrap();
+        (
+            Jwks::parse(&jwks).unwrap(),
+            format!("{input}.{}", enc.encode(sig.as_ref())),
+        )
+    }
+
+    fn xai_claims() -> Value {
+        json!({
+            "iss": XAI_ISSUER,
+            "aud": "grok-client",
+            "sub": "user-x",
+            "email": "x@y.z",
+            "exp": crate::auth::credentials::now_unix() + 600,
+        })
+    }
+
+    /// device code 授权没有 nonce：签名对、声明对就过。
+    #[test]
+    fn an_es256_token_without_nonce_passes_the_device_flow() {
+        let (keys, token) = es256_signed(xai_claims());
+        let claims = verify_jwt(&token, &device_expect(), &keys).unwrap();
+        assert_eq!(claims.subject.as_deref(), Some("user-x"));
+        assert_eq!(claims.email.as_deref(), Some("x@y.z"));
+    }
+
+    /// ES256 一样：改过载荷就验不过。
+    #[test]
+    fn a_tampered_es256_token_is_refused() {
+        use base64::Engine;
+        let enc = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let (keys, token) = es256_signed(xai_claims());
+        let mut parts: Vec<String> = token.split('.').map(str::to_string).collect();
+        let mut v = xai_claims();
+        v["sub"] = json!("user-y");
+        parts[1] = enc.encode(serde_json::to_vec(&v).unwrap());
+        let err = verify_jwt(&parts.join("."), &device_expect(), &keys).expect_err("改过就拒");
+        assert!(err.contains("签名"), "{err}");
+        // 别人家的钥匙也验不过它。
+        let other = Jwks::parse(&serde_json::from_str(XAI_JWKS).unwrap()).unwrap();
+        let err = verify_jwt(&token, &device_expect(), &other).expect_err("不是这把钥匙签的");
+        assert!(err.contains("签名"), "{err}");
+    }
+
+    /// 签名对但签发方 / 受众不对、要 nonce 却没有，都拒；算法对不上也拒。
+    #[test]
+    fn es256_claims_and_algorithm_are_still_checked() {
+        let (keys, token) = es256_signed(xai_claims());
+        let wrong_issuer = Expected {
+            issuer: "https://auth.example.com",
+            ..device_expect()
+        };
+        assert!(verify_jwt(&token, &wrong_issuer, &keys)
+            .unwrap_err()
+            .contains("签发方"));
+        let wrong_aud = Expected {
+            audience: "someone-else",
+            ..device_expect()
+        };
+        assert!(verify_jwt(&token, &wrong_aud, &keys)
+            .unwrap_err()
+            .contains("受众"));
+        let wants_nonce = Expected {
+            nonce: Some("n1"),
+            ..device_expect()
+        };
+        assert!(verify_jwt(&token, &wants_nonce, &keys)
+            .unwrap_err()
+            .contains("nonce"));
+        // ChatGPT 那条只认 RS256：ES256 的 token 拿过去直接拒。
+        let err = verify_id_token(&token, "grok-client", "n1", &keys).expect_err("算法不对");
+        assert!(err.contains("ES256"), "{err}");
     }
 
     /// 自造一个 JWT（签名是假的），用来看声明校验确实在跑。

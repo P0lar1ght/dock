@@ -7,7 +7,7 @@ use cordis::Context;
 
 #[tokio::test]
 async fn auth_command_and_provider_are_mounted() {
-    // 隔离的 DOCK_HOME：`install_app` 挂上 chatgpt provider 时会看活动账号、按需
+    // 隔离的 DOCK_HOME：`install_app` 挂上 chatgpt / grok provider 时会看活动账号、按需
     // 重拉模型列表——不能读到开发机上真的 ChatGPT 凭据、去打 OpenAI、改真的
     // `~/.dock/auth_models.json`。本二进制只有这一个测试，直接设环境变量就行。
     let home = tempfile::tempdir().unwrap();
@@ -44,4 +44,10 @@ async fn auth_command_and_provider_are_mounted() {
         manager.provider_ids().contains(&"chatgpt".to_string()),
         "chatgpt provider 没注册进来"
     );
+    assert!(
+        manager.provider_ids().contains(&"grok".to_string()),
+        "grok provider 没注册进来"
+    );
+    // 隔离的 DOCK_HOME 里没有凭据：挂上了但没有账号，不是启动前置条件。
+    assert!(manager.accounts("grok").is_empty());
 }

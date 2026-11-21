@@ -3,6 +3,9 @@
 //!
 //! 只在用户点了才拉；Dock 自己不读这份目录、不按它猜模型能力——加模型时由界面把
 //! 目录里的值写进 `[model.<id>]`，之后以 config 为准。
+//!
+//! 唯一的例外是 Grok 订阅：xAI 的模型列表不给推理档位，`grok` provider 刷新模型时
+//! 按这份目录的 `xai` 条目填（见 `auth::grok`）。
 
 use std::time::Duration;
 
@@ -22,6 +25,9 @@ const MODEL_KEYS: &[&str] = &[
     "reasoning",
     "tool_call",
     "attachment",
+    // 推理档位：`[{ "type": "effort", "values": ["low", …, "max"] }, { "type": "toggle" }]`。
+    // 开模型时写进 `reasoning_efforts`，`/effort` 菜单才列得对。
+    "reasoning_options",
     "modalities",
     "limit",
     "cost",
@@ -95,6 +101,7 @@ mod tests {
                 "models": {
                     "deepseek-chat": {
                         "id": "deepseek-chat", "name": "DeepSeek Chat", "reasoning": false,
+                        "reasoning_options": [{ "type": "toggle" }, { "type": "effort", "values": ["low", "high", "max"] }],
                         "limit": { "context": 128000, "output": 8192 },
                         "cost": { "input": 0.28, "output": 0.42 },
                         "knowledge": "2024-07", "open_weights": true
@@ -109,6 +116,11 @@ mod tests {
         assert!(p.get("extra").is_none());
         let m = &p["models"]["deepseek-chat"];
         assert_eq!(m["limit"]["context"], 128000);
+        assert_eq!(
+            m["reasoning_options"][1]["values"],
+            json!(["low", "high", "max"]),
+            "推理档位要留着：开模型时写进 reasoning_efforts"
+        );
         assert!(m.get("knowledge").is_none());
         assert!(out.get("broken").is_none());
         assert!(trim_models_dev(&json!([])).is_err());

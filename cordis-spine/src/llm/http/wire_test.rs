@@ -213,6 +213,9 @@ async fn read_request(socket: &mut tokio::net::TcpStream) -> Option<(String, Str
 struct FakeProvider {
     bearer: &'static str,
     policy: WirePolicy,
+    /// 按 Grok 那条的规矩认错误（403 `unauthenticated:*` 算 token 失效、xAI 的
+    /// 错误码）；`false` 是 ChatGPT 那条。
+    grok: bool,
 }
 
 fn wire_account() -> AccountKey {
@@ -317,9 +320,22 @@ impl AuthProvider for FakeProvider {
         Box::pin(async { Ok(Vec::new()) })
     }
 
+    fn token_rejected(&self, status: u16, body: &[u8]) -> bool {
+        if self.grok {
+            crate::auth::grok_token_rejected(status, body)
+        } else {
+            status == 401
+        }
+    }
+
     fn classify(&self, status: u16, body: &[u8]) -> Option<AuthError> {
-        // 用**真的**分类逻辑（官方那套 `subscription_sharing_*` 错误码）。
-        crate::auth::classify_upstream_error(status, body)
+        // 用**真的**分类逻辑（ChatGPT：官方那套 `subscription_sharing_*` 错误码；
+        // Grok：xAI 的 `{"code", "error"}`）。
+        if self.grok {
+            crate::auth::classify_grok_error(status, body)
+        } else {
+            crate::auth::classify_upstream_error(status, body)
+        }
     }
 }
 
@@ -363,16 +379,39 @@ fn ctx_for(model: &str) -> (Context, Disposable, Disposable) {
 }
 
 fn ctx_with_manager(model: &str) -> (Context, Disposable, Disposable, AuthManager) {
+    ctx_with_provider(
+        model,
+        FakeProvider {
+            bearer: "lease-token-xyz",
+            policy: chatgpt_policy(),
+            grok: false,
+        },
+    )
+}
+
+/// 按 Grok 那条规矩认错误的假 provider（请求体策略也是 Grok 的）。
+fn grok_ctx(model: &str) -> (Context, Disposable, Disposable, AuthManager) {
+    ctx_with_provider(
+        model,
+        FakeProvider {
+            bearer: "lease-token-xyz",
+            policy: crate::auth::grok_policy(),
+            grok: true,
+        },
+    )
+}
+
+fn ctx_with_provider(
+    model: &str,
+    provider: FakeProvider,
+) -> (Context, Disposable, Disposable, AuthManager) {
     let ctx = Context::new();
     let hold_settings = ctx
         .provide(SETTINGS, AppSettings::new(model))
         .expect("挂 settings");
     let manager = AuthManager::default();
     // 测试活到最后，provider 不卸。
-    std::mem::forget(manager.register(Arc::new(FakeProvider {
-        bearer: "lease-token-xyz",
-        policy: chatgpt_policy(),
-    })));
+    std::mem::forget(manager.register(Arc::new(provider)));
     let hold_auth = ctx.provide(AUTH, manager.clone()).expect("挂 auth");
     (ctx, hold_settings, hold_auth, manager)
 }
@@ -689,6 +728,131 @@ async fn 订阅那条遇到_401_会换一次_token_再重试() {
         seen[1].authorization.as_deref(),
         Some("Bearer lease-token-refreshed"),
         "重试要带换过的那份"
+    );
+}
+
+/// 启动时目录是空的（新装、还没配模型）：`llm` 先用离线的假采样器；之后目录里有了
+/// 能连的模型（登录了订阅、设置里加了模型），下一次采样就走 HTTP，不用重启。
+/// 改之前挂载时就定死了假采样器：首次 `/auth login` 完收到的还是假回复。
+#[tokio::test(flavor = "multi_thread")]
+async fn 启动时没有模型_之后加了就走_http() {
+    let cwd = tempfile::tempdir().unwrap();
+    let _env = cordis_base::test_env::scoped()
+        .home()
+        .cwd(cwd.path())
+        .remove("DOCK_API_KEY")
+        .remove("OPENAI_API_KEY")
+        .remove("XAI_API_KEY")
+        .remove("DOCK_MODEL");
+    let ctx = Context::new();
+    let _hold_settings = ctx
+        .provide(SETTINGS, AppSettings::new("wire-key"))
+        .expect("挂 settings");
+    let config = crate::llm::sampler::LlmConfig::from_env();
+    assert_eq!(
+        config.mode,
+        crate::llm::sampler::LlmMode::Workspace,
+        "目录是空的：启动时该是离线模式"
+    );
+    ctx.plugin(crate::llm::sampler::llm(), config)
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    let llm = ctx.get::<Llm>(crate::names::LLM).expect("llm");
+    let request = || PromptRequest {
+        system: "你是助手".into(),
+        history: vec![LogEvent::User("hi".into())],
+        tools: vec![],
+    };
+
+    let upstream = FakeUpstream::start().await;
+    let offline = llm.stream(request()).await;
+    assert!(upstream.captured().is_empty(), "目录还空着，不该发请求");
+    assert!(offline.error.is_none(), "{offline:?}");
+
+    // 有了能连的模型（这里是密钥模型；订阅模型登录后写进 auth_models.json，一样算）。
+    write_catalog(&upstream.base());
+    let online = llm.stream(request()).await;
+    assert!(online.error.is_none(), "{online:?}");
+    assert_ne!(online.text, offline.text, "不该还是离线的假回复");
+    let seen = upstream.captured();
+    assert_eq!(seen.len(), 1, "该走 HTTP 了");
+    assert_eq!(seen[0].authorization.as_deref(), Some("Bearer sk-wire-key"));
+}
+
+/// Grok：校验不过的 token 回 403 `unauthenticated:bad-credentials`（不是 401）——
+/// 也要换一份 token 重发一次。改之前只认 401，这种 403 直接报错、不刷新。
+#[tokio::test(flavor = "multi_thread")]
+async fn grok_那条_token_失效的_403_也换一次_token_再重试() {
+    let (_env, _cwd) = isolated_env();
+    let rejected = json!({
+        "code": "unauthenticated:bad-credentials",
+        "error": "The OAuth2 access token could not be validated.",
+    })
+    .to_string();
+    let upstream = FakeUpstream::start_seq(vec![(403, rejected), (200, sse_body())]).await;
+    write_catalog(&upstream.base());
+    let (ctx, _hold_settings, _hold_auth, _manager) = grok_ctx("wire-oauth");
+
+    let out = ask(&ctx, "wire-oauth").await;
+    assert!(out.error.is_none(), "换过 token 该成功：{out:?}");
+    let seen = upstream.captured();
+    assert_eq!(seen.len(), 2, "403 + 换 token 重发一次：{seen:?}");
+    assert_eq!(
+        seen[1].authorization.as_deref(),
+        Some("Bearer lease-token-refreshed"),
+        "重发要带换过的那份"
+    );
+}
+
+/// Grok：套餐档位不够的 403 不是 token 的事——不刷新、不重发，把原因说出来。
+#[tokio::test(flavor = "multi_thread")]
+async fn grok_那条档位不够的_403_不重发() {
+    let (_env, _cwd) = isolated_env();
+    let rejected = json!({
+        "code": "permission-denied",
+        "error": "The caller does not have permission to execute the specified operation.",
+    })
+    .to_string();
+    let upstream = FakeUpstream::start_with(403, rejected).await;
+    write_catalog(&upstream.base());
+    let (ctx, _hold_settings, _hold_auth, _manager) = grok_ctx("wire-oauth");
+
+    let err = ask(&ctx, "wire-oauth").await.error.expect("该报错");
+    assert!(err.contains("订阅档位"), "{err}");
+    assert!(err.contains("does not have permission"), "{err}");
+    assert_eq!(upstream.captured().len(), 1, "档位不够重发也没用");
+}
+
+/// Grok：模型不收 `reasoning.effort`（grok-4.20 那几个），去掉它重发一次，下一轮
+/// 一开始就不发。请求体里带 `prompt_cache_key`（缓存路由靠它）。
+#[tokio::test(flavor = "multi_thread")]
+async fn grok_那条模型不收_reasoning_effort_去掉再发() {
+    let (_env, _cwd) = isolated_env();
+    let rejected = json!({
+        "code": "invalid-argument",
+        "error": "Model grok-4.20-0309-reasoning does not support parameter reasoningEffort.",
+    })
+    .to_string();
+    let upstream = FakeUpstream::start_seq(vec![(400, rejected), (200, sse_body())]).await;
+    write_catalog_with(
+        &upstream.base(),
+        "reasoning = true\nreasoning_effort = \"high\"\n",
+    );
+    let (ctx, _hold_settings, _hold_auth, manager) = grok_ctx("wire-oauth");
+
+    let out = ask(&ctx, "wire-oauth").await;
+    assert!(out.error.is_none(), "去掉 effort 后该成功：{out:?}");
+    let seen = upstream.captured();
+    assert_eq!(seen.len(), 2, "{seen:?}");
+    let first: serde_json::Value = serde_json::from_str(&seen[0].body).unwrap();
+    let second: serde_json::Value = serde_json::from_str(&seen[1].body).unwrap();
+    assert_eq!(first["reasoning"]["effort"], "high", "{first}");
+    assert!(second["reasoning"].get("effort").is_none(), "{second}");
+    assert_eq!(
+        manager.unsupported_params("wire-fake", "wire-oauth"),
+        vec!["reasoning.effort".to_string()]
     );
 }
 

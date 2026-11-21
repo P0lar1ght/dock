@@ -225,15 +225,56 @@ pub struct RemoteModel {
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u64>,
-    /// 认哪几档推理强度（按上游顺序）。`None` = 上游没说。
+    /// 认哪几档推理强度（按上游顺序）。`None` = 上游没说；`Some([])` = 会推理但没有
+    /// 档位可选（菜单不列，请求里不发 effort）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_efforts: Option<Vec<String>>,
+    /// 会不会推理。`Some(false)` = 不推理的模型：一个推理字段都不发，也没有档位菜单。
+    /// `None` = 上游没说（有档位就当会推理，否则跟着 `/think`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<bool>,
     /// 默认推理强度。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_reasoning_effort: Option<String>,
     /// 收不收图片输入。`None` = 上游没说。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_images: Option<bool>,
+}
+
+/// 订阅额度的一份快照（provider 查得到才有，见 [`AuthProvider::usage`]）。
+///
+/// 只放上游真给的东西：给的是百分比就只有百分比，**不编 token 数**。
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanUsage {
+    /// 套餐名（「SuperGrok」「SuperGrok Heavy」…）。没查到就空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<String>,
+    /// 本周期已用的百分比（0–100）。`None` = 上游没说（不是 0）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub used_percent: Option<f64>,
+    /// 本周期。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub period: Option<UsagePeriod>,
+    /// 预付（买的）余额，美分。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prepaid_balance_cents: Option<i64>,
+    /// 这份快照是什么时候查的（unix 秒）。
+    pub fetched_at: u64,
+}
+
+/// 额度的计算周期。
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsagePeriod {
+    /// `weekly` / `monthly`；上游没说就空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// 开始 / 结束（重置）时刻，unix 秒。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end: Option<u64>,
 }
 
 /// 401 之后 provider 的处置。
@@ -388,6 +429,16 @@ pub trait AuthProvider: Send + Sync {
         min_valid: Duration,
     ) -> AuthFuture<'a, Result<Lease, AuthError>>;
 
+    /// 这个推理响应是不是「token 不好使了」——是就走 [`Self::on_unauthorized`]
+    /// 换一份重试一次。
+    ///
+    /// 默认只认 401。有的通道 token 失效回的不是 401（xAI：校验不过的 OAuth
+    /// token 回 403 `unauthenticated:bad-credentials`），由 provider 按状态码 +
+    /// body 认。只在 401 / 403 时问。
+    fn token_rejected(&self, status: u16, _body: &[u8]) -> bool {
+        status == 401
+    }
+
     /// 上游说 token 不好使了：换一份重试，还是直接报错。
     fn on_unauthorized<'a>(&'a self, lease: &'a Lease) -> AuthFuture<'a, Result<Retry, AuthError>>;
 
@@ -406,6 +457,14 @@ pub trait AuthProvider: Send + Sync {
         &'a self,
         acct: &'a AccountKey,
     ) -> AuthFuture<'a, Result<Vec<RemoteModel>, AuthError>>;
+
+    /// 这个账号的订阅额度还剩多少。`Ok(None)` = 这一家查不了（默认）。
+    fn usage<'a>(
+        &'a self,
+        _acct: &'a AccountKey,
+    ) -> AuthFuture<'a, Result<Option<PlanUsage>, AuthError>> {
+        Box::pin(async { Ok(None) })
+    }
 
     /// 把上游的 HTTP 错误归一成 [`AuthError`]。`None` = 不是鉴权问题。
     fn classify(&self, status: u16, body: &[u8]) -> Option<AuthError>;

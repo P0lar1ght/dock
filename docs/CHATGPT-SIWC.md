@@ -302,4 +302,5 @@ dock-gui（玻璃卡片、品牌标描线、跟随系统深浅色）；页面只
 provider（`displayName` / `usageUrl`）、账号表（`signedIn` / `planUsage`，**不含任何
 token**）和最近一次登录（`login`）；`auth/login { provider, scope?, account? }` /
 `auth/logout` / `auth/cancel` 驱动登录登出；变化推 `auth/changed { provider }`。
+`auth/usage { provider }` 查订阅额度：ChatGPT 这条没有额度接口，回 `usage: null`。
 `auth/*` **全部只认受信连接**（`auth/status` 里有账号邮箱）。

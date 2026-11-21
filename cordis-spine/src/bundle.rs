@@ -5,7 +5,7 @@ use crate::agent::loop_plugin::agent_loop;
 use crate::agent::preset_propose::tool_propose_preset;
 use crate::agent::presets::agent_presets;
 use crate::agent::turn::turn;
-use crate::auth::{auth_commands, auth_manager, chatgpt_auth};
+use crate::auth::{auth_commands, auth_manager, chatgpt_auth, grok_auth};
 use crate::host::hooks_bridge::{hooks_bridge, hooks_command};
 use crate::host::mcp_app_context::mcp_app_context;
 use crate::host::mcp_app_views::mcp_app_views;
@@ -117,9 +117,10 @@ pub async fn install_app(ctx: &Context) -> Result<()> {
     tokio::task::spawn_blocking(cordis_base::tool_output::gc_spill_dir);
     install_core(ctx).await?;
     ctx.plugin(settings(), ())?.wait().await?;
-    // 鉴权服务 + ChatGPT 订阅通道的 provider + `/auth` 命令组。
+    // 鉴权服务 + 订阅通道的 provider（ChatGPT、Grok）+ `/auth` 命令组。
     ctx.plugin(auth_manager(), ())?.wait().await?;
     ctx.plugin(chatgpt_auth(), ())?.wait().await?;
+    ctx.plugin(grok_auth(), ())?.wait().await?;
     ctx.plugin(turn(), ())?.wait().await?;
     ctx.plugin(permissions(), ())?.wait().await?;
     ctx.plugin(cron(), ())?.wait().await?;

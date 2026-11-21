@@ -22,7 +22,7 @@ use cordis::{plugin, Context, Disposable, Inject, Plugin};
 
 use cordis_base::auth::{
     AccountKey, AccountSummary, AuthError, AuthProvider, Lease, LoginRequest, LoginUi,
-    LogoutOutcome, RemoteModel,
+    LogoutOutcome, PlanUsage, RemoteModel,
 };
 use cordis_base::config::auth_models::{self, AuthModelCache, ProviderModels};
 
@@ -209,6 +209,20 @@ impl AuthManager {
             });
         };
         impl_.lease(&acct, min_valid).await
+    }
+
+    /// 活动账号的订阅额度。`Ok(None)` = 这一家查不了。
+    ///
+    /// 不缓存：界面自己控制多久查一次（输入框旁的圆环、设置页），每次都是上游的
+    /// 当前值。
+    pub async fn usage(&self, provider: &str) -> Result<Option<PlanUsage>, AuthError> {
+        let impl_ = self.require(provider)?;
+        let Some(acct) = impl_.active_account() else {
+            return Err(AuthError::NeedsLogin {
+                reason: format!("{} 还没登录：/auth login", impl_.info().display_name),
+            });
+        };
+        impl_.usage(&acct).await
     }
 
     /// 把上游的 HTTP 错误归一成 [`AuthError`]。不是鉴权问题就 `None`。

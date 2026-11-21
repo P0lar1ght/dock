@@ -10,6 +10,7 @@ import {
   errorText,
   modelDefault,
   modelDelete,
+  modelGet,
   modelListing,
   modelSave,
   modelTest,
@@ -24,12 +25,14 @@ import {
 } from "../../dock/settingsApi";
 import {
   KEY_NAME,
+  catalogEfforts,
   connectionFor,
   keyNameFor,
   modelEntryFor,
   modelIdFor,
   providerIdFor,
   refreshCatalog,
+  sameEfforts,
   supportedProviders,
   usableModels,
   useCatalog,
@@ -228,6 +231,41 @@ function ProviderCard({
     if (next) onListing(next);
     setBusy(null);
   };
+  // 已经开着的模型按目录补推理档位（以前开模型时没抄档位，菜单一律通用四档）。
+  const [note, setNote] = useState<string | null>(null);
+  const fillEfforts = async () => {
+    if (!catalog) return;
+    setBusy("efforts");
+    setError(null);
+    setNote(null);
+    try {
+      let changed = 0;
+      let unknown = 0;
+      let listing: ModelListing | null = null;
+      for (const m of models) {
+        const entry = await modelGet(m.id);
+        const upstream = entry.apiModel ?? m.id.slice(p.id.length + 1);
+        const cm = catalog.models?.[upstream];
+        const efforts = catalogEfforts(cm);
+        const reasoning = cm?.reasoning === false ? false : entry.reasoning;
+        if (efforts === null && reasoning === entry.reasoning) {
+          unknown++;
+          continue;
+        }
+        const nextEfforts = efforts ?? entry.reasoningEfforts;
+        if (sameEfforts(entry.reasoningEfforts, nextEfforts) && reasoning === entry.reasoning) continue;
+        listing = await modelSave({ ...entry, reasoningEfforts: nextEfforts, reasoning }, m.id, false);
+        changed++;
+      }
+      if (listing) onListing(listing);
+      const rest = unknown ? `${unknown} 个目录里没写档位，照旧用通用档位` : "";
+      setNote(changed ? `补全了 ${changed} 个模型的推理档位${rest ? `；${rest}` : ""}` : rest || "推理档位已经和目录一致");
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(null);
+    }
+  };
   const remove = async () => {
     const next = await autosave(() => providerDelete(p.id), setError);
     if (next) onDeleted(next);
@@ -291,6 +329,15 @@ function ProviderCard({
               onEdit={() => onEditModel(m.id)}
             />
           ))}
+        </div>
+      )}
+      {catalog && models.length > 0 && (
+        <div className="mx-4 mb-2 flex items-center gap-2">
+          <button type="button" disabled={busy !== null} onClick={() => void fillEfforts()} className={`${smallButton} gap-1`}>
+            {busy === "efforts" && <LoaderCircle size={12} className="animate-spin" />}
+            按目录补全推理档位
+          </button>
+          {note && <span className="enter-fade text-[11.5px] text-ink-4">{note}</span>}
         </div>
       )}
 

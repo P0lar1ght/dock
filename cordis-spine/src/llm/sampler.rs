@@ -186,10 +186,53 @@ pub fn llm() -> Plugin {
                 };
                 Llm::from_sampler(ctx.clone(), Arc::new(sampler))
             }
+            // 启动时目录里没有能连的模型（新装、还没配）：先用离线的假采样器。
+            // 之后登录了订阅通道、或在设置里加了模型，目录里就有了——每次采样都再
+            // 看一眼，有就走 HTTP。以前挂载时就定死了：首次登录完不重启，收到的
+            // 还是假回复。
+            LlmMode::Workspace => {
+                let online = HttpSampler {
+                    ctx: ctx.clone(),
+                    api_key: String::new(),
+                    api_base: cfg.api_base.clone().unwrap_or_default(),
+                    fallback_model: cfg.model.clone().unwrap_or_default(),
+                };
+                Llm::from_sampler(
+                    ctx.clone(),
+                    Arc::new(UntilCatalog {
+                        offline: FakeSampler {
+                            mode: LlmMode::Workspace,
+                        },
+                        online,
+                        has_http: cordis_base::config::catalog_has_http,
+                    }),
+                )
+            }
             mode => Llm::fake(ctx.clone(), mode),
         };
         Ok(Some(ctx.provide(LLM, provided)?))
     })
+}
+
+/// 目录里还没有能连的模型就用 `offline`，一有就用 `online`（每次采样都看）。
+struct UntilCatalog<On> {
+    offline: FakeSampler,
+    online: On,
+    has_http: fn() -> bool,
+}
+
+impl<On: Sampler> Sampler for UntilCatalog<On> {
+    fn sample<'a>(
+        &'a self,
+        request: PromptRequest,
+        on_delta: Box<dyn FnMut(StreamDelta) + Send + 'a>,
+    ) -> BoxFuture<'a, LlmOutput> {
+        if (self.has_http)() {
+            self.online.sample(request, on_delta)
+        } else {
+            self.offline.sample(request, on_delta)
+        }
+    }
 }
 
 fn since_last_user(history: &[LogEvent]) -> &[LogEvent] {
