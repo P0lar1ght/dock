@@ -215,6 +215,7 @@ MCP 服务器向用户要信息（表单 / URL）。网关把提问投影成 `el
 | `thread/start { cwd, title?, presetId? }` | 在 `cwd` 另开一页（不动第 1 页），回它的会话 id；预设在创建时定下：`presetId` 只切这一页并记进会话，不改全局默认；预设不存在就报 `invalid_params`、不开页；不带 `cwd` 是老语义 |
 | `thread/open { threadId }` | 把落盘会话开成一页（在它自己的 cwd 下），预设、模型、推理强度切回会话记的那一份（`meta.json`；不改全局默认，模型已不在目录里就不切）；已开着就回那一页。`thread/model/set` / `thread/reasoning/set` 切完立刻写回 `meta.json` |
 | `thread/close { threadId }` | 关页，会话留在磁盘上；第 1 页关不掉 |
+| 推送 `thread/closed { threadId }` | **连接级**：某一页关掉了，不管是谁关的（`thread/close`、终端 `/tab close`、定时任务驱动收闲页）。网关同时丢掉那一页的投影；界面把它当关着的，再发消息前先 `thread/open`。监听 `tabs/page-closed`（`PageClosed { identity, session }`） |
 | `preset/list`（能力 `presets`） | 可选的 Agent 预设（顺序同 TUI `/preset`）：`id` / `label` / `description` / `icon`（客户端图标名，没写为 `null`）/ `builtin`（内置预设的 id；`origin` 为 user/project 时是改过的覆盖层，删掉即恢复内置）/ `origin`（`shipped`/`user`/`project`）/ `available`（坏掉的为 `false` 并带 `error`），外加 `defaultId`。只读：预设在 `thread/start` 时定下，没有中途切换的方法。每次现读盘（会话里写的预设下次列就在）。可选 `cwd`：列那个项目能选的（内置 + 用户层 + `cwd/.dock/presets`）；不给是进程 cwd 的项目层。`cwd` 不限定在已知项目里（任意路径的 `.dock/presets` 都会读；网关只听回环、要配对）。`thread/start` 按目标 `cwd` 的项目层校验 |
 | `preset/create { name, icon?, description?, basedOn? }` | 新建用户层预设（`~/.dock/presets/<id>/`），**不改**默认预设；`basedOn` 照它复制人设、工具名单和子代理。`icon` 只收小写字母、数字、`-`。回 `preset`（同列表的一项） |
 | `preset/get { id }` | 整份定义，编辑器用（见下） |
@@ -871,22 +872,53 @@ bash 里改的不算。轮次用投影里的 `turnId`（和 `item/user_message` 
 ### 定时任务（能力 `schedules`，`handlers/schedule.rs`）
 
 任务落盘在 `$DOCK_HOME/schedules.json`，属于某个会话，跨重启继续跑。到点由 `cordis-app` 的
-`cron_driver` 送进那个会话；会话关着就 `Tabs::open_session` 后台开页，网关监听
-`tabs/page-opened` 把这页纳入投影（回放历史、装项目插件），同 `thread/open`。
+`cron_driver` 送进那个会话（会话关着就 `Tabs::open_session` 后台开页），或者在那个会话的项目里
+新开一个会话（`target: "newSession"`，`Tabs::open_new_session`）；两种开页网关都监听
+`tabs/page-opened` 把这页纳入投影（回放历史、装项目插件），同 `thread/open`。驱动自己开出来的页
+（新开的会话、为送提问重新打开的会话）闲置 10 分钟就关掉（不是终端正看着的页、没有在跑 / 在等你 /
+旁问页 / 子代理 / 目标），会话留在盘上；关页时网关推 `thread/closed`。
+
+触发方式六选一：固定间隔、cron（5 段，本机时区）、只跑一次、条件命令、文件变化、只手动。
 
 - `schedule/list {}` → `{ tasks[] }`：全部会话的任务。每项：
-  - `id` / `prompt` / `everySecs` / `intervalLabel`（「every 10 minutes」）；
+  - `id` / `prompt`；
+  - `schedule`：`{ kind: "every", everySecs }` / `{ kind: "cron", cron }` / `{ kind: "at", atMs }` /
+    `{ kind: "watch", command, everySecs, when, pattern }`（`when`：`changed` / `succeeds` / `fails` / `matches`）/
+    `{ kind: "files", paths, debounceSecs }` / `{ kind: "manual" }`；
+  - `scheduleLabel`：中文说明（「每 30 分钟」「工作日 09:00」「命令 · 每 5 分钟查一次，失败时触发」）；
+    `intervalLabel`：给模型的英文说明；`everySecs`：固定间隔才有，其余 `null`（老字段，留着兼容）；
   - `threadId`（会话 id，老任务为 `null`）/ `threadTitle` / `cwd`；
-  - `createdAtMs` / `nextAtMs` / `expiresAtMs`（7 天）/ `lastFiredAtMs`；
-  - `lastError`：上次没送到的原因（开不了页之类），下次送到就清掉；
-  - `heldHere`：这个进程持有它（多个 Dock 共用 `$DOCK_HOME` 时只有持有者触发）。
-- `schedule/create { threadId, interval | everySecs, prompt, fireImmediately? }` → `{ task }`。
-  - `interval` 同 `/loop`（`5m` / `2h` / `1d`）；`everySecs` 最小 60。
+  - `createdAtMs` / `nextAtMs`（下一次到点，条件命令是下一次检查；文件变化、手动、跑完了的为 `null`）/
+    `expiresAtMs`（`null` = 不过期）/ `lastFiredAtMs`；
+  - `runs`（自动触发次数，手动不算）/ `maxRuns`（`null` = 不限）/ `catchUp`（错过了补一次）/ `finished`；
+  - `target`（`session` / `newSession`）/ `preset`（新开会话用的预设）/ `paused` / `pending`（有一次等着马上跑）；
+  - `history[]`：最近 20 次运行，新的在前：`{ atMs, reason, outcome, threadId, lateMs, error }`，
+    `reason`：`schedule` / `catchUp` / `immediate` / `manual` / `watch` / `files`；
+    `outcome`：`sent` / `coalesced`（上一次还在排队 / 还在跑，这次跳过）/ `failed`；`threadId` 是送进的会话；
+  - `watch`：条件命令上一次检查 `{ checkedAtMs, exit, matched, error }`，别的种类为 `null`；
+  - `lastError`：上次没送到的原因（开不了页之类）或文件监听挂不上的原因，下次送到就清掉；跑完了的任务带着它就留在表上；
+  - `heldHere`：这个进程持有它；`holderLive`：有活着的 Dock 持有它（`false` = 现在没有 Dock 会去跑它）。
+- `schedule/create { threadId, prompt, <触发方式>, fireImmediately?, expiresAtMs?, maxRuns?, catchUp?, target?, preset?, paused? }` → `{ task }`。
+  - 触发方式只给一个：`interval`（同 `/loop`：`5m` / `2h` / `1d`）或 `everySecs`（最小 60）、
+    `cron`（`0 9 * * 1-5`）、`atMs`（毫秒时间戳）或 `at`（`30m` / `2026-11-23 09:00`，本机时区）、
+    `watch: { command, everySecs?（默认 300，最小 60）, when?（默认 changed）, pattern? }`、
+    `files: { paths, debounceSecs?（默认 10） }`（目录递归听，`/`、家目录这类太宽的根报错）、`manual: true`。
+    给两个、表达式 / 正则不对、时间已过、路径为空或范围太大都回 `invalid_params`。
+  - `expiresAtMs` 省略 = 默认（比一天还勤的 7 天后过期，其余不过期），`null` = 不过期。
+  - `catchUp` 省略 = 按种类（cron / 一次性补，其余不补）。`fireImmediately` 额外马上跑一次，不占次数。
+  - `target: "newSession"` 且没给 `preset`：照这个会话现在的预设开。
   - `threadId` 开着的页（含 `live`）取它正在写的会话；关着的按会话列表找。还没落盘的回 `invalid_params`。
-- `schedule/update { id, interval? | everySecs?, prompt? }` → `{ task }`：改间隔保持相位，不续期。
-- `schedule/delete { id }` → `{ deleted }`；没有这个 id 回 `not_found`，`schedules.json` 读写失败（如文件写坏了）回 `store_failed`，不混成 `not_found`。
+  - 这里是用户自己建的，不过权限门；模型的 `scheduler_create` 带 `watch` 时另有权限键 `scheduler_create:watch`，
+    监听项目外的文件时另有 `scheduler_create:files`。
+- `schedule/update { id, <触发方式>?, prompt?, expiresAtMs?, maxRuns?, catchUp?, target?, preset?, paused? }` → `{ task }`：
+  固定间隔改间隔保持相位；换种类从现在起重排；不续期（只有给了 `expiresAtMs` 才动）。`maxRuns: null` = 不限，
+  `preset: null` = 不指定。`paused: false` 继续时跳过暂停期间的时刻。
+- `schedule/run { id, input? }` → `{ ok }`：马上跑一次，不占次数、不动排期；暂停、跑完的任务也能跑。持有它的 Dock
+  （可能是别的进程）一秒内送出。`input` 附在这次的提问上给模型看。没有这个 id 回 `not_found`。
+- `schedule/delete { id }` → `{ deleted }`；没有这个 id 回 `not_found`，`schedules.json` 读写失败（如文件写坏了、
+  是更新版本的 Dock 写的）回 `store_failed`，不混成 `not_found`。
 - 推送 `schedule/changed {}`：**连接级**，初始化过就收到，不用订阅线程。任何一处改了（含模型的
-  `scheduler_*`、别的 Dock 进程、到点触发）最多 1 秒后到；收到后重拉 `schedule/list`。
+  `scheduler_*`、`dock schedule`、别的 Dock 进程、到点触发、检查结果）最多 1 秒后到；收到后重拉 `schedule/list`。
 
 ### 记忆图谱（能力 `memoryGraph`，`handlers/memory.rs`）
 

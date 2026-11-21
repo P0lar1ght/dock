@@ -171,6 +171,7 @@ pub const SCHEDULE_LIST: &str = "schedule/list";
 pub const SCHEDULE_CREATE: &str = "schedule/create";
 pub const SCHEDULE_UPDATE: &str = "schedule/update";
 pub const SCHEDULE_DELETE: &str = "schedule/delete";
+pub const SCHEDULE_RUN: &str = "schedule/run";
 /// 连接级推送（不用订阅线程）：定时任务变了，重拉 `schedule/list`。
 pub const SCHEDULE_CHANGED: &str = "schedule/changed";
 /// 记忆图谱与笔记管理（只给受信连接，见 `handlers/memory.rs`）。
@@ -211,6 +212,9 @@ pub const PRESET_ASK: &str = "preset/ask";
 pub const THREAD_START: &str = "thread/start";
 pub const THREAD_OPEN: &str = "thread/open";
 pub const THREAD_CLOSE: &str = "thread/close";
+/// 连接级推送 `thread/closed { threadId }`：某一页关掉了（不管是谁关的：网关自己的 `thread/close`、
+/// 终端 `/tab close`、定时任务驱动收闲页）。会话还在盘上，再发消息前先 `thread/open`。
+pub const THREAD_CLOSED: &str = "thread/closed";
 pub const THREAD_RENAME: &str = "thread/rename";
 pub const THREAD_ARCHIVE: &str = "thread/archive";
 pub const THREAD_RESTORE: &str = "thread/restore";

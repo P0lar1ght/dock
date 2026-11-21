@@ -80,14 +80,21 @@ pub fn lines(
             Span::styled(id.to_string(), Style::default().fg(theme.text_primary)),
         ]));
     }
-    if let Some(interval) = parsed.interval.as_deref().filter(|s| !s.is_empty()) {
-        rows.push(Line::from(vec![
-            Span::styled("  间隔  ", theme.muted()),
-            Span::styled(
-                interval.to_string(),
-                Style::default().fg(theme.text_secondary),
-            ),
-        ]));
+    for (label, value) in [
+        ("  间隔  ", parsed.interval.as_deref()),
+        ("  cron  ", parsed.cron.as_deref()),
+        ("  时间  ", parsed.at.as_deref()),
+        ("  命令  ", parsed.watch.as_deref()),
+        ("  文件  ", parsed.files.as_deref()),
+        ("  触发  ", parsed.manual.as_deref()),
+        ("  会话  ", parsed.new_session.as_deref()),
+    ] {
+        if let Some(value) = value.filter(|s| !s.is_empty()) {
+            rows.push(Line::from(vec![
+                Span::styled(label, theme.muted()),
+                Span::styled(value.to_string(), Style::default().fg(theme.text_secondary)),
+            ]));
+        }
     }
     if let Some(prompt) = parsed.prompt.as_deref().filter(|s| !s.is_empty()) {
         rows.push(Line::from(vec![
@@ -112,6 +119,13 @@ pub fn lines(
 
 struct Args {
     interval: Option<String>,
+    cron: Option<String>,
+    at: Option<String>,
+    /// 条件命令，后面带上检查间隔和条件。
+    watch: Option<String>,
+    files: Option<String>,
+    manual: Option<String>,
+    new_session: Option<String>,
     prompt: Option<String>,
     id: Option<String>,
 }
@@ -125,19 +139,39 @@ fn parse_args(arguments: &str) -> Args {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string);
+    let text = |key: &str| {
+        v.get(key)
+            .and_then(|x| x.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    let flag = |key: &str| v.get(key).and_then(|x| x.as_bool()) == Some(true);
+    let watch = text("watch").map(|cmd| {
+        let every = text("watch_every").unwrap_or_else(|| "5m".into());
+        let when = text("fire_when").unwrap_or_else(|| "changed".into());
+        format!("$ {cmd}（每 {every}，{when}）")
+    });
+    let files = v
+        .get("files")
+        .and_then(|x| x.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|p| p.as_str())
+                .collect::<Vec<_>>()
+                .join("、")
+        })
+        .filter(|s| !s.is_empty());
     Args {
-        interval: v
-            .get("interval")
-            .and_then(|x| x.as_str())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string),
-        prompt: v
-            .get("prompt")
-            .and_then(|x| x.as_str())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string),
+        interval: text("interval"),
+        cron: text("cron"),
+        at: text("at"),
+        watch,
+        files,
+        manual: flag("manual").then(|| "只手动".to_string()),
+        new_session: flag("new_session").then(|| "每次新开".to_string()),
+        prompt: text("prompt"),
         id,
     }
 }

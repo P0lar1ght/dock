@@ -43,7 +43,9 @@ root.plugin(tui(), ())?                // 全屏 TUI 事件循环（最后）
 | `system_prompt` | 基础 `<system>` 内容，注册到 `"context"`（`ContextBook::set_base`）。换 preset 不换它：persona 说"是谁"，这段说"怎么干活" |
 | `session_actor` / `SessionHandle` | 会话 actor；`SessionHandle` 暴露 `submit` / `compact` / `cancel` / `promote` / `queued_prompts` 等 |
 | `tab_mount` / `tab_mount_headless` | 分页配置（`TabsConfig`：建页工厂 + 每页视图名），注入 `cordis_spine::tabs()`。第 1 页是根上下文，这里造第 2 页起每一页 |
-| `cron_driver` | 定时任务（`cron` 工具）的驱动循环 |
+| `cron_driver` | 定时任务的驱动循环：到点送进会话（或新开会话）并记历史、后台跑条件命令、挂文件监听；自己开出来的页闲置 `CLOSE_IDLE_AFTER`（10 分钟）就关掉 |
+| `cron_driver_closing_after` | 同上，闲页多久关掉可调（测试用） |
+| `parse_schedule_args` / `run_schedule_cmd` | `dock schedule list / run / pause / resume`（直接读写 `schedules.json`） |
 | `SESSION` / `Error` / `Result` | named service key（转自 `cordis_spine`）与错误类型 |
 
 ## 旁问页（aside）

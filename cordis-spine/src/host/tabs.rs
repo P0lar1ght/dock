@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex};
 use crate::host::session_port::SessionRef;
 use crate::names::{
     AGENT_LOOP, AGENT_PRESETS, ASK, GOAL, MCP, PERMISSIONS, PLAN_MODE, SESSION, SESSIONS,
-    SESSION_PORT, SETTINGS, TABS, TABS_PAGE_OPENED, TODOS, TURN,
+    SESSION_PORT, SETTINGS, TABS, TABS_PAGE_CLOSED, TABS_PAGE_OPENED, TODOS, TURN,
 };
 use crate::{AgentPresets, Ask, LogEvent, Mcp, Permissions, PlanMode, Sessions};
 use cordis::{plugin, Context, Fiber, Inject, Plugin};
@@ -547,6 +547,28 @@ impl Tabs {
         Ok(ctx)
     }
 
+    /// 在 `cwd` 开一个**全新的**会话页，不切过去；`preset` 给了就切到它。定时任务
+    /// 「每次新开会话」到点用。和 [`Self::open_session`] 一样发 [`TABS_PAGE_OPENED`]，
+    /// 网关据此把它纳入投影。
+    pub async fn open_new_session(
+        &self,
+        cwd: &Path,
+        preset: Option<&str>,
+    ) -> Result<Context, String> {
+        let ctx = self.open_at(cwd, None).await?;
+        if let (Some(id), Some(presets)) = (preset, ctx.get::<AgentPresets>(AGENT_PRESETS)) {
+            if let Err(e) = presets.pin(id) {
+                eprintln!("dock: 定时任务开新会话，预设 `{id}` 没切过去：{e}");
+            }
+        }
+        let identity = ctx
+            .get::<Sessions>(SESSIONS)
+            .map(|s| s.identity().to_string())
+            .unwrap_or_default();
+        self.inner.root.emit(TABS_PAGE_OPENED, identity);
+        Ok(ctx)
+    }
+
     /// 给正在写 `parent_session_id` 的那一页开一张只读旁问页（GUI 的侧边聊天），
     /// **不切过去**；那一页已经有旁问页就回那一张（每页最多一张）。第二个返回值：
     /// 是不是已有的。
@@ -788,6 +810,10 @@ impl Tabs {
             tabs.remove(index)
         };
         let id = tab.id;
+        let closed = tab.ctx.get::<Sessions>(SESSIONS).map(|s| PageClosed {
+            identity: s.identity().to_string(),
+            session: s.live_session_id(),
+        });
         // 该页的 MCP elicitation 队列是全局的，fiber dispose 带不走它：
         // 不 cancel 的话这条 job 哪页都不显示，工具调用永远不返回。
         if let (Some(sessions), Some(mcp)) =
@@ -815,8 +841,55 @@ impl Tabs {
         } else if active > index {
             self.inner.active.store(active - 1, Ordering::Relaxed);
         }
+        if let Some(closed) = closed {
+            self.inner.root.emit(TABS_PAGE_CLOSED, closed);
+        }
         Ok(id)
     }
+
+    /// 这个会话那一页现在动不得：是当前页（终端正看着）、在跑一轮或有排队、有权限 / 提问
+    /// 在等你、开着旁问页、有子代理在跑、目标在进行。没开着回 `false`。定时任务驱动收闲页前问它。
+    pub fn session_in_use(&self, session_id: &str) -> bool {
+        let Some(index) = self.index_of_session(session_id) else {
+            return false;
+        };
+        let tabs = self.inner.tabs.lock().unwrap();
+        let Some(tab) = tabs.get(index) else {
+            return false;
+        };
+        let ctx = &tab.ctx;
+        let identity = ctx
+            .get::<Sessions>(SESSIONS)
+            .map(|s| s.identity().to_string())
+            .unwrap_or_default();
+        index == self.active_index()
+            || tab_working(ctx)
+            || ctx
+                .get::<SessionRef>(SESSION_PORT)
+                .is_some_and(|port| port.has_queued())
+            || tab_pending(ctx)
+            || tabs
+                .iter()
+                .any(|t| t.kind == TabKind::Aside && t.origin == Some(tab.id))
+            || ctx
+                .get::<crate::Subagents>(crate::names::SUBAGENTS)
+                .is_some_and(|sub| {
+                    sub.list()
+                        .iter()
+                        .any(|a| a.parent == identity && a.running())
+                })
+            || ctx
+                .get::<crate::Goal>(crate::names::GOAL)
+                .is_some_and(|goal| goal.active())
+    }
+}
+
+/// [`TABS_PAGE_CLOSED`] 的载荷：关掉的那一页的身份和它当时在写的会话。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PageClosed {
+    pub identity: String,
+    /// 落盘会话 id（网关的 `threadId`）；还没落盘的页是空串。
+    pub session: String,
 }
 
 /// 这一页最近一条**有正文**的模型回复。只有工具调用的那几步跳过：带回去的

@@ -88,7 +88,8 @@ pub use host::slash::{
 };
 pub use host::status_items::{status_items, StatusItem, StatusItems};
 pub use host::tabs::{
-    tabs, CarryBack, TabInfo, TabKind, TabMount, Tabs, TabsConfig, MAX_TABS, PER_TAB_SERVICES,
+    tabs, CarryBack, PageClosed, TabInfo, TabKind, TabMount, Tabs, TabsConfig, MAX_TABS,
+    PER_TAB_SERVICES,
 };
 pub use host::tool_views::{effective_call, tool_views, ToolViewFn, ToolViewInput, ToolViews};
 pub use host::tui_slots::{tui_slots, SlotAction, SlotHandler, SlotInfo, SlotKeyResult, TuiSlots};
@@ -116,10 +117,10 @@ pub use names::{
     RHAI_BAGS, ROSTER, SCHEDULE_CHANGED, SESSION, SESSIONS, SESSION_CHILD_EVENT,
     SESSION_COMPACTION, SESSION_EVENT, SESSION_PAGE_EVENT, SESSION_PORT, SESSION_RESET,
     SESSION_TOOL_INPUT, SESSION_TURN_END, SETTINGS, SKILLS, SLASH, STATUS_CHANGED, STATUS_ITEMS,
-    STEP_START, SUBAGENTS, SUBAGENT_CHANGED, SYSTEM_PROMPT, TABS, TABS_PAGE_OPENED, TODOS, TOOLS,
-    TOOLS_EXECUTE, TOOLS_PRE_EXECUTE, TOOL_VIEWS, TOOL_VIEWS_CHANGED, TUI_SLOTS, TUI_SLOTS_CHANGED,
-    TURN, TURN_CARDS, TURN_CARDS_CHANGED, TURN_CHANGES, TURN_CHANGES_CHANGED, TURN_END, USER_EDITS,
-    WORKFLOWS, WORKFLOW_CHANGED,
+    STEP_START, SUBAGENTS, SUBAGENT_CHANGED, SYSTEM_PROMPT, TABS, TABS_PAGE_CLOSED,
+    TABS_PAGE_OPENED, TODOS, TOOLS, TOOLS_EXECUTE, TOOLS_PRE_EXECUTE, TOOL_VIEWS,
+    TOOL_VIEWS_CHANGED, TUI_SLOTS, TUI_SLOTS_CHANGED, TURN, TURN_CARDS, TURN_CARDS_CHANGED,
+    TURN_CHANGES, TURN_CHANGES_CHANGED, TURN_END, USER_EDITS, WORKFLOWS, WORKFLOW_CHANGED,
 };
 pub use prompt::assemble::{system_prompt, PromptAssembly, PromptPart, SystemPrompt};
 pub use prompt::context_book::{context, own_sections, ContextBook};
@@ -159,8 +160,11 @@ pub use tools::computer::{
     tool_computer, Computer, ComputerState, CuaAction, CuaJobView, CUA_DRIVER_SERVER,
 };
 pub use tools::cron::{
-    cron, Cron, CronError, CronJob, CronOwner, CronTick, MAX_SCHEDULED_TASKS,
-    RECURRING_TASK_TTL_DAYS, SCHEDULES_FILE,
+    cron, parse_at, run_check, Cron, CronCheck, CronError, CronExpiry, CronFire, CronJob,
+    CronOwner, CronPatch, CronRun, CronSchedule, CronTarget, CronTick, CronWatchState, FileWatches,
+    FilesReady, FilesSpec, FireReason, FireReport, NewCronTask, RunOutcome, WatchObservation,
+    WatchSpec, WatchWhen, CHECK_TIMEOUT, DEFAULT_CHECK_EVERY, DEFAULT_FILES_DEBOUNCE, HISTORY_LEN,
+    MAX_SCHEDULED_TASKS, MIN_CHECK_EVERY, MISSED_GRACE, RECURRING_TASK_TTL_DAYS, SCHEDULES_FILE,
 };
 pub use tools::dynamic_runner::{
     builtins_lines, delete_secret, dynamic_runner, find_disk, persist_root, plugin_roots,
@@ -199,9 +203,10 @@ pub use tools::plan_mode::{
 };
 pub use tools::registry::{own_registered, tools, workspace_tools, ToolBody, Tools};
 pub use tools::sched::{
-    expired_task_notice, format_scheduled_task_prompt, format_scheduled_task_reminder,
-    interval_to_human, loop_command, loop_composer_fill, loop_schedule_instruction,
-    loop_usage_message, parse_interval, tool_scheduler, LoopFireMode, SCHEDULER_CREATE_TOOL_NAME,
+    expired_task_notice, format_fire_note, format_scheduled_fire_reminder,
+    format_scheduled_task_prompt, format_scheduled_task_reminder, interval_to_human, loop_command,
+    loop_composer_fill, loop_schedule_instruction, loop_usage_message, missed_task_notice,
+    parse_interval, tool_scheduler, FireNote, LoopFireMode, SCHEDULER_CREATE_TOOL_NAME,
 };
 pub use tools::skills::{
     scan_all_with_shadowed, skills, tool_skills, SkillInfo, SkillScope, Skills,

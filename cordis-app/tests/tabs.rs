@@ -929,6 +929,402 @@ async fn scheduled_prompts_reach_their_own_session_even_when_closed() {
     assert!(cron.list().iter().all(|j| j.last_error.is_none()));
 }
 
+/// 最多等 `secs` 秒（跑真命令、等文件监听的用例比 `eventually` 慢）。
+async fn eventually_within(secs: u64, what: &str, mut cond: impl FnMut() -> bool) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    while std::time::Instant::now() < deadline {
+        if cond() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("等不到：{what}");
+}
+
+fn reminded(sessions: &Sessions, needle: &str) -> bool {
+    sessions
+        .events()
+        .iter()
+        .any(|e| matches!(e, LogEvent::SystemReminder(t) if t.contains(needle)))
+}
+
+/// 定时任务用的项目目录 + 一页会话 + 挂好的驱动。
+async fn schedule_fixture(name: &str) -> (Booted, std::path::PathBuf, Context) {
+    let root = boot().await;
+    let project = std::env::temp_dir().join(format!("dock-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&project);
+    std::fs::create_dir_all(&project).unwrap();
+    let project = project.canonicalize().unwrap();
+    std::mem::forget(
+        root.provide(cordis_spine::CRON, cordis_spine::Cron::new())
+            .unwrap(),
+    );
+    root.plugin(cordis_app::cron_driver(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    let page = root
+        .get::<Tabs>(TABS)
+        .unwrap()
+        .open_at(&project, None)
+        .await
+        .unwrap();
+    (root, project, page)
+}
+
+fn owner_of(page: &Context, project: &std::path::Path) -> cordis_spine::CronOwner {
+    cordis_spine::CronOwner {
+        session: page.get::<Sessions>(SESSIONS).unwrap().live_session_id(),
+        cwd: project.to_path_buf(),
+    }
+}
+
+/// 「每次新开会话」：每跑一次在同一个项目里开一个新会话送进去，不进建任务的那个会话；
+/// 提醒里写明是专门开的、带上手动运行附的话；历史记下每次送进了哪个会话。
+#[tokio::test]
+async fn a_new_session_task_opens_a_fresh_session_for_each_run() {
+    let (root, project, page) = schedule_fixture("cron-fresh").await;
+    let cron = root.get::<cordis_spine::Cron>(cordis_spine::CRON).unwrap();
+    let owner = owner_of(&page, &project);
+    let id = cron
+        .create(cordis_spine::NewCronTask {
+            owner: Some(owner.clone()),
+            target: cordis_spine::CronTarget::NewSession,
+            ..cordis_spine::NewCronTask::new(cordis_spine::CronSchedule::Manual, "写今天的日报")
+        })
+        .unwrap();
+    let page_of = |session: &str| {
+        root.get::<Tabs>(TABS)
+            .unwrap()
+            .contexts()
+            .into_iter()
+            .find(|p| {
+                p.get::<Sessions>(SESSIONS)
+                    .is_some_and(|s| s.live_session_id() == session)
+            })
+    };
+
+    let mut runs = Vec::new();
+    for input in ["周四", "周五"] {
+        cron.trigger(
+            &id,
+            None,
+            cordis_spine::FireReason::Manual,
+            Some(format!("Input passed to this run:\n{input}")),
+        )
+        .unwrap();
+        let want = runs.len() + 1;
+        eventually_within(10, "送进一个新会话", || {
+            cron.get(&id).unwrap().history.len() == want
+        })
+        .await;
+        let run = cron.get(&id).unwrap().history.last().cloned().unwrap();
+        assert_eq!(run.outcome, cordis_spine::RunOutcome::Sent, "{run:?}");
+        let session = run.session.clone().unwrap();
+        assert_ne!(session, owner.session, "不进建任务的那个会话");
+        let fresh = page_of(&session).expect("新会话开成了一页");
+        let sessions = fresh.get::<Sessions>(SESSIONS).unwrap();
+        eventually("提问送进新会话", || said(&sessions, "写今天的日报")).await;
+        assert!(reminded(&sessions, "opened just for this run"));
+        assert!(reminded(&sessions, input), "带上手动运行附的话");
+        let port = fresh.get::<SessionRef>(SESSION_PORT).unwrap();
+        eventually("这一轮跑完", || !port.working() && !port.has_queued()).await;
+        runs.push(session);
+    }
+    assert_ne!(runs[0], runs[1], "每次一个新会话");
+    assert!(!said(
+        &page.get::<Sessions>(SESSIONS).unwrap(),
+        "写今天的日报"
+    ));
+}
+
+/// 条件命令「成功时」：驱动马上在项目目录里跑一次命令，成功了就送进会话，提醒里带着
+/// 命令和它的输出（模型据此知道发生了什么），记成一次条件触发。
+#[tokio::test]
+async fn a_watch_that_succeeds_fires_with_the_command_output() {
+    let (root, project, page) = schedule_fixture("cron-watch").await;
+    std::fs::write(project.join("deploy.status"), "v1.2 已上线\n").unwrap();
+    let cron = root.get::<cordis_spine::Cron>(cordis_spine::CRON).unwrap();
+    let id = cron
+        .create(cordis_spine::NewCronTask {
+            owner: Some(owner_of(&page, &project)),
+            ..cordis_spine::NewCronTask::new(
+                cordis_spine::CronSchedule::watch(
+                    "cat deploy.status",
+                    std::time::Duration::from_secs(60),
+                    cordis_spine::WatchWhen::Succeeds,
+                )
+                .unwrap(),
+                "部署好了，跑一遍冒烟测试",
+            )
+        })
+        .unwrap();
+    let sessions = page.get::<Sessions>(SESSIONS).unwrap();
+    eventually_within(15, "条件满足后送进会话", || {
+        said(&sessions, "部署好了，跑一遍冒烟测试")
+    })
+    .await;
+    assert!(reminded(
+        &sessions,
+        "`cat deploy.status` now succeeds (exit code 0)"
+    ));
+    assert!(reminded(&sessions, "v1.2 已上线"));
+    eventually("记进历史", || {
+        !cron.get(&id).unwrap().history.is_empty()
+    })
+    .await;
+    let job = cron.get(&id).unwrap();
+    assert_eq!(job.runs, 1);
+    assert_eq!(job.history[0].reason, cordis_spine::FireReason::Watch);
+    assert!(job
+        .watch
+        .as_ref()
+        .is_some_and(|w| w.matched && w.exit == Some(0)));
+}
+
+/// 文件变化：监听的目录里有改动，安静下来后送进会话，提醒里列出改了哪些文件
+/// （相对项目的路径）。
+#[tokio::test]
+async fn a_file_change_fires_with_the_changed_files() {
+    let (root, project, page) = schedule_fixture("cron-files").await;
+    std::fs::create_dir_all(project.join("notes")).unwrap();
+    let cron = root.get::<cordis_spine::Cron>(cordis_spine::CRON).unwrap();
+    let id = cron
+        .create(cordis_spine::NewCronTask {
+            owner: Some(owner_of(&page, &project)),
+            ..cordis_spine::NewCronTask::new(
+                cordis_spine::CronSchedule::files(
+                    vec!["notes".into()],
+                    std::time::Duration::from_secs(1),
+                )
+                .unwrap(),
+                "整理一下新笔记",
+            )
+        })
+        .unwrap();
+    // 驱动下一轮挂上监听，FSEvents 生效还要一点时间。
+    tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+    assert!(cron.get(&id).unwrap().last_error.is_none());
+    std::fs::write(project.join("notes").join("周会.md"), "# 周会").unwrap();
+    let sessions = page.get::<Sessions>(SESSIONS).unwrap();
+    eventually_within(15, "改动安静下来后送进会话", || {
+        said(&sessions, "整理一下新笔记")
+    })
+    .await;
+    assert!(
+        reminded(&sessions, "- notes/周会.md"),
+        "{:?}",
+        sessions.events()
+    );
+    eventually("记进历史", || {
+        !cron.get(&id).unwrap().history.is_empty()
+    })
+    .await;
+    assert_eq!(
+        cron.get(&id).unwrap().history[0].reason,
+        cordis_spine::FireReason::Files
+    );
+}
+
+/// 一页关掉（不管谁关的）就发 `tabs/page-closed`，带着它的身份和会话 id：网关据此告诉
+/// 各端这个线程关了。
+#[tokio::test]
+async fn closing_a_page_announces_it() {
+    let root = boot().await;
+    let closed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = closed.clone();
+    let _listener = root
+        .on(
+            cordis_spine::TABS_PAGE_CLOSED,
+            move |c: &cordis_spine::PageClosed| sink.lock().unwrap().push(c.clone()),
+        )
+        .unwrap();
+    let project = std::env::temp_dir().join(format!("dock-close-proj-{}", std::process::id()));
+    std::fs::create_dir_all(&project).unwrap();
+    let tabs = root.get::<Tabs>(TABS).unwrap();
+    let page = tabs.open_at(&project, None).await.unwrap();
+    let sessions = page.get::<Sessions>(SESSIONS).unwrap();
+    let (identity, id) = (sessions.identity().to_string(), sessions.live_session_id());
+    assert!(!tabs.session_in_use(&id), "后台开的空闲页不算在用");
+    tabs.close_session(&id).await.unwrap();
+    assert_eq!(
+        closed.lock().unwrap().clone(),
+        vec![cordis_spine::PageClosed {
+            identity,
+            session: id
+        }]
+    );
+}
+
+/// 手动跑一次，等第 `n` 次运行记进历史，回它送进的会话。
+async fn run_by_hand(cron: &cordis_spine::Cron, id: &str, n: usize) -> String {
+    cron.trigger(id, None, cordis_spine::FireReason::Manual, None)
+        .unwrap();
+    eventually_within(10, "送进新会话", || {
+        cron.get(id).unwrap().history.len() == n
+    })
+    .await;
+    cron.get(id)
+        .unwrap()
+        .history
+        .last()
+        .unwrap()
+        .session
+        .clone()
+        .unwrap()
+}
+
+/// 驱动替定时任务开出来的页（每次新开的会话）闲置够久就关掉，不然每跑一次终端里多一个分页；
+/// 正看着的那一页、建任务的会话（不是驱动开的）不关。会话留在盘上。
+#[tokio::test]
+async fn pages_the_driver_opened_are_closed_once_idle() {
+    let root = boot().await;
+    let project = std::env::temp_dir().join(format!("dock-cron-idle-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&project);
+    std::fs::create_dir_all(&project).unwrap();
+    let project = project.canonicalize().unwrap();
+    std::mem::forget(
+        root.provide(cordis_spine::CRON, cordis_spine::Cron::new())
+            .unwrap(),
+    );
+    root.plugin(
+        cordis_app::cron_driver_closing_after(std::time::Duration::from_millis(800)),
+        (),
+    )
+    .unwrap()
+    .wait()
+    .await
+    .unwrap();
+    let tabs = root.get::<Tabs>(TABS).unwrap();
+    let owner_page = tabs.open_at(&project, None).await.unwrap();
+    let owner = owner_of(&owner_page, &project);
+    let cron = root.get::<cordis_spine::Cron>(cordis_spine::CRON).unwrap();
+    let id = cron
+        .create(cordis_spine::NewCronTask {
+            owner: Some(owner.clone()),
+            target: cordis_spine::CronTarget::NewSession,
+            ..cordis_spine::NewCronTask::new(cordis_spine::CronSchedule::Manual, "写今天的日报")
+        })
+        .unwrap();
+    let open = |session: &str| {
+        tabs.contexts().iter().any(|p| {
+            p.get::<Sessions>(SESSIONS)
+                .is_some_and(|s| s.live_session_id() == session)
+        })
+    };
+    let first = run_by_hand(&cron, &id, 1).await;
+    assert!(open(&first));
+    eventually_within(10, "闲置后关掉", || !open(&first)).await;
+    assert!(
+        Sessions::can_adopt_archived(&first, &project),
+        "会话还在盘上"
+    );
+
+    // 正看着的那一页不关；切走以后再关。
+    let second = run_by_hand(&cron, &id, 2).await;
+    let index = tabs
+        .contexts()
+        .iter()
+        .position(|p| {
+            p.get::<Sessions>(SESSIONS)
+                .is_some_and(|s| s.live_session_id() == second)
+        })
+        .unwrap();
+    assert!(tabs.activate(index));
+    tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+    assert!(open(&second), "正看着的不关");
+    assert!(tabs.activate(0));
+    eventually_within(10, "切走后关掉", || !open(&second)).await;
+    assert!(open(&owner.session), "建任务的会话不是驱动开的，不关");
+}
+
+/// 一直在忙的一页：队列由测试摆好，记下驱动提交了什么。
+#[derive(Default)]
+struct BusyPort {
+    queued: std::sync::Mutex<Vec<cordis_spine::QueuedItem>>,
+    submitted: std::sync::Mutex<Vec<String>>,
+}
+
+impl cordis_spine::SessionPort for BusyPort {
+    fn submit(&self, text: String, _send_now: bool) {
+        self.submitted.lock().unwrap().push(text);
+    }
+    fn steer(&self, _text: String, _images: Vec<cordis_spine::UserImage>) {}
+    fn steer_queued(&self, _id: Option<String>) {}
+    fn merge_side_note(&self, _note: String) {}
+    fn working(&self) -> bool {
+        true
+    }
+    fn cancel(&self) {}
+    fn has_queued(&self) -> bool {
+        !self.queued.lock().unwrap().is_empty()
+    }
+    fn compact(&self, _context: String) {}
+    fn queued_prompts(&self) -> Vec<cordis_spine::QueuedItem> {
+        self.queued.lock().unwrap().clone()
+    }
+    fn promote(&self, _id: Option<String>) {}
+    fn take_queued(&self, _id: Option<String>) -> Option<cordis_spine::QueuedItem> {
+        None
+    }
+}
+
+/// 回归：那一页一直在忙、上一次触发还排在队里没轮到时，到点不再叠一条一样的。
+/// 旧驱动每次都 `submit`，一轮跑得比间隔长，同一句提问就在队列里越积越多，
+/// 忙完一口气连跑好几遍。别的任务照常送达。
+#[tokio::test]
+async fn a_fire_whose_previous_run_is_still_queued_is_not_stacked() {
+    let root = Context::new();
+    let port = std::sync::Arc::new(BusyPort::default());
+    port.queued.lock().unwrap().push(cordis_spine::QueuedItem {
+        id: "prompt-1".into(),
+        text: "看一眼 CI".into(),
+        images: Vec::new(),
+    });
+    let _port = root
+        .provide(SESSION_PORT, SessionRef::new(port.clone()))
+        .unwrap();
+    let _cron = root
+        .provide(cordis_spine::CRON, cordis_spine::Cron::new())
+        .unwrap();
+    let cron = root.get::<cordis_spine::Cron>(cordis_spine::CRON).unwrap();
+    let minute = std::time::Duration::from_secs(60);
+    let stacked = cron.add_ex(minute, "看一眼 CI", true).unwrap();
+    cron.add_ex(minute, "另一件事", true).unwrap();
+    root.plugin(cordis_app::cron_driver(), ())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+
+    eventually("另一个任务照常送达", || {
+        port.submitted
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|t| t == "另一件事")
+    })
+    .await;
+    eventually("两个都触发过、记进历史", || {
+        cron.list().iter().all(|j| j.history.len() == 1)
+    })
+    .await;
+    let submitted = port.submitted.lock().unwrap().clone();
+    assert_eq!(
+        submitted,
+        vec!["另一件事".to_string()],
+        "排着的那条不该再叠"
+    );
+    let job = cron.get(&stacked).unwrap();
+    assert!(job.last_error.is_none());
+    assert_eq!(
+        job.history[0].outcome,
+        cordis_spine::RunOutcome::Coalesced,
+        "跳过的那次记成合并掉，不是送达"
+    );
+}
+
 /// 网关给**不是当前页**的会话开侧边聊天：只读旁问页从那个会话抄设置（模型）和
 /// 上下文，当前页不动；不是从正在看的那一页抄。
 #[tokio::test]

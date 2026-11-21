@@ -6899,6 +6899,239 @@ async fn schedules_belong_to_a_thread_and_push_changes() {
     assert_eq!(again["error"]["details"]["code"], "not_found", "{again}");
 }
 
+/// `schedule/*` 的三种触发方式：cron（本机时区）、只跑一次、固定间隔；过期 / 次数 /
+/// 补跑可设可清；一次只能给一种触发方式。
+#[tokio::test]
+async fn schedules_take_cron_and_one_shot_times() {
+    let h = boot_with_schedules().await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let _ = rpc.call("initialize", json!({})).await;
+    let (id, _dir) = spoken_thread(&mut rpc, "schedule-kinds", "建几种定时任务").await;
+
+    let daily = rpc
+        .call(
+            "schedule/create",
+            json!({ "threadId": id, "cron": "0 9 * * 1-5", "prompt": "汇总昨天的提交" }),
+        )
+        .await;
+    let task = &daily["result"]["task"];
+    assert_eq!(task["schedule"]["kind"], "cron", "{daily}");
+    assert_eq!(task["schedule"]["cron"], "0 9 * * 1-5", "{daily}");
+    assert_eq!(task["scheduleLabel"], "工作日 09:00", "{daily}");
+    assert_eq!(task["everySecs"], Value::Null, "{daily}");
+    assert_eq!(
+        task["expiresAtMs"],
+        Value::Null,
+        "每天一次的不过期：{daily}"
+    );
+    assert_eq!(task["catchUp"], true, "{daily}");
+    assert!(task["nextAtMs"].as_u64().is_some(), "{daily}");
+    let daily_id = task["id"].as_str().unwrap().to_string();
+
+    let soon = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+        + 3_600_000;
+    let once = rpc
+        .call(
+            "schedule/create",
+            json!({ "threadId": id, "atMs": soon, "prompt": "提醒我回邮件" }),
+        )
+        .await;
+    let task = &once["result"]["task"];
+    assert_eq!(task["schedule"]["kind"], "at", "{once}");
+    assert_eq!(task["nextAtMs"], json!(soon), "{once}");
+    assert!(
+        task["scheduleLabel"]
+            .as_str()
+            .unwrap()
+            .starts_with("一次 · "),
+        "{once}"
+    );
+
+    let looped = rpc
+        .call(
+            "schedule/create",
+            json!({ "threadId": id, "interval": "5m", "prompt": "盯部署", "maxRuns": 12 }),
+        )
+        .await;
+    let task = &looped["result"]["task"];
+    assert_eq!(task["schedule"]["everySecs"], 300, "{looped}");
+    assert!(
+        task["expiresAtMs"].as_u64().is_some(),
+        "比一天还勤的默认过期：{looped}"
+    );
+    assert_eq!(task["maxRuns"], 12, "{looped}");
+    let loop_id = task["id"].as_str().unwrap().to_string();
+
+    let cleared = rpc
+        .call(
+            "schedule/update",
+            json!({ "id": loop_id, "expiresAtMs": null, "maxRuns": null, "catchUp": true }),
+        )
+        .await;
+    let task = &cleared["result"]["task"];
+    assert_eq!(task["expiresAtMs"], Value::Null, "{cleared}");
+    assert_eq!(task["maxRuns"], Value::Null, "{cleared}");
+    assert_eq!(task["catchUp"], true, "{cleared}");
+
+    let switched = rpc
+        .call(
+            "schedule/update",
+            json!({ "id": daily_id, "cron": "0 10 * * 1" }),
+        )
+        .await;
+    assert_eq!(
+        switched["result"]["task"]["scheduleLabel"], "每周一 10:00",
+        "{switched}"
+    );
+
+    for params in [
+        json!({ "threadId": id, "interval": "5m", "cron": "0 9 * * *", "prompt": "x" }),
+        json!({ "threadId": id, "cron": "每天九点", "prompt": "x" }),
+        json!({ "threadId": id, "atMs": 1_000, "prompt": "x" }),
+        json!({ "threadId": id, "interval": "5m", "prompt": "x", "maxRuns": 0 }),
+    ] {
+        let bad = rpc.call("schedule/create", params.clone()).await;
+        assert!(bad["error"].is_object(), "{params} → {bad}");
+    }
+    let listed = rpc.call("schedule/list", json!({})).await;
+    assert_eq!(
+        listed["result"]["tasks"].as_array().unwrap().len(),
+        3,
+        "{listed}"
+    );
+}
+
+/// `schedule/*` 的事件类触发：条件命令、文件变化、只手动；`schedule/run` 马上跑一次
+/// （这里没挂驱动，所以看得到「等着触发」）；暂停 / 继续、每次新开会话；参数不对都回错。
+#[tokio::test]
+async fn schedules_take_watch_files_manual_and_run_now() {
+    let h = boot_with_schedules().await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let _ = rpc.call("initialize", json!({})).await;
+    let (id, _dir) = spoken_thread(&mut rpc, "schedule-events", "建几种事件触发").await;
+
+    let watch = rpc
+        .call(
+            "schedule/create",
+            json!({
+                "threadId": id,
+                "prompt": "CI 挂了就看看",
+                "watch": { "command": "gh pr checks 1", "everySecs": 120, "when": "fails" },
+            }),
+        )
+        .await;
+    let task = &watch["result"]["task"];
+    assert_eq!(task["schedule"]["kind"], "watch", "{watch}");
+    assert_eq!(task["schedule"]["command"], "gh pr checks 1", "{watch}");
+    assert_eq!(task["schedule"]["when"], "fails", "{watch}");
+    assert_eq!(
+        task["scheduleLabel"], "命令 · 每 2 分钟查一次，失败时触发",
+        "{watch}"
+    );
+    assert!(task["nextAtMs"].as_u64().is_some(), "马上查第一次：{watch}");
+
+    let files = rpc
+        .call(
+            "schedule/create",
+            json!({
+                "threadId": id,
+                "prompt": "同步英文版",
+                "files": { "paths": ["docs"], "debounceSecs": 30 },
+                "target": "newSession",
+            }),
+        )
+        .await;
+    let task = &files["result"]["task"];
+    assert_eq!(task["schedule"]["kind"], "files", "{files}");
+    assert_eq!(task["schedule"]["paths"], json!(["docs"]), "{files}");
+    assert_eq!(task["schedule"]["debounceSecs"], 30, "{files}");
+    assert_eq!(task["target"], "newSession", "{files}");
+    assert_eq!(task["expiresAtMs"], Value::Null, "文件变化不过期：{files}");
+
+    let manual = rpc
+        .call(
+            "schedule/create",
+            json!({ "threadId": id, "prompt": "发版前检查", "manual": true, "paused": true }),
+        )
+        .await;
+    let task = &manual["result"]["task"];
+    assert_eq!(task["schedule"]["kind"], "manual", "{manual}");
+    assert_eq!(task["paused"], true, "{manual}");
+    let manual_id = task["id"].as_str().unwrap().to_string();
+
+    let ran = rpc
+        .call("schedule/run", json!({ "id": manual_id, "input": "v1.2" }))
+        .await;
+    assert_eq!(ran["result"]["ok"], true, "{ran}");
+    let resumed = rpc
+        .call(
+            "schedule/update",
+            json!({ "id": manual_id, "paused": false }),
+        )
+        .await;
+    assert_eq!(resumed["result"]["task"]["paused"], false, "{resumed}");
+    assert_eq!(resumed["result"]["task"]["pending"], true, "{resumed}");
+    let missing = rpc.call("schedule/run", json!({ "id": "cron-nope" })).await;
+    assert_eq!(
+        missing["error"]["details"]["code"], "not_found",
+        "{missing}"
+    );
+
+    for params in [
+        json!({ "threadId": id, "prompt": "x", "watch": { "everySecs": 120 } }),
+        json!({ "threadId": id, "prompt": "x", "watch": { "command": "ls", "when": "matches" } }),
+        json!({ "threadId": id, "prompt": "x", "files": { "paths": [] } }),
+        // 监听范围太大（目录递归听）：文件系统根、家目录。
+        json!({ "threadId": id, "prompt": "x", "files": { "paths": ["/"] } }),
+        json!({ "threadId": id, "prompt": "x", "files": { "paths": ["~"] } }),
+        json!({ "threadId": id, "prompt": "x", "watch": { "command": "ls", "everySecs": 30 } }),
+        json!({ "threadId": id, "prompt": "x", "manual": true, "target": "elsewhere" }),
+        json!({ "threadId": id, "prompt": "x", "manual": true, "interval": "5m" }),
+    ] {
+        let bad = rpc.call("schedule/create", params.clone()).await;
+        assert!(bad["error"].is_object(), "{params} → {bad}");
+    }
+    let listed = rpc.call("schedule/list", json!({})).await;
+    let tasks = listed["result"]["tasks"].as_array().unwrap();
+    assert_eq!(tasks.len(), 3, "{listed}");
+    assert!(tasks.iter().all(|t| t["history"].is_array()), "{listed}");
+    assert!(tasks.iter().all(|t| t["holderLive"] == true), "{listed}");
+}
+
+/// 不经网关关掉的页（终端 `/tab close`、定时任务驱动收闲页）：网关推连接级的
+/// `thread/closed`，线程列表里它也不再算开着——界面据此不再往一个关了的页里发消息。
+#[tokio::test]
+async fn pages_closed_behind_the_gateway_are_announced() {
+    let h = boot_with_schedules().await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let _ = rpc.call("initialize", json!({})).await;
+    let (id, _dir) = spoken_thread(&mut rpc, "closed-behind", "说一句让它落盘").await;
+    let tabs = h
+        .ctx
+        .require::<cordis_spine::Tabs>(cordis_spine::TABS)
+        .unwrap();
+    tabs.close_session(&id).await.unwrap();
+    let pushed = rpc
+        .wait_notification("thread/closed", Duration::from_secs(5))
+        .await;
+    assert_eq!(pushed["params"]["threadId"], json!(id), "{pushed}");
+    let listed = rpc.call("thread/list", json!({ "scope": "all" })).await;
+    let thread = listed["result"]["threads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == json!(id))
+        .cloned()
+        .unwrap_or(Value::Null);
+    assert_eq!(thread["open"], false, "{listed}");
+}
+
 /// 定时任务到点时会话关着：`Tabs::open_session` 在后台开页，网关照 `thread/open`
 /// 的样子纳入投影——订阅时回放得出开页之前的对话，不是只有之后的事件。
 #[tokio::test]

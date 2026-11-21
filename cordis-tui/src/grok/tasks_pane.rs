@@ -21,7 +21,7 @@ use crate::grok::picker::{render_divider, render_floating_frame, render_search_b
 use crate::grok::workflows::WorkflowRunSnapshot;
 use crate::theme::Theme;
 use crate::views::status::{blend_occupancy_color, fmt_pct5, occupancy_breakpoints};
-use cordis_spine::{AgentPresets, CronJob, JobSnapshot, SubagentSnap};
+use cordis_spine::{AgentPresets, CronJob, CronSchedule, JobSnapshot, SubagentSnap};
 
 /// Logical group a [`TaskEntry`] belongs to. Drives both the sort order (so
 /// each kind is contiguous) and the collapsible group headers.
@@ -341,17 +341,25 @@ impl TaskEntry {
         } else {
             info.prompt.clone()
         };
-        let human_schedule = format_interval(info.every);
+        let human_schedule = info.schedule.short();
         let now = Instant::now();
-        let suffix = if info.next > now {
-            format!(
-                " (next in {})",
-                format_duration(info.next.duration_since(now))
-            )
+        let watch_word = if matches!(info.schedule, CronSchedule::Watch(_)) {
+            "check"
         } else {
-            " (due now)".to_string()
+            "next"
         };
-        let tag_display = "Loop";
+        let suffix = match info.next {
+            _ if info.paused => " (paused)".to_string(),
+            _ if info.done => " (done)".to_string(),
+            _ if info.pending => " (due now)".to_string(),
+            Some(next) if next > now => format!(
+                " ({watch_word} in {})",
+                format_duration(next.duration_since(now))
+            ),
+            Some(_) => " (due now)".to_string(),
+            None => " (waiting)".to_string(),
+        };
+        let tag_display = info.schedule.tag();
         let label = format!(
             "{} {} \u{b7} {}{}",
             tag_display, human_schedule, prompt_preview, suffix
@@ -758,7 +766,7 @@ pub fn render_tasks_overlay(
         let hint_y = list_y.saturating_add(visible as u16);
         if hint_y < content.y.saturating_add(content.height) {
             let hint = Line::from(Span::styled(
-                "x / [✗] 关闭 loop 或停止 workflow",
+                "x / [✗] 关闭 loop 或停止 workflow · 定时任务 p 暂停/继续 · r 立即运行",
                 Style::default().fg(theme.gray),
             ));
             buf.set_line(
@@ -782,17 +790,6 @@ fn capitalize_tag(tag: &str) -> String {
     match chars.next() {
         Some(first) => first.to_uppercase().chain(chars).collect(),
         None => String::new(),
-    }
-}
-
-fn format_interval(every: std::time::Duration) -> String {
-    let secs = every.as_secs().max(1);
-    if secs.is_multiple_of(3600) {
-        format!("{}h", secs / 3600)
-    } else if secs.is_multiple_of(60) {
-        format!("{}m", secs / 60)
-    } else {
-        format!("{secs}s")
     }
 }
 
@@ -852,17 +849,28 @@ mod tests {
         };
         let loop_job = CronJob {
             id: "cron-1".into(),
-            every: Duration::from_secs(60),
+            schedule: CronSchedule::Every(Duration::from_secs(60)),
             prompt: "status".into(),
             created_at: Instant::now(),
-            next: Instant::now() + Duration::from_secs(60),
+            next: Some(Instant::now() + Duration::from_secs(60)),
             owner: None,
             created_at_ms: 0,
-            next_at_ms: 60_000,
-            expires_at_ms: 0,
+            next_at_ms: Some(60_000),
+            expires_at_ms: None,
             last_fired_at_ms: None,
             last_error: None,
+            runs: 0,
+            max_runs: None,
+            catch_up: false,
+            target: cordis_spine::CronTarget::Session,
+            preset: None,
+            paused: false,
+            done: false,
+            pending: false,
+            history: Vec::new(),
+            watch: None,
             held_here: true,
+            holder_live: true,
         };
         let items = collect_items(&[mon], &[], &[loop_job], &[], None);
         assert!(items.iter().all(|i| i.group_kind() == GroupKind::Watchers));

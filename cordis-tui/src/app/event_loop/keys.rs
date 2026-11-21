@@ -695,6 +695,18 @@ pub(super) fn run_action(
                         return Vec::new();
                     }
                 }
+                // 定时任务行：p 暂停 / 继续，r 立即运行。别的行照常当搜索输入。
+                if matches!(c, 'p' | 'P' | 'r' | 'R') {
+                    let rows = task_entries(ctx, query, collapsed);
+                    if let Some(id) = rows.get(*selected).and_then(TaskEntry::scheduled_task_id) {
+                        if matches!(c, 'p' | 'P') {
+                            toggle_scheduled_pause(ctx, id);
+                        } else {
+                            run_scheduled_now(ctx, id);
+                        }
+                        return Vec::new();
+                    }
+                }
             }
             // `x` 在 Workflow Runs 里停选中的那条 run（列表和详情页都认）。
             if let Overlay::Workflows {

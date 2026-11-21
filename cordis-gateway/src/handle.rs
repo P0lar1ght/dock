@@ -526,6 +526,25 @@ fn listen_events(inner: &Arc<GatewayInner>) {
                 cordis_spine::session_cwd(&page.ctx),
             );
         });
+    // 一页关掉了（终端 `/tab close`、定时任务驱动收闲页、网关自己的 `thread/close`）：丢掉
+    // 它的投影，告诉各端这个线程关了——不然界面以为它还开着，往里发消息会报「没开」。
+    let for_closed = inner.clone();
+    let _ = inner.ctx.on(
+        cordis_spine::TABS_PAGE_CLOSED,
+        move |closed: &cordis_spine::PageClosed| {
+            let handle = GatewayHandle {
+                inner: for_closed.clone(),
+                scope: None,
+            };
+            handle.drop_page(&closed.identity);
+            if !closed.session.is_empty() {
+                let _ = for_closed.notices_tx.send(serde_json::json!({
+                    "method": crate::protocol::THREAD_CLOSED,
+                    "params": { "threadId": closed.session },
+                }));
+            }
+        },
+    );
     // 压缩进展只推不记，同样按页路由。
     let for_compaction = inner.clone();
     let _ = inner

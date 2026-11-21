@@ -144,6 +144,9 @@ pub const TABS: &str = "tabs";
 /// [`crate::Tabs::open_session`] 在后台开出一页（不是用户开的）。载荷是那一页的
 /// 身份（`String`）。网关据此把这一页纳入投影（回放历史、装项目插件）。
 pub const TABS_PAGE_OPENED: &str = "tabs/page-opened";
+/// 一页关掉了（不管是谁关的：终端 `/tab close`、网关 `thread/close`、定时任务驱动收闲页）。
+/// 载荷 [`crate::PageClosed`]。网关据此丢掉这一页的投影、告诉各端「这个线程关了」。
+pub const TABS_PAGE_CLOSED: &str = "tabs/page-closed";
 /// 回环网关（[`crate::GatewayRef`]），由 `cordis-gateway` 的插件 provide。
 pub const GATEWAY: &str = "gateway";
 /// 配对队列 / 绑定变了。载荷 `()`。
