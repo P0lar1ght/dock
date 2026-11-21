@@ -640,11 +640,23 @@ fn auth_models_json(provider: &str, models: &[cordis_base::auth::RemoteModel]) -
 pub async fn auth_usage(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
     let provider_id = auth_provider_param(&params);
     let manager = auth_manager(gateway)?;
+    // 这份额度是哪个账号的：界面按它分开存，切了账号不会先画上一个账号的数。
+    let account = manager.active_account(&provider_id).map(|a| a.client_id);
     let usage = manager
         .usage(&provider_id)
         .await
-        .map_err(|e| RpcError::app("usage_failed", e.message()))?;
-    Ok(serde_json::json!({ "provider": provider_id, "usage": usage }))
+        .map_err(|e| RpcError::app(usage_error_code(&e), e.message()))?;
+    Ok(serde_json::json!({ "provider": provider_id, "account": account, "usage": usage }))
+}
+
+/// `auth/usage` 失败时的码：没登录 / 没资格时界面要把旧的额度清掉，别的（网络、上游
+/// 5xx）留着上次的数。
+fn usage_error_code(e: &cordis_base::auth::AuthError) -> &'static str {
+    match e {
+        cordis_base::auth::AuthError::NeedsLogin { .. } => "needs_login",
+        cordis_base::auth::AuthError::NotEligible { .. } => "not_eligible",
+        _ => "usage_failed",
+    }
 }
 
 /// `auth/models { provider? }`：重拉活动账号能用的模型，写进模型目录，回这份列表。
@@ -1476,6 +1488,24 @@ pub fn gateway_settings() -> Plugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 没登录 / 没资格要让界面清掉旧额度，别的失败留着上次的数。
+    #[test]
+    fn usage_errors_say_whether_to_drop_the_old_numbers() {
+        use cordis_base::auth::AuthError;
+        assert_eq!(
+            usage_error_code(&AuthError::NeedsLogin { reason: "x".into() }),
+            "needs_login"
+        );
+        assert_eq!(
+            usage_error_code(&AuthError::NotEligible { code: "x".into() }),
+            "not_eligible"
+        );
+        assert_eq!(
+            usage_error_code(&AuthError::Transport("x".into())),
+            "usage_failed"
+        );
+    }
 
     #[test]
     fn profile_round_trips_both_files_and_rejects_unknown_kinds() {

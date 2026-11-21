@@ -11,6 +11,8 @@ import { RpcError } from "./client";
 
 export interface PlanUsageState {
   usage: PlanUsage | null;
+  /** 这份额度是哪个账号的（Dock 回的活动账号 id）。 */
+  account: string | null;
   /** 查不了（这一家没有额度接口，或老 Dock 没有这个方法）。 */
   unsupported: boolean;
   error: string | null;
@@ -19,7 +21,7 @@ export interface PlanUsageState {
   checkedAt: number;
 }
 
-const EMPTY: PlanUsageState = { usage: null, unsupported: false, error: null, loading: false, checkedAt: 0 };
+const EMPTY: PlanUsageState = { usage: null, account: null, unsupported: false, error: null, loading: false, checkedAt: 0 };
 const STALE_MS = 60_000;
 const POLL_MS = 5 * 60_000;
 const MIN_GAP_MS = 20_000;
@@ -38,14 +40,14 @@ const SAVED = "dock-gui.planUsage.";
 function stateOf(key: string): PlanUsageState {
   const known = states.get(key);
   if (known) return known;
-  let usage: PlanUsage | null = null;
+  let saved: { account: string | null; usage: PlanUsage } | null = null;
   try {
     const raw = localStorage.getItem(SAVED + key);
-    if (raw) usage = JSON.parse(raw) as PlanUsage;
+    if (raw) saved = JSON.parse(raw);
   } catch {
-    usage = null;
+    saved = null;
   }
-  const first = usage ? { ...EMPTY, usage } : EMPTY;
+  const first = saved?.usage ? { ...EMPTY, usage: saved.usage, account: saved.account ?? null } : EMPTY;
   states.set(key, first);
   return first;
 }
@@ -55,9 +57,9 @@ function set(key: string, next: Partial<PlanUsageState>) {
   emit();
 }
 
-function save(key: string, usage: PlanUsage | null) {
+function save(key: string, account: string | null, usage: PlanUsage | null) {
   try {
-    if (usage) localStorage.setItem(SAVED + key, JSON.stringify(usage));
+    if (usage) localStorage.setItem(SAVED + key, JSON.stringify({ account, usage }));
     else localStorage.removeItem(SAVED + key);
   } catch {
     // 存不了就每次重查，不影响显示。
@@ -74,14 +76,24 @@ export function refreshPlanUsage(provider: string, force = false): Promise<void>
   set(key, { loading: true });
   const task = authUsage(provider)
     .then((res) => {
-      save(key, res.usage);
-      set(key, { usage: res.usage, unsupported: !res.usage, error: null });
+      const account = res.account ?? null;
+      save(key, account, res.usage);
+      set(key, { usage: res.usage, account, unsupported: !res.usage, error: null });
     })
     .catch((e) => {
+      const code = e instanceof RpcError ? e.code : undefined;
       // 老 Dock 没有 auth/usage：当作查不了，不报错，也不留旧数。
-      const missing = e instanceof RpcError && e.code === "method_not_found";
-      if (missing) save(key, null);
-      set(key, missing ? { usage: null, unsupported: true, error: null } : { error: errorText(e) });
+      if (code === "method_not_found") {
+        save(key, null, null);
+        return set(key, { usage: null, account: null, unsupported: true, error: null });
+      }
+      // 登出了 / 没资格：上一个账号的数不能留着（会被当成现在这个账号的）。
+      if (code === "needs_login" || code === "not_eligible") {
+        save(key, null, null);
+        return set(key, { usage: null, account: null, error: errorText(e) });
+      }
+      // 网络、上游临时失败：留着上次的数，标出刷新失败。
+      set(key, { error: errorText(e) });
     })
     .finally(() => {
       inflight.delete(key);
@@ -107,7 +119,12 @@ export function usePlanUsage(provider: string | null | undefined): PlanUsageStat
     watchers.set(k, (watchers.get(k) ?? 0) + 1);
     if (Date.now() - stateOf(k).checkedAt > STALE_MS) void refreshPlanUsage(provider, true);
     const timer = window.setInterval(() => void refreshPlanUsage(provider, true), POLL_MS);
-    const off = onAuthChanged(() => void refreshPlanUsage(provider, true));
+    // 登录 / 登出 / 切账号：先把旧数清掉再重查，不先画上一个账号的额度。
+    const off = onAuthChanged(() => {
+      save(k, null, null);
+      set(k, { usage: null, account: null });
+      void refreshPlanUsage(provider, true);
+    });
     return () => {
       window.clearInterval(timer);
       off();

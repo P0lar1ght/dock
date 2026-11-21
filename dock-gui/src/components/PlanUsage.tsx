@@ -299,7 +299,10 @@ export function PlanUsageCard({
           <div className="flex w-full min-w-0 flex-1 flex-col gap-2.5">
             <div className="flex items-center gap-1 text-[12.5px] font-medium text-ink-2">
               {word}剩余额度
-              <span title="xAI 订阅额度池（与 Grok Build 共用、按它计量）。上游只给百分比。" className="text-ink-4">
+              <span
+                title="xAI 订阅额度池，按 Grok Build 的计量给的百分比。Dock 经 api.x.ai 的用量算不算进这个池还没核实，别把它当成 Dock 推理的实时计量。"
+                className="text-ink-4"
+              >
                 <Info className="size-3.5" />
               </span>
             </div>

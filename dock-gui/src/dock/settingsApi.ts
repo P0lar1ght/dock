@@ -180,7 +180,7 @@ export const authStatus = () => dock.call<AuthStatus>("auth/status");
 
 /** 活动账号的订阅额度。`usage: null` = 这一家查不了（ChatGPT）；老 Dock 没有这个方法，调用会失败。 */
 export const authUsage = (provider: string) =>
-  dock.call<{ provider: string; usage: PlanUsage | null }>("auth/usage", { provider });
+  dock.call<{ provider: string; account?: string | null; usage: PlanUsage | null }>("auth/usage", { provider });
 
 /** 发起订阅通道登录。返回里带**授权页地址**——客户端自己开（Dock 那头在后台等）。
  *  `account`：不给 = 活动账号；"new" = 再加一个账号；clientId = 那个账号重新登录。

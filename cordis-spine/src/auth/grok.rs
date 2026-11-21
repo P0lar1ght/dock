@@ -477,9 +477,7 @@ impl GrokProvider {
             grant.user_code, grant.verification_uri
         ));
         let token = self.poll_device(&grant).await?;
-        let cred = self
-            .finish_login(ui, expected.as_deref(), &token, req.scope)
-            .await?;
+        let cred = self.finish_login(ui, expected.as_deref(), &token).await?;
         Ok(key_of(&cred))
     }
 
@@ -489,7 +487,6 @@ impl GrokProvider {
         ui: &dyn LoginUi,
         expected: Option<&str>,
         token: &Value,
-        mode: ScopeMode,
     ) -> Result<Credential, AuthError> {
         let missing = |name: &str| AuthError::NeedsLogin {
             reason: format!("token 响应里没有 {name}"),
@@ -534,10 +531,17 @@ impl GrokProvider {
         }
         let account_id = sanitize(&subject);
         let existing = self.store.load(&account_id).ok();
+        // 授权给了哪些 scope：以 token 响应为准；没带就看 access token 自己的 `scope`
+        // 声明（实测是 JWT）。两处都没有就当**什么都没给**——不能拿「申请了什么」充数，
+        // 不然没拿到套餐权限也会被当成能用订阅推理（审阅 #309 第 3 条）。
         let scopes = {
             let granted = scope_list(token);
             if granted.is_empty() {
-                scopes_for(mode).iter().map(|s| s.to_string()).collect()
+                crate::auth::jwt::parse_claims(&access)
+                    .ok()
+                    .and_then(|c| c.scope)
+                    .map(|s| s.split_whitespace().map(str::to_string).collect())
+                    .unwrap_or_default()
             } else {
                 granted
             }
@@ -977,9 +981,15 @@ impl AuthProvider for GrokProvider {
     ) -> AuthFuture<'a, Result<LogoutOutcome, AuthError>> {
         Box::pin(async move {
             // 也拿锁：别的进程正在刷新时清掉，那份刷新结果会写回来——等于没登出。
+            // 拿不到锁就别登出：清掉之后，别的进程那份刷新结果会把新 token 写回来，
+            // 等于没登出（审阅 #309 第 6 条）。
             let _lock = FileLock::acquire(&self.store.lock_path_for(&acct.client_id), LOCK_TIMEOUT)
                 .await
-                .ok();
+                .map_err(|e| {
+                    AuthError::Transport(format!(
+                        "另一个 Dock 进程正在刷新这个账号，等它刷完再登出（{e}）"
+                    ))
+                })?;
             let cred = match self.store.load(&acct.client_id) {
                 Ok(cred) => cred,
                 Err(CredentialError::Missing) => {
@@ -1706,6 +1716,65 @@ mod tests {
         let accounts = provider.accounts();
         assert_eq!(accounts.len(), 1);
         assert!(accounts[0].active && accounts[0].signed_in && accounts[0].plan_usage);
+    }
+
+    /// token 响应里没有 `scope`：看 access token 自己的 `scope` 声明；两处都没有就当
+    /// 什么都没给——以前拿「申请了什么」充数，没拿到套餐权限也会被当成能用订阅推理。
+    #[tokio::test]
+    async fn a_missing_scope_is_not_assumed_granted() {
+        use base64::Engine;
+        let enc = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let jwt_with = |scope: &str| {
+            format!(
+                "{}.{}.sig",
+                enc.encode(br#"{"alg":"ES256","typ":"at+jwt"}"#),
+                enc.encode(json!({ "scope": scope }).to_string())
+            )
+        };
+        for (access, want_plan) in [
+            (jwt_with(&SCOPES.join(" ")), true),
+            (jwt_with("openid profile email offline_access"), false),
+            ("opaque-access-token".to_string(), false),
+        ] {
+            let signer = Arc::new(Signer::new());
+            let s = signer.clone();
+            let access_for_token = access.clone();
+            let xai = FakeXai::start(move |path, _, _| match path {
+                "/device" => (200, device_ok()),
+                "/jwks" => (200, s.jwks.clone()),
+                "/token" => (
+                    200,
+                    json!({
+                        "access_token": access_for_token,
+                        "refresh_token": "r",
+                        "id_token": s.id_token("u-scope", "s@x.ai"),
+                    })
+                    .to_string(),
+                ),
+                _ => (404, "{}".into()),
+            })
+            .await;
+            let store = store();
+            let provider = GrokProvider::new(store.clone()).with_test_server(&xai.base);
+            let key = provider
+                .login(&Recorder::new(), LoginRequest::default())
+                .await
+                .expect("登录");
+            let cred = store.load(&key.client_id).unwrap();
+            assert_eq!(
+                has_plan(&cred),
+                want_plan,
+                "access={access} scopes={:?}",
+                cred.scopes
+            );
+            if !want_plan {
+                let err = provider
+                    .lease(&key, Duration::from_secs(60))
+                    .await
+                    .expect_err("没有套餐 scope 不能推理");
+                assert!(matches!(err, AuthError::NotEligible { .. }), "{err:?}");
+            }
+        }
     }
 
     /// ID token 不是授权服务器的钥匙签的：拒，不落盘。

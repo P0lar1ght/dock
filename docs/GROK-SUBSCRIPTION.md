@@ -57,7 +57,9 @@ auth = "grok"   # 地址由 provider 给，api_base_url 可以不写
 
 - 终端：`/auth usage [grok]`，一行：`Grok（SuperGrok）：本周已用 27%，还剩 73% · 2 天 14 小时后重置`。
 - 桌面端：输入框旁「Using Grok plan」换成剩余额度的小圆环（点开是详情卡）；设置 › 模型 › 订阅通道里一张额度卡。
-- 网关：`auth/usage { provider }` → `{ provider, usage }`；查不了的那家（ChatGPT）`usage` 是 `null`。只认受信连接。
+- 网关：`auth/usage { provider }` → `{ provider, account, usage }`；查不了的那家（ChatGPT）`usage` 是 `null`。只认受信连接。
+  - 失败码：`needs_login` / `not_eligible`（界面清掉旧额度）、`usage_failed`（网络等，界面留着上次的数）。
+  - 界面按账号存额度；登录 / 登出 / 切账号时先清掉再重查，不先画上一个账号的数。
 - 每次都问上游，Dock 不缓存；界面自己定多久查一次（打开时、每 5 分钟、一轮结束后）。
 
 公开 API 上**查不到**订阅额度，只有 Grok Build 自用的后端有：
