@@ -8,6 +8,8 @@
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-23
+
 ### 变更
 
 - **写插件改成「插件就是一个目录」，对齐 DSH 的 Plugin Manager**：模型侧只剩两颗工具——只读的 `cordis_inspect` 和管理插件目录的 `cordis_plugin`（`reload` / `disable`）。`cordis_define` / `cordis_run` / `cordis_call` / `cordis_stop` / `cordis_promote` 退役。本机 13 个用过这组工具的会话里，一次修改要 define → run → call 三次调用、来回 8–10 轮；插件 id 跟着分裂（`cyberspace` → `cyber-2`，磁盘上留下项目级和用户级两份）；define 接受的路径 run 又拒绝。DSH 撤掉同一套工具的理由是「生成代码工具在普通已安装组合包之外引入了第二套插件生命周期」。
@@ -263,6 +265,7 @@
   MCP 服务的确认（接受 / 拒绝 / 取消）；会话菜单能重命名、归档、删除。`npm test` 跑 SDK 单测。
 
 - **浏览器面板强制重新加载**：`browser/view/navigate` 支持 `action: "hard_reload"`（绕过缓存，和 Shift+刷新一样），能力 `browserHardReload`。
+- 插件插槽斜杠在 GUI 直开右侧面板：`kind: "slot"` 的插件斜杠（`/cyberspace` 这类）以前只会回「请在 Dock 终端打开」，现在网关投 `openSlot` 响应，GUI 直接开右侧的插件面板。
 
 ### 改进
 
@@ -298,6 +301,9 @@
 
 - bash 卡片显示命令的描述（模型给的 `description`）：TUI 与 GUI 标题是描述 + 主程序名（`find`、`cargo test`），完整命令展开看。
 - 权限弹窗里 bash / monitor 显示完整命令，描述另起一行；原先是截到 120 字的原始 JSON。
+- **长会话流式不卡，开着的会话不再限 9 个**：会话轨迹事件增量折叠、只重画变了的轮次；对话流只画最近 12 轮、翻到顶附近再补；贴底跟随改用 ResizeObserver，只有用户往上翻才放手。无头 Chrome 实测 40 轮合成会话：流式 3.7 fps / 点击延迟约 450ms → 60 fps / 约 1ms，打开长会话 DOM 24838 → 1739。
+  - `thread/history` / `subagent/history` 把同一轮连着的流式增量并起来再给（3717 条 → 58 条），按「不大于已见最大 seq 就丢」去重的客户端回放状态不变。
+  - 桌面端开页不再设 9 个上限（终端自己开页仍 9 页，Alt+1..9 直达）；后台超过 16 张闲页时自动收最久没看的，在跑 / 在等 / 在看 / 有子代理在跑的页不收。
 
 ### 修复
 
@@ -372,6 +378,16 @@
 - MCP App：交给界面的工具输入拆掉 `use_tool` 那层；CSP 让 Worker 也认资源域名（CesiumJS 等地图能出图）。
 - 白板清空后用同样的 id 重画，框里的标签不再丢。
 - 握手途中停用 / 重连 / 改配置的 MCP 服务器，晚到的握手结果不再写回。
+- **工具结果里的内联图计入上下文占用估算**：截图类工具（`browser_screenshot` 等）返回的图随历史每次请求内联重发，估算漏掉它，截图多的会话占用被低估、自动压缩迟迟不触发；压缩「摘要不比原文小」的判定也会少算原文。现在按张计 765 token；上下文面板把这一份从「消息」挪到「推理 / 开销」的「图片」行。
+- **问答卡题多、字长时不再撑破会话区**：`ask_user_question` 一次问 3 道长题时，卡片比窗口还高，会话头栏被顶出去、「提交回答」和输入框跑到窗口外点不到。现在输入框上方那一列最多占会话区 75% 且可以被压矮，卡头和「提交回答」钉住、题目区卡内滚动，选项标题完整换行、长串可断行；侧边聊天里的问答卡同样限高。
+- **输入框固定在会话区底部**：长对话里输入框被对话流按比例挤扁、掉出窗口（1500×900 下从 93px 压到 32px）。现在对话流填满头栏和输入区之间，输入框贴底，内容短时也不再跟着最后一条消息浮起来；侧边聊天同一套布局。
+- 内置插件示例 guard / done-check 认 `write_file` 的 `target_file`（以前只读 `search_replace` 的 `file_path`，改冻结副本或改 `.rs` 不会触发）；欢迎页 Shift+Tab 提示与三档模式对齐。
+
+### 破坏性变更（升级注意）
+
+- 模型工具 `cordis_define` / `cordis_run` / `cordis_call` / `cordis_stop` / `cordis_promote` 退役：插件改成「一个目录」（`.dock/plugins/<id>/source.rhai`，`plugin.toml` 可选），写文件 → `cordis_plugin reload` → `use_tool` 验证。已有的 `.dock/plugins` 目录照常自动装载，不用迁移。网关去掉 `plugin/promote`、`plugin/discard`，`plugin/list` 去掉 `session` 字段；设置页去掉「动态插件」一栏。
+- 插件作者：回合末 todo 提醒的第一行从 `Todos NOT complete — continue working. Next step:` 换成 `Todo bookkeeping only — update statuses.`，按旧开头匹配的 Rhai 钩子要改；`agent/turn-end` 载荷的 `ended_with_text` 恒为 `true`。Rust 侧 `Error` 新增 `Stationary { tool, run }`、`StreamDelta` 新增 `ToolInput` 变体：穷尽 `match` 且没有通配分支的要补一个分支（两者都没有 `#[non_exhaustive]`）。
+- `$DOCK_HOME/schedules.json` 升到 version 2：旧版 Dock 读不了会报「解析失败」且不碰它（不会覆盖掉），升级回来照常；比本版更新的 version 也一样拒绝写回。
 
 ## [0.2.1] - 2026-10-13
 
