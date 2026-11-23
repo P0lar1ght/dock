@@ -1,7 +1,8 @@
 //! Streamable HTTP MCP client (rmcp `post_message` shape, reqwest 0.12).
 //!
 //! Prefer protocol `2026-07-28` (no session; `_meta`, `MCP-Protocol-Version`,
-//! `Mcp-Method` / `Mcp-Name`). On a 400 that is not a modern JSON-RPC error,
+//! `Mcp-Method` / `Mcp-Name` on tools/call, resources/read, prompts/get).
+//! On a 400 that is not a modern JSON-RPC error,
 //! fall back to initialize-era `2025-11-25` with `Mcp-Session-Id`.
 //! Standing GET SSE + session 404 recover.
 //!
@@ -23,7 +24,7 @@ use serde_json::{json, Value};
 use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::tools::mcp::protocol::{
-    self, client_capabilities, client_info, encode_header_value, id_matches, pick_version,
+    self, client_capabilities, client_info, id_matches, named_request_header, pick_version,
     unsupported_versions, with_meta, Incoming, PROTOCOL_LATEST, PROTOCOL_LEGACY,
 };
 use cordis_base::config::{McpServer, McpTransport};
@@ -461,10 +462,10 @@ async fn post(
         if s.modern.load(Ordering::Relaxed) {
             if let Some(method) = method {
                 req = req.header(HEADER_METHOD, method);
-                if method == "tools/call" {
-                    if let Some(name) = params.get("name").and_then(|n| n.as_str()) {
-                        req = req.header(HEADER_NAME, encode_header_value(name));
-                    }
+                // tools/call、prompts/get 用 params.name；resources/read 用 params.uri。
+                // 只给 tools/call 带头的话，MCP App 的 resources/read 会被 MODERN 服务器 400。
+                if let Some(name) = named_request_header(method, params) {
+                    req = req.header(HEADER_NAME, name);
                 }
             }
         }
@@ -878,6 +879,54 @@ mod tests {
                         .to_string(),
                     )
                 }
+                "resources/read" => {
+                    let uri = v
+                        .pointer("/params/uri")
+                        .and_then(|u| u.as_str())
+                        .unwrap_or("");
+                    assert!(
+                        headers
+                            .to_ascii_lowercase()
+                            .contains(&format!("mcp-name: {}", uri.to_ascii_lowercase())),
+                        "resources/read must send Mcp-Name: {headers}"
+                    );
+                    json_response(
+                        200,
+                        "",
+                        &json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": { "contents": [{
+                                "uri": uri,
+                                "mimeType": "text/html;profile=mcp-app",
+                                "text": "<html></html>"
+                            }] }
+                        })
+                        .to_string(),
+                    )
+                }
+                "prompts/get" => {
+                    let name = v
+                        .pointer("/params/name")
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("");
+                    assert!(
+                        headers
+                            .to_ascii_lowercase()
+                            .contains(&format!("mcp-name: {}", name.to_ascii_lowercase())),
+                        "prompts/get must send Mcp-Name: {headers}"
+                    );
+                    json_response(
+                        200,
+                        "",
+                        &json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": { "description": name, "messages": [] }
+                        })
+                        .to_string(),
+                    )
+                }
                 _ => json_response(
                     400,
                     "",
@@ -1107,6 +1156,37 @@ mod tests {
         )
         .await;
         assert_eq!(result.content, "hi");
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn modern_read_and_prompt_send_mcp_name() {
+        let (url, handle) = spawn_server(Mode::Modern).await;
+        let (stop_tx, stop_rx) = watch::channel(false);
+        let (_listed, rpc, _) = connect(&http_server(url), incoming::dummy_hooks("local"), stop_rx)
+            .await
+            .expect("connect");
+        let read = rpc(
+            "resources/read".into(),
+            json!({ "uri": "ui://sungods/app" }),
+        )
+        .await
+        .expect("read");
+        assert_eq!(
+            read.pointer("/result/contents/0/uri")
+                .and_then(|u| u.as_str()),
+            Some("ui://sungods/app")
+        );
+        let prompt = rpc("prompts/get".into(), json!({ "name": "intro" }))
+            .await
+            .expect("prompt");
+        assert_eq!(
+            prompt
+                .pointer("/result/description")
+                .and_then(|d| d.as_str()),
+            Some("intro")
+        );
+        drop(stop_tx);
         handle.abort();
     }
 

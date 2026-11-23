@@ -737,6 +737,20 @@ pub fn encode_header_value(value: &str) -> String {
     }
 }
 
+/// 2026-07-28：`tools/call` / `prompts/get` 的 `Mcp-Name` 是 `params.name`，
+/// `resources/read` 是 `params.uri`。其它方法不带这个头。
+pub fn named_request_header(method: &str, params: &Value) -> Option<String> {
+    let raw = match method {
+        "tools/call" | "prompts/get" => params.get("name").and_then(Value::as_str),
+        "resources/read" => params.get("uri").and_then(Value::as_str),
+        _ => None,
+    }?;
+    if raw.is_empty() {
+        return None;
+    }
+    Some(encode_header_value(raw))
+}
+
 pub fn parse_sse_json_values(body: &str) -> Vec<Value> {
     let mut out = Vec::new();
     let mut data_lines: Vec<String> = Vec::new();
@@ -828,6 +842,28 @@ mod tests {
     #[test]
     fn encode_non_ascii_name() {
         assert!(encode_header_value("你好").starts_with("=?base64?"));
+    }
+
+    #[test]
+    fn named_request_header_for_call_read_and_prompt() {
+        assert_eq!(
+            named_request_header("tools/call", &json!({ "name": "echo" })).as_deref(),
+            Some("echo")
+        );
+        assert_eq!(
+            named_request_header("resources/read", &json!({ "uri": "ui://sungods/app" }))
+                .as_deref(),
+            Some("ui://sungods/app")
+        );
+        assert_eq!(
+            named_request_header("prompts/get", &json!({ "name": "intro" })).as_deref(),
+            Some("intro")
+        );
+        assert!(named_request_header("tools/list", &json!({})).is_none());
+        assert!(named_request_header("resources/read", &json!({ "uri": "" })).is_none());
+        assert!(named_request_header("resources/read", &json!({ "name": "nope" })).is_none());
+        let encoded = named_request_header("resources/read", &json!({ "uri": "你好" })).unwrap();
+        assert!(encoded.starts_with("=?base64?"));
     }
 
     #[test]
