@@ -9,14 +9,19 @@ use crate::agent::capability::CapabilityMode;
 use crate::agent::presets::{blocked_tool_message, AgentPresets, MINIMAL_PRESET_ID};
 use crate::agent::runtime::BoxFuture;
 use crate::agent::turn::TurnControl;
-use crate::host::permissions::Permissions;
+use crate::host::approval;
+use crate::host::permissions::{Decision, Permissions};
+use crate::host::settings::PermissionMode;
 use crate::names::{
-    AGENT_PRESETS, CAPABILITY, JOBS, PERMISSIONS, PLAN_MODE, SESSIONS, TOOLS, TOOLS_EXECUTE,
+    AGENT_PRESETS, CAPABILITY, CRON, JOBS, PERMISSIONS, PLAN_MODE, SESSIONS, TOOLS, TOOLS_EXECUTE,
     TOOLS_PRE_EXECUTE, TURN,
 };
+use crate::session::log::Sessions;
+use crate::tools::cron::Cron;
 use crate::tools::plan_mode::PlanMode;
 use crate::tools::workspace;
 use cordis_base::acp;
+use cordis_base::types::ApprovalBy;
 use cordis_base::types::{PreExecute, ToolCall, ToolResult, ToolSpec};
 
 tokio::task_local! {
@@ -485,27 +490,30 @@ impl Tools {
         let plugin_cleared = match pre.ask_reason() {
             None => false,
             Some(reason) => {
-                let approved = match exec.get::<Permissions>(PERMISSIONS) {
+                let decision = match exec.get::<Permissions>(PERMISSIONS) {
                     Some(perms) => {
                         let (key, summary) = permission_request(exec, pre.name(), pre.arguments());
                         let summary = format!("插件要求确认：{reason}\n{summary}");
-                        perms
-                            .request_strict(&key, &summary, subagent_of(exec))
-                            .await
+                        perms.decide_strict(&key, &summary, subagent_of(exec)).await
                     }
-                    None => false,
+                    None => Decision::Denied,
                 };
-                if !approved {
+                let refused = match decision {
+                    Decision::Allowed => None,
+                    Decision::Denied => Some(format!(
+                        "{}（插件要求确认：{reason}）",
+                        cordis_base::types::PERMISSION_DENIED_TOOL_RESULT
+                    )),
+                    Decision::TimedOut(waited) => Some(approval_timed_out(exec, &call.id, waited)),
+                };
+                if let Some(content) = refused {
                     return finish(
                         exec,
                         &hook_args,
                         ToolResult {
                             call_id: call.id,
                             name: pre.name().to_string(),
-                            content: format!(
-                                "{}（插件要求确认：{reason}）",
-                                cordis_base::types::PERMISSION_DENIED_TOOL_RESULT
-                            ),
+                            content,
                             is_error: true,
                             ..Default::default()
                         },
@@ -524,37 +532,47 @@ impl Tools {
         if self.workspace {
             // 只读场景里的 bash 自己把关（见 `tools::read_only`）：只读命令直接跑，别的
             // 一律问用户、自动批准也不算。过了这一关就不再走下面的计划门和普通权限门。
-            let bash_cleared =
-                if call.name == "bash" && crate::tools::read_only::in_read_only_scene(exec) {
-                    let command = crate::tools::read_only::bash_command(&call.arguments);
-                    let approved = plugin_cleared
-                        || cordis_base::read_only_shell::is_read_only_command(&command)
-                        || match exec.get::<Permissions>(PERMISSIONS) {
-                            Some(perms) => {
-                                let summary = permission_summary(&call.name, &call.arguments);
-                                perms
-                                    .request_strict(&call.name, &summary, subagent_of(exec))
-                                    .await
-                            }
-                            None => false,
-                        };
-                    if !approved {
-                        return finish(
-                            exec,
-                            &hook_args,
-                            ToolResult {
-                                call_id: call.id,
-                                name: call.name,
-                                content: crate::tools::read_only::DENIED.into(),
-                                is_error: true,
-                                ..Default::default()
-                            },
-                        );
-                    }
-                    true
+            let bash_cleared = if call.name == "bash"
+                && crate::tools::read_only::in_read_only_scene(exec)
+            {
+                let command = crate::tools::read_only::bash_command(&call.arguments);
+                let decision = if plugin_cleared
+                    || cordis_base::read_only_shell::is_read_only_command(&command)
+                {
+                    Decision::Allowed
                 } else {
-                    false
+                    match exec.get::<Permissions>(PERMISSIONS) {
+                        Some(perms) => {
+                            let summary = permission_summary(&call.name, &call.arguments);
+                            perms
+                                .decide_strict(&call.name, &summary, subagent_of(exec))
+                                .await
+                        }
+                        None => Decision::Denied,
+                    }
                 };
+                let refused = match decision {
+                    Decision::Allowed => None,
+                    Decision::Denied => Some(crate::tools::read_only::DENIED.to_string()),
+                    Decision::TimedOut(waited) => Some(approval_timed_out(exec, &call.id, waited)),
+                };
+                if let Some(content) = refused {
+                    return finish(
+                        exec,
+                        &hook_args,
+                        ToolResult {
+                            call_id: call.id,
+                            name: call.name,
+                            content,
+                            is_error: true,
+                            ..Default::default()
+                        },
+                    );
+                }
+                true
+            } else {
+                false
+            };
             let plan_expected = crate::tools::plan_mode::expected_plan_path(
                 exec.get::<crate::session::log::Sessions>(SESSIONS)
                     .as_deref(),
@@ -596,14 +614,23 @@ impl Tools {
             {
                 if let Some(perms) = exec.get::<Permissions>(PERMISSIONS) {
                     let (key, summary) = permission_request(exec, &call.name, &call.arguments);
-                    if !perms.request_from(&key, &summary, subagent_of(exec)).await {
+                    let refused = match gate(exec, &perms, &call, &key, &summary).await {
+                        Decision::Allowed => None,
+                        Decision::Denied => {
+                            Some(cordis_base::types::PERMISSION_DENIED_TOOL_RESULT.to_string())
+                        }
+                        Decision::TimedOut(waited) => {
+                            Some(approval_timed_out(exec, &call.id, waited))
+                        }
+                    };
+                    if let Some(content) = refused {
                         return finish(
                             exec,
                             &hook_args,
                             ToolResult {
                                 call_id: call.id,
                                 name: call.name,
-                                content: cordis_base::types::PERMISSION_DENIED_TOOL_RESULT.into(),
+                                content,
                                 is_error: true,
                                 ..Default::default()
                             },
@@ -707,6 +734,68 @@ fn subagent_of(exec: &Context) -> Option<String> {
     exec.get::<crate::session::log::Sessions>(SESSIONS)
         .filter(|s| !s.is_main())
         .map(|s| s.identity().to_string())
+}
+
+/// 普通权限门：按这次调用实际的档位走。智能授权档先过规则和判断模型（「始终允许 /
+/// 始终拒绝」过的照旧直接算数），放行了不弹框、把判断模型的理由挂到工具卡上；要问人
+/// 时在审批框末尾写明为什么问。
+async fn gate(
+    exec: &Context,
+    perms: &Permissions,
+    call: &ToolCall,
+    key: &str,
+    summary: &str,
+) -> Decision {
+    let agent = subagent_of(exec);
+    let smart = perms.effective_mode(agent.as_deref()) == PermissionMode::Smart
+        && !perms.is_always(key)
+        && !perms.is_never(key);
+    if !smart {
+        return perms.decide(key, summary, agent).await;
+    }
+    match approval::smart_verdict(exec, &call.name, key, &call.arguments).await {
+        approval::Smart::Allow { note } => {
+            if let Some(reason) = note {
+                note_approval(exec, &call.id, ApprovalBy::Judge, &reason);
+            }
+            Decision::Allowed
+        }
+        approval::Smart::Ask(why) => {
+            let summary = format!("{summary}\n智能授权：{why}，需要你确认");
+            perms.decide(key, &summary, agent).await
+        }
+    }
+}
+
+/// 智能授权替用户做的决定挂到这次调用上（只给人看，跟着会话落盘）。
+fn note_approval(exec: &Context, call_id: &str, by: ApprovalBy, reason: &str) {
+    if let Some(sessions) = exec.get::<Sessions>(SESSIONS) {
+        sessions.append(cordis_base::types::approval_notice(call_id, by, reason));
+    }
+}
+
+/// 无人值守的一轮里等审批超时：挂说明、记进那个定时任务的运行记录，回给模型的结果。
+fn approval_timed_out(exec: &Context, call_id: &str, waited: std::time::Duration) -> String {
+    let minutes = waited.as_secs().div_ceil(60).max(1);
+    note_approval(
+        exec,
+        call_id,
+        ApprovalBy::Timeout,
+        &format!("等了 {minutes} 分钟没人批准，这次没执行"),
+    );
+    let run = exec
+        .get::<Permissions>(PERMISSIONS)
+        .and_then(|p| p.run_approval());
+    if let (Some(run), Some(cron)) = (run, exec.get::<Cron>(CRON)) {
+        let session = exec
+            .get::<PlanMode>(PLAN_MODE)
+            .and_then(|p| p.page_sessions())
+            .or_else(|| exec.get::<Sessions>(SESSIONS))
+            .map(|s| s.live_session_id())
+            .filter(|id| !id.is_empty());
+        cron.note_approval_timeout(&run.task_id, session.as_deref());
+    }
+    cordis_base::types::approval_timed_out_tool_result(waited)
 }
 
 /// 权限请求的键（「始终允许 / 始终拒绝」按它记）和给用户看的摘要。大多数工具
@@ -1876,6 +1965,206 @@ mod pre_execute_tests {
         assert!(out.is_error);
         assert_eq!(out.content, crate::tools::read_only::DENIED);
         assert!(!marker.exists(), "被拒的命令不该跑");
+    }
+
+    /// 等队首出现一条权限请求（最多 1 秒）。
+    async fn wait_front(perms: &Permissions) -> Option<crate::host::permissions::PermissionPrompt> {
+        for _ in 0..200 {
+            if let Some(front) = perms.front() {
+                return Some(front);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        None
+    }
+
+    fn call_as(id: &str, name: &str, args: &str) -> ToolCall {
+        ToolCall {
+            id: id.into(),
+            name: name.into(),
+            arguments: args.into(),
+        }
+    }
+
+    /// 智能授权：只读命令直接跑；判断模型说安全的直接跑，理由挂到这次调用上；判断模型
+    /// 说有风险的、硬清单上的（sudo）问人，审批框写明为什么问。
+    #[tokio::test]
+    async fn smart_mode_runs_safe_calls_and_asks_for_risky_ones() {
+        use crate::host::approval::{ApprovalJudge, Judged};
+        use crate::host::settings::{AppSettings, PermissionMode};
+        use crate::names::{APPROVAL_JUDGE, SETTINGS};
+        use cordis_base::acp::PermissionOptionKind;
+
+        let ctx = Context::new();
+        let settings = AppSettings::new("x");
+        settings.set_permission_mode(PermissionMode::Smart);
+        let _s = ctx.provide(SETTINGS, settings).unwrap();
+        let _perm = ctx
+            .provide(PERMISSIONS, Permissions::new(ctx.clone()))
+            .unwrap();
+        let _sessions = ctx.provide(SESSIONS, Sessions::new(ctx.clone())).unwrap();
+        let _judge = ctx
+            .provide(
+                APPROVAL_JUDGE,
+                ApprovalJudge::scripted(|req| {
+                    if req.action.contains("judge-ok") {
+                        Judged::Allow("跑项目脚本".into())
+                    } else {
+                        Judged::Ask("要发布".into())
+                    }
+                }),
+            )
+            .unwrap();
+        let tools = Tools::workspace(ctx.clone());
+        let perms = ctx.get::<Permissions>(PERMISSIONS).unwrap();
+        let sessions = ctx.get::<Sessions>(SESSIONS).unwrap();
+
+        let read = tools
+            .execute(call_as(
+                "ro",
+                "bash",
+                r#"{"command":"echo smart-ro | head -1"}"#,
+            ))
+            .await;
+        assert!(
+            read.content.contains("smart-ro"),
+            "只读的直接跑：{}",
+            read.content
+        );
+
+        let judged = tools
+            .execute(call_as(
+                "ok",
+                "bash",
+                r#"{"command":"echo $(echo judge-ok)"}"#,
+            ))
+            .await;
+        assert!(
+            judged.content.contains("judge-ok"),
+            "判断模型说安全的直接跑：{}",
+            judged.content
+        );
+        let notes: Vec<_> = sessions
+            .events()
+            .iter()
+            .filter_map(cordis_base::types::approval_note)
+            .collect();
+        assert_eq!(
+            notes.len(),
+            1,
+            "规则放行的不挂说明，判断模型放行的挂：{notes:?}"
+        );
+        assert_eq!(notes[0].call_id, "ok");
+        assert_eq!(notes[0].by, ApprovalBy::Judge);
+        assert_eq!(notes[0].reason, "跑项目脚本");
+
+        for (args, why) in [
+            (
+                r#"{"command":"echo $(echo publish)"}"#,
+                "智能授权：要发布，需要你确认",
+            ),
+            (
+                r#"{"command":"sudo -n true"}"#,
+                "智能授权：高风险（sudo），需要你确认",
+            ),
+        ] {
+            let t = tools.clone();
+            let run = tokio::spawn(async move { t.execute(call_as("ask", "bash", args)).await });
+            let front = wait_front(&perms).await.expect("要问人");
+            assert!(front.summary.ends_with(why), "{}", front.summary);
+            perms.resolve(PermissionOptionKind::RejectOnce);
+            let out = run.await.unwrap();
+            assert!(out.is_error);
+            assert_eq!(
+                out.content,
+                cordis_base::types::PERMISSION_DENIED_TOOL_RESULT
+            );
+        }
+    }
+
+    /// 无人值守的一轮（定时任务）：权限请求等不到人就按拒绝处理，告诉模型用户不在、
+    /// 挂一条说明、记进那个任务的运行记录。以前一直等，那一页永远算忙。人回来发了
+    /// 别的消息，这一轮的设定就撤掉。
+    #[tokio::test]
+    async fn an_unattended_run_gives_up_on_an_unanswered_request() {
+        use crate::host::permissions::RunApproval;
+        use crate::host::settings::{AppSettings, PermissionMode};
+        use crate::names::SETTINGS;
+        use crate::tools::cron::{CronSchedule, FireReason, FireReport, NewCronTask, RunOutcome};
+        use cordis_base::types::{LogEvent, UserMessage};
+
+        let ctx = Context::new();
+        let settings = AppSettings::new("x");
+        settings.set_permission_mode(PermissionMode::Allow);
+        let _s = ctx.provide(SETTINGS, settings).unwrap();
+        let _perm = ctx
+            .provide(PERMISSIONS, Permissions::new(ctx.clone()))
+            .unwrap();
+        let _sessions = ctx.provide(SESSIONS, Sessions::new(ctx.clone())).unwrap();
+        let _cron = ctx.provide(CRON, Cron::new()).unwrap();
+        let cron = ctx.get::<Cron>(CRON).unwrap();
+        let id = cron
+            .create(NewCronTask::new(CronSchedule::Manual, "跑日报"))
+            .unwrap();
+        cron.report(
+            &id,
+            FireReport {
+                reason: FireReason::Manual,
+                outcome: RunOutcome::Sent,
+                session: None,
+                late_by: None,
+                error: None,
+            },
+        );
+        let sessions = ctx.get::<Sessions>(SESSIONS).unwrap();
+        let perms = ctx.get::<Permissions>(PERMISSIONS).unwrap();
+        sessions.arm_run_approval(
+            "跑日报",
+            RunApproval {
+                mode: PermissionMode::Ask,
+                timeout: Some(std::time::Duration::from_millis(150)),
+                task_id: id.clone(),
+            },
+        );
+        assert_eq!(
+            perms.effective_mode(None),
+            PermissionMode::Allow,
+            "还没开始跑"
+        );
+        sessions.append(LogEvent::User(UserMessage::new("跑日报")));
+        assert_eq!(
+            perms.effective_mode(None),
+            PermissionMode::Ask,
+            "这一轮按任务的档位，不按这一页的「始终允许」"
+        );
+
+        let tools = Tools::workspace(ctx.clone());
+        let out = tools
+            .execute(call_as("t1", "bash", r#"{"command":"echo $(echo x)"}"#))
+            .await;
+        assert!(out.is_error);
+        assert!(
+            out.content
+                .starts_with(cordis_base::types::PERMISSION_DENIED_TOOL_RESULT),
+            "{}",
+            out.content
+        );
+        assert!(out.content.contains("没人批准"), "{}", out.content);
+        assert!(perms.front().is_none(), "等超时的请求撤出队列");
+        let note = sessions
+            .events()
+            .iter()
+            .find_map(cordis_base::types::approval_note)
+            .expect("挂一条说明");
+        assert_eq!(
+            (note.call_id.as_str(), note.by),
+            ("t1", ApprovalBy::Timeout)
+        );
+        assert_eq!(cron.get(&id).unwrap().history[0].approval_timeouts, 1);
+
+        sessions.append(LogEvent::User(UserMessage::new("我回来了")));
+        assert_eq!(perms.run_approval(), None);
+        assert_eq!(perms.effective_mode(None), PermissionMode::Allow);
     }
 
     /// 子代理发的权限请求带上它的 agent id（客户端标「来自子代理」），主会话发的不带。

@@ -486,6 +486,17 @@ struct FileConfig {
     /// `[hooks]` — 要不要也读 Claude Code / Codex 的 hooks 配置（默认都不读）。
     #[serde(default)]
     hooks: HooksSection,
+    /// `[approval]` — 智能授权。
+    #[serde(default)]
+    approval: ApprovalSection,
+}
+
+/// `[approval]`：智能授权。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+struct ApprovalSection {
+    /// 判断模型（模型目录里的 id）。不写就用当前会话的模型。
+    model: Option<String>,
 }
 
 /// `[hooks]`：hooks 桥接要读哪些别家的配置。Dock 自己的 `hooks.json` 一直读。
@@ -1213,6 +1224,20 @@ pub fn persist_disabled_mcp_tools_in(
 
 /// Persisted `[browser].headed` preference (default false / headless).
 /// Only files that actually set `browser.headed` contribute; later catalog paths win.
+/// `[approval] model`：智能授权的判断模型。**只认用户配置**（`$DOCK_HOME/config.toml`）：
+/// 项目里的 `.dock/config.toml` 是别人写的，不能替你把判断模型换成一个什么都放行的。
+pub fn load_approval_model() -> Option<String> {
+    load_approval_model_from(&dock_home().join("config.toml"))
+}
+
+pub fn load_approval_model_from(path: &Path) -> Option<String> {
+    read_file(path)?
+        .approval
+        .model
+        .map(|m| m.trim().to_string())
+        .filter(|m| !m.is_empty())
+}
+
 pub fn load_browser_headed() -> bool {
     load_browser_headed_from(&catalog_paths())
 }
@@ -3196,6 +3221,21 @@ default = "grok-4"
         assert!(load_browser_headed_from(std::slice::from_ref(&path)));
         persist_browser_headed_in(std::slice::from_ref(&path), false).unwrap();
         assert!(!load_browser_headed_from(&[path]));
+    }
+
+    /// `[approval] model` 读得出来；空串当没写。
+    #[test]
+    fn approval_model_reads_the_user_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("config.toml");
+        assert_eq!(load_approval_model_from(&user), None);
+        std::fs::write(&user, "[approval]\nmodel = \" deepseek/deepseek-chat \"\n").unwrap();
+        assert_eq!(
+            load_approval_model_from(&user).as_deref(),
+            Some("deepseek/deepseek-chat")
+        );
+        std::fs::write(&user, "[approval]\nmodel = \"\"\n").unwrap();
+        assert_eq!(load_approval_model_from(&user), None);
     }
 
     #[test]

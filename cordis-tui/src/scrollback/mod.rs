@@ -1054,6 +1054,15 @@ fn build_frame_with(
                     tool_views,
                 );
             }
+            // 智能授权替用户做的决定：挂在下面那张工具卡上方的一行，不是卡片。
+            LogEvent::Notice {
+                kind: cordis_spine::NoticeKind::Approval,
+                ..
+            } => {
+                if let Some(note) = cordis_spine::approval_note(event) {
+                    lines.push(notice::approval_line(&note, &theme, width));
+                }
+            }
             LogEvent::Notice { kind, title, body } => {
                 // 只给用户看的卡片：模型历史里没有它，所以它不属于任何一轮工具
                 // 往返，自己按事件下标折叠。

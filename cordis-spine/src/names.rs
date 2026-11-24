@@ -69,6 +69,8 @@ pub const CRON: &str = "cron";
 /// 跨 cwd 的会话名册（`Roster`）。`sessions` 是**本页**的会话日志，两者不同。
 pub const ROSTER: &str = "roster";
 pub const PERMISSIONS: &str = "permissions";
+/// 智能授权的判断模型（[`crate::host::approval::ApprovalJudge`]）。全进程一份，按页记结论。
+pub const APPROVAL_JUDGE: &str = "approvalJudge";
 pub const TURN: &str = "turn";
 
 pub const PRE_STEP: &str = "agent/pre-step";

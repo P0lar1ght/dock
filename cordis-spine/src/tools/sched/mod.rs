@@ -12,9 +12,9 @@ use crate::agent::presets::AgentPresets;
 use crate::names::{AGENT_PRESETS, CRON, PLAN_MODE, SESSIONS, TOOLS};
 use crate::session::log::Sessions;
 use crate::tools::cron::{
-    now_ms, parse_at, Cron, CronError, CronExpiry, CronJob, CronOwner, CronPatch, CronSchedule,
-    CronTarget, NewCronTask, RunOutcome, WatchWhen, DEFAULT_CHECK_EVERY, DEFAULT_FILES_DEBOUNCE,
-    MAX_SCHEDULED_TASKS, RECURRING_TASK_TTL_DAYS,
+    now_ms, parse_at, Cron, CronApproval, CronError, CronExpiry, CronJob, CronOwner, CronPatch,
+    CronSchedule, CronTarget, NewCronTask, RunOutcome, WatchWhen, DEFAULT_CHECK_EVERY,
+    DEFAULT_FILES_DEBOUNCE, MAX_SCHEDULED_TASKS, RECURRING_TASK_TTL_DAYS,
 };
 use crate::tools::plan_mode::PlanMode;
 use crate::tools::registry::{exec_ctx, own_registered, tool_result, ToolBody, Tools};
@@ -34,7 +34,7 @@ pub enum SchedulerError {
     InvalidInterval(String),
 }
 
-const CREATE_PARAMS: &str = r#"{"type":"object","properties":{"interval":{"type":"string","description":"Recurring interval for polling loops, e.g. 5m, 2h, 1d (min 60s). Phase is kept from creation."},"cron":{"type":"string","description":"Recurring calendar schedule: a 5-field cron expression (minute hour day-of-month month day-of-week) in the user's local time, e.g. \"0 9 * * 1-5\" = weekdays at 09:00, \"0 10 * * 1\" = Mondays at 10:00, \"0 9 1 * *\" = the 1st of each month."},"at":{"type":"string","description":"Run once: a delay such as 30m or 2h, or a local date-time such as 2026-11-23 09:00 (RFC 3339 also accepted)."},"watch":{"type":"string","description":"Watch: a shell command run in this session's directory every watch_every; the prompt fires only when its result meets fire_when (checking costs no tokens). E.g. \"gh pr checks 123\", \"curl -s https://example.com/status\"."},"watch_every":{"type":"string","description":"How often to run the watch command, e.g. 2m, 1h (at least 1m, default 5m; shorter is an error)."},"fire_when":{"type":"string","enum":["changed","succeeds","fails","matches"],"description":"When a watch fires: changed = output differs from the last check (default; the first check only sets the baseline); succeeds / fails = exit code becomes 0 / non-zero; matches = output starts matching `match`. Except changed, it fires once when the condition becomes true, not on every check while it stays true; if it already holds at the first check, that first check fires."},"match":{"type":"string","description":"Regex for fire_when: matches."},"files":{"type":"array","items":{"type":"string"},"description":"Fire when files change: paths relative to this session's directory (directories, files, or globs like docs/**/*.md; ~/ for home). Directories are watched recursively, so / and the home directory itself are rejected; paths outside this project need the user's separate approval. Changes inside .git, node_modules, target, and changes made while this task's own run is going are ignored."},"debounce":{"type":"string","description":"For files: wait this long without further changes before firing, e.g. 10s (default), 2m."},"manual":{"type":"boolean","description":"Only run when started by hand (the desktop app's Run now, or `dock schedule run <id>` from a script, git hook, or CI)."},"prompt":{"type":"string","description":"Prompt to run on each fire. Watch output, changed files, or text passed to a manual run are attached to it."},"task_id":{"type":"string","description":"Existing id to update in place. Omitted fields stay unchanged; an interval change keeps the phase."},"fire_immediately":{"type":"boolean","description":"If true, also fire once right away (an extra run, not counted in max_runs). Default false. Ignored when updating."},"new_session":{"type":"boolean","description":"Run each fire in a fresh session in this project (clean context, good for daily reports) instead of as a new turn here. Default false."},"paused":{"type":"boolean","description":"Pause (true) or resume (false). A resumed task skips the slots it missed while paused."},"expires_in":{"type":"string","description":"Stop the task after this long, e.g. 30d, or \"never\". Default: 7d for schedules that fire or check more often than daily, otherwise never."},"max_runs":{"type":"integer","minimum":1,"description":"Stop after this many automatic runs (e.g. 1 for \"tell me once when CI passes\")."},"catch_up":{"type":"boolean","description":"If a run is missed because Dock was closed or the computer was asleep, run once when Dock is back (missed runs are never replayed one by one). Default: true for cron and at, false for interval."}}}"#;
+const CREATE_PARAMS: &str = r#"{"type":"object","properties":{"interval":{"type":"string","description":"Recurring interval for polling loops, e.g. 5m, 2h, 1d (min 60s). Phase is kept from creation."},"cron":{"type":"string","description":"Recurring calendar schedule: a 5-field cron expression (minute hour day-of-month month day-of-week) in the user's local time, e.g. \"0 9 * * 1-5\" = weekdays at 09:00, \"0 10 * * 1\" = Mondays at 10:00, \"0 9 1 * *\" = the 1st of each month."},"at":{"type":"string","description":"Run once: a delay such as 30m or 2h, or a local date-time such as 2026-11-23 09:00 (RFC 3339 also accepted)."},"watch":{"type":"string","description":"Watch: a shell command run in this session's directory every watch_every; the prompt fires only when its result meets fire_when (checking costs no tokens). E.g. \"gh pr checks 123\", \"curl -s https://example.com/status\"."},"watch_every":{"type":"string","description":"How often to run the watch command, e.g. 2m, 1h (at least 1m, default 5m; shorter is an error)."},"fire_when":{"type":"string","enum":["changed","succeeds","fails","matches"],"description":"When a watch fires: changed = output differs from the last check (default; the first check only sets the baseline); succeeds / fails = exit code becomes 0 / non-zero; matches = output starts matching `match`. Except changed, it fires once when the condition becomes true, not on every check while it stays true; if it already holds at the first check, that first check fires."},"match":{"type":"string","description":"Regex for fire_when: matches."},"files":{"type":"array","items":{"type":"string"},"description":"Fire when files change: paths relative to this session's directory (directories, files, or globs like docs/**/*.md; ~/ for home). Directories are watched recursively, so / and the home directory itself are rejected; paths outside this project need the user's separate approval. Changes inside .git, node_modules, target, and changes made while this task's own run is going are ignored."},"debounce":{"type":"string","description":"For files: wait this long without further changes before firing, e.g. 10s (default), 2m."},"manual":{"type":"boolean","description":"Only run when started by hand (the desktop app's Run now, or `dock schedule run <id>` from a script, git hook, or CI)."},"prompt":{"type":"string","description":"Prompt to run on each fire. Watch output, changed files, or text passed to a manual run are attached to it."},"task_id":{"type":"string","description":"Existing id to update in place. Omitted fields stay unchanged; an interval change keeps the phase."},"fire_immediately":{"type":"boolean","description":"If true, also fire once right away (an extra run, not counted in max_runs). Default false. Ignored when updating."},"new_session":{"type":"boolean","description":"Run each fire in a fresh session in this project (clean context, good for daily reports) instead of as a new turn here. Default false."},"paused":{"type":"boolean","description":"Pause (true) or resume (false). A resumed task skips the slots it missed while paused."},"expires_in":{"type":"string","description":"Stop the task after this long, e.g. 30d, or \"never\". Default: 7d for schedules that fire or check more often than daily, otherwise never."},"max_runs":{"type":"integer","minimum":1,"description":"Stop after this many automatic runs (e.g. 1 for \"tell me once when CI passes\")."},"catch_up":{"type":"boolean","description":"If a run is missed because Dock was closed or the computer was asleep, run once when Dock is back (missed runs are never replayed one by one). Default: true for cron and at, false for interval."},"approval":{"type":"string","enum":["smart","ask"],"description":"How tool calls that need permission are approved during this task's runs, which usually happen with nobody at the computer. smart (default) = read-only commands and edits inside the project run, high-risk actions ask the user, others are judged by a model; ask = always ask the user. Either way a request nobody answers within 15 minutes is refused and the run continues. Only the user can set always-allow, in the desktop app."}}}"#;
 const LIST_PARAMS: &str = r#"{"type":"object","properties":{}}"#;
 const DELETE_PARAMS: &str = r#"{"type":"object","properties":{"id":{"type":"string","description":"Task id from scheduler_create."}},"required":["id"]}"#;
 
@@ -272,6 +272,31 @@ fn max_runs_arg(v: &Value) -> Result<Option<u32>, String> {
     }
 }
 
+/// `approval`：模型只能选 `smart` / `ask`；「始终允许」只有用户自己能设（桌面端）。
+fn approval_arg(v: &Value) -> Result<Option<CronApproval>, String> {
+    match text_arg(v, "approval") {
+        None => Ok(None),
+        Some("smart") => Ok(Some(CronApproval::Smart)),
+        Some("ask") => Ok(Some(CronApproval::Ask)),
+        Some("allow" | "auto" | "always") => Err(
+            "Error: approval: always-allow can only be set by the user in the desktop app; use \"smart\" or \"ask\""
+                .into(),
+        ),
+        Some(other) => Err(format!(
+            "Error: approval must be smart or ask (got {other})"
+        )),
+    }
+}
+
+/// 放宽到哪一档算放宽：询问 < 智能授权 < 始终允许。
+fn approval_rank(a: CronApproval) -> u8 {
+    match a {
+        CronApproval::Ask => 0,
+        CronApproval::Smart => 1,
+        CronApproval::Allow => 2,
+    }
+}
+
 /// 调用方那一页现在用的预设（「每次新开会话」时照它开）。
 fn caller_preset(ctx: &Context) -> Option<String> {
     let exec = exec_ctx().unwrap_or_else(|| ctx.clone());
@@ -294,9 +319,15 @@ fn create_job(ctx: &Context, call: ToolCall) -> ToolResult {
             CronTarget::Session
         }
     });
-    let parsed = schedule_arg(&v, now)
-        .and_then(|schedule| Ok((schedule, expiry_arg(&v, now)?, max_runs_arg(&v)?)));
-    let (schedule, expiry, max_runs) = match parsed {
+    let parsed = schedule_arg(&v, now).and_then(|schedule| {
+        Ok((
+            schedule,
+            expiry_arg(&v, now)?,
+            max_runs_arg(&v)?,
+            approval_arg(&v)?,
+        ))
+    });
+    let (schedule, expiry, max_runs, approval) = match parsed {
         Ok(parsed) => parsed,
         Err(e) => return tool_result(call, e),
     };
@@ -309,6 +340,22 @@ fn create_job(ctx: &Context, call: ToolCall) -> ToolResult {
         .flatten();
 
     if let Some(id) = task_id {
+        // 模型只能收紧，不能放宽：用户设成「询问」的，它改不回「智能授权」。
+        if let (Some(want), Some(job)) = (approval, cron.get(id)) {
+            if approval_rank(want) > approval_rank(job.approval) {
+                return tool_result(
+                    call,
+                    format!(
+                        "Error: approval of {id} is {} (set by the user); the model can only make it stricter",
+                        match job.approval {
+                            CronApproval::Ask => "ask",
+                            CronApproval::Smart => "smart",
+                            CronApproval::Allow => "allow",
+                        }
+                    ),
+                );
+            }
+        }
         let patch = CronPatch {
             schedule,
             prompt: prompt.map(str::to_string),
@@ -318,6 +365,8 @@ fn create_job(ctx: &Context, call: ToolCall) -> ToolResult {
             target,
             preset: preset.map(Some),
             paused: flag("paused"),
+            approval,
+            approval_timeout_secs: None,
         };
         if patch.is_empty() {
             return tool_result(
@@ -364,6 +413,7 @@ fn create_job(ctx: &Context, call: ToolCall) -> ToolResult {
         target: target.unwrap_or_default(),
         preset,
         paused: flag("paused").unwrap_or(false),
+        approval: approval.unwrap_or_default(),
         ..NewCronTask::new(schedule, prompt)
     });
     match created.map(|id| cron.get(&id).ok_or(id)) {
@@ -430,6 +480,7 @@ fn timing_lines(job: &CronJob, now: u64) -> String {
     if job.target == CronTarget::NewSession {
         lines.push("每次在这个项目里新开一个会话".into());
     }
+    lines.push(approval_line(job));
     if matches!(
         job.schedule,
         CronSchedule::Every(_) | CronSchedule::Cron(_) | CronSchedule::At(_)
@@ -441,6 +492,18 @@ fn timing_lines(job: &CronJob, now: u64) -> String {
         });
     }
     lines.join("\n")
+}
+
+/// 「每次运行：智能授权，权限请求等 15 分钟没人批就跳过」。
+fn approval_line(job: &CronJob) -> String {
+    let wait = match job.approval_timeout {
+        Some(limit) => format!(
+            "权限请求等 {} 分钟没人批就跳过这一步",
+            limit.as_secs().div_ceil(60).max(1)
+        ),
+        None => "权限请求一直等人批".into(),
+    };
+    format!("每次运行：{}，{wait}", job.approval.label())
 }
 
 fn list_jobs(ctx: &Context, call: ToolCall) -> ToolResult {
@@ -772,6 +835,47 @@ mod tests {
             "{}",
             widened.content
         );
+    }
+
+    /// 每一轮怎么批：默认智能授权；模型能选询问，选不了始终允许；改的时候只能收紧，
+    /// 用户设成询问的它改不回智能授权。
+    #[test]
+    fn the_model_can_only_tighten_a_tasks_approval() {
+        let ctx = ctx_with_cron();
+        let cron = ctx.get::<Cron>(CRON).unwrap();
+        let made = create_job(&ctx, call(r#"{"manual":true,"prompt":"出周报"}"#));
+        assert!(
+            made.content
+                .contains("每次运行：智能授权，权限请求等 15 分钟没人批就跳过这一步"),
+            "{}",
+            made.content
+        );
+        let id = cron.list()[0].id.clone();
+        assert_eq!(cron.get(&id).unwrap().approval, CronApproval::Smart);
+
+        let allow = create_job(
+            &ctx,
+            call(r#"{"manual":true,"prompt":"x","approval":"allow"}"#),
+        );
+        assert!(allow.content.starts_with("Error"), "{}", allow.content);
+        assert_eq!(cron.list().len(), 1);
+
+        let tighter = create_job(
+            &ctx,
+            call(&format!(r#"{{"task_id":"{id}","approval":"ask"}}"#)),
+        );
+        assert!(!tighter.content.starts_with("Error"), "{}", tighter.content);
+        assert_eq!(cron.get(&id).unwrap().approval, CronApproval::Ask);
+        let looser = create_job(
+            &ctx,
+            call(&format!(r#"{{"task_id":"{id}","approval":"smart"}}"#)),
+        );
+        assert!(
+            looser.content.contains("only make it stricter"),
+            "{}",
+            looser.content
+        );
+        assert_eq!(cron.get(&id).unwrap().approval, CronApproval::Ask);
     }
 
     #[test]

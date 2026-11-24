@@ -120,6 +120,46 @@ impl CronTarget {
     }
 }
 
+/// 定时任务那几轮（无人值守）要过权限门的调用怎么批。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CronApproval {
+    /// 每次都问人（等不到就按超时处理）。
+    Ask,
+    /// 智能授权：只读命令、项目里的编辑直接放行，高风险的问人，其余交给判断模型。
+    #[default]
+    Smart,
+    /// 都不问。只有用户自己能设（模型的 `scheduler_create` 设不了）。
+    Allow,
+}
+
+impl CronApproval {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// 给人看的名字。
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Ask => "询问",
+            Self::Smart => "智能授权",
+            Self::Allow => "始终允许",
+        }
+    }
+}
+
+/// 定时任务那一轮的权限请求，默认等这么久没人点就按拒绝处理、让模型接着做。
+pub const DEFAULT_APPROVAL_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+
+/// `approval_timeout_secs` 落盘的写法 → 实际等多久：没写 = 默认 15 分钟，0 = 一直等。
+fn approval_timeout_of(secs: Option<u64>) -> Option<Duration> {
+    match secs {
+        None => Some(DEFAULT_APPROVAL_TIMEOUT),
+        Some(0) => None,
+        Some(secs) => Some(Duration::from_secs(secs)),
+    }
+}
+
 /// 这一次为什么跑。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -172,6 +212,9 @@ pub struct CronRun {
     pub late_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// 这一轮里有几次权限请求等超时了（没人批准，按拒绝处理）。
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub approval_timeouts: u32,
 }
 
 /// 条件命令上一次检查的结果。
@@ -222,6 +265,10 @@ pub struct NewCronTask {
     pub preset: Option<String>,
     /// 建好先暂停着。
     pub paused: bool,
+    /// 每一轮要过权限门的调用怎么批（默认智能授权）。
+    pub approval: CronApproval,
+    /// 权限请求等多久没人点就按拒绝处理：`None` = 默认 15 分钟，`Some(0)` = 一直等。
+    pub approval_timeout_secs: Option<u64>,
 }
 
 impl NewCronTask {
@@ -237,6 +284,8 @@ impl NewCronTask {
             target: CronTarget::Session,
             preset: None,
             paused: false,
+            approval: CronApproval::default(),
+            approval_timeout_secs: None,
         }
     }
 }
@@ -256,6 +305,9 @@ pub struct CronPatch {
     pub preset: Option<Option<String>>,
     /// 暂停 / 继续。继续时跳过暂停期间的时刻（一次性的按错过处理）。
     pub paused: Option<bool>,
+    pub approval: Option<CronApproval>,
+    /// `Some(None)` = 回到默认（15 分钟），`Some(Some(0))` = 一直等。
+    pub approval_timeout_secs: Option<Option<u64>>,
 }
 
 impl CronPatch {
@@ -268,6 +320,8 @@ impl CronPatch {
             && self.target.is_none()
             && self.preset.is_none()
             && self.paused.is_none()
+            && self.approval.is_none()
+            && self.approval_timeout_secs.is_none()
     }
 }
 
@@ -296,6 +350,10 @@ pub struct CronJob {
     pub target: CronTarget,
     pub preset: Option<String>,
     pub paused: bool,
+    /// 每一轮要过权限门的调用怎么批。
+    pub approval: CronApproval,
+    /// 权限请求等这么久没人点就按拒绝处理；`None` = 一直等。
+    pub approval_timeout: Option<Duration>,
     /// 跑完了（一次性的跑过了、跑满了次数），不会再自己触发。
     pub done: bool,
     /// 有一次等着下一轮触发（手动运行 / 条件满足 / 文件改了）。
@@ -523,6 +581,11 @@ struct Task {
     preset: Option<String>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     paused: bool,
+    #[serde(skip_serializing_if = "CronApproval::is_default")]
+    approval: CronApproval,
+    /// 没写 = 默认 15 分钟，0 = 一直等。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    approval_timeout_secs: Option<u64>,
     /// 跑完了。下一轮 `due()` 收掉；最后一次没送到（有 `last_error`）的留着给人看。
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     done: bool,
@@ -577,6 +640,10 @@ struct TaskOnDisk {
     #[serde(default)]
     paused: bool,
     #[serde(default)]
+    approval: CronApproval,
+    #[serde(default)]
+    approval_timeout_secs: Option<u64>,
+    #[serde(default)]
     done: bool,
     #[serde(default)]
     pending: Option<PendingFire>,
@@ -616,6 +683,8 @@ impl TryFrom<TaskOnDisk> for Task {
             target: d.target,
             preset: d.preset,
             paused: d.paused,
+            approval: d.approval,
+            approval_timeout_secs: d.approval_timeout_secs,
             done: d.done,
             pending: d.pending,
             history: d.history,
@@ -851,6 +920,8 @@ impl Cron {
             target,
             preset,
             paused,
+            approval,
+            approval_timeout_secs,
         } = new;
         if prompt.trim().is_empty() {
             return Err(CronError::EmptyPrompt);
@@ -891,6 +962,8 @@ impl Cron {
                 target,
                 preset,
                 paused,
+                approval,
+                approval_timeout_secs,
                 done: false,
                 pending: fire_immediately.then_some(PendingFire {
                     reason: FireReason::Immediate,
@@ -982,6 +1055,12 @@ impl Cron {
             }
             if let Some(preset) = &patch.preset {
                 task.preset = preset.clone();
+            }
+            if let Some(approval) = patch.approval {
+                task.approval = approval;
+            }
+            if let Some(secs) = patch.approval_timeout_secs {
+                task.approval_timeout_secs = secs;
             }
             if let Some(paused) = patch.paused {
                 if task.paused && !paused {
@@ -1101,9 +1180,30 @@ impl Cron {
                     session: report.session.clone(),
                     late_ms: report.late_by.map(ms),
                     error: report.error.clone(),
+                    approval_timeouts: 0,
                 });
                 let extra = task.history.len().saturating_sub(HISTORY_LEN);
                 task.history.drain(..extra);
+            }
+        });
+    }
+
+    /// 这个任务的一轮里有个权限请求等超时了：记到那一轮的运行记录上（`session` 对得上的
+    /// 最近一条，对不上就最近一条）。
+    pub fn note_approval_timeout(&self, id: &str, session: Option<&str>) {
+        let _ = self.transact(|tasks| {
+            let Some(task) = tasks.iter_mut().find(|t| t.id == id) else {
+                return;
+            };
+            let at = session
+                .and_then(|session| {
+                    task.history
+                        .iter()
+                        .rposition(|r| r.session.as_deref() == Some(session))
+                })
+                .or_else(|| task.history.len().checked_sub(1));
+            if let Some(run) = at.and_then(|i| task.history.get_mut(i)) {
+                run.approval_timeouts = run.approval_timeouts.saturating_add(1);
             }
         });
     }
@@ -1292,6 +1392,8 @@ impl Cron {
             target: task.target,
             preset: task.preset.clone(),
             paused: task.paused,
+            approval: task.approval,
+            approval_timeout: approval_timeout_of(task.approval_timeout_secs),
             done: task.done,
             pending: task.pending.is_some(),
             history: task.history.clone(),

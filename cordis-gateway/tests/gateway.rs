@@ -606,6 +606,7 @@ async fn handshake_initialize_is_dock1() {
     assert_eq!(init["result"]["capabilities"]["imageInputs"], true);
     assert_eq!(init["result"]["capabilities"]["slash"], true);
     assert_eq!(init["result"]["capabilities"]["browserHardReload"], true);
+    assert_eq!(init["result"]["capabilities"]["smartApproval"], true);
     assert_eq!(
         init["result"]["connection"]["companion"]["status"],
         "listening"
@@ -616,6 +617,38 @@ async fn handshake_initialize_is_dock1() {
     assert!(companion.starts_with("[::1]:"), "{companion}");
     let workspaces = rpc.call("workspace/list", json!({})).await;
     assert_eq!(workspaces["result"]["defaultWorkspaceId"], "default");
+}
+
+/// 审批档位多了「智能授权」（`smart`）：设得上、读得回；不认识的档位报错。
+#[tokio::test]
+async fn approval_has_a_smart_step() {
+    let h = Harness::boot().await;
+    let ticket = h.pair_ticket().await;
+    let mut rpc = Rpc::connect(h.addr, &ticket).await;
+    let _ = rpc.call("initialize", json!({})).await;
+    let set = rpc
+        .call(
+            "thread/approval/set",
+            json!({ "threadId": "live", "mode": "smart" }),
+        )
+        .await;
+    assert_eq!(set["result"]["approval"]["mode"], "smart", "{set}");
+    let env = rpc
+        .call("thread/environment/get", json!({ "threadId": "live" }))
+        .await;
+    assert_eq!(env["result"]["approval"]["mode"], "smart", "{env}");
+    assert_eq!(
+        env["result"]["approval"]["options"],
+        json!(["ask", "smart", "auto"]),
+        "{env}"
+    );
+    let bad = rpc
+        .call(
+            "thread/approval/set",
+            json!({ "threadId": "live", "mode": "sometimes" }),
+        )
+        .await;
+    assert!(bad["error"].is_object(), "{bad}");
 }
 
 /// 等着送达的插话列在 `turn/queue/list` 里（`kind: "steer"`，排在排队的前面），
@@ -7082,7 +7115,50 @@ async fn schedules_take_watch_files_manual_and_run_now() {
         "{missing}"
     );
 
+    // 每一轮的授权：默认智能授权、等 15 分钟；可以改成询问、一直等。
+    assert_eq!(task["approval"], "smart", "{manual}");
+    assert_eq!(task["approvalTimeoutSecs"], 900, "{manual}");
+    let stricter = rpc
+        .call(
+            "schedule/update",
+            json!({ "id": manual_id, "approval": "ask", "approvalTimeoutSecs": 0 }),
+        )
+        .await;
+    assert_eq!(stricter["result"]["task"]["approval"], "ask", "{stricter}");
+    assert_eq!(
+        stricter["result"]["task"]["approvalTimeoutSecs"], 0,
+        "{stricter}"
+    );
+    let reset = rpc
+        .call(
+            "schedule/update",
+            json!({ "id": manual_id, "approvalTimeoutSecs": null }),
+        )
+        .await;
+    assert_eq!(
+        reset["result"]["task"]["approvalTimeoutSecs"], 900,
+        "{reset}"
+    );
+    // 设成始终允许只认受信连接（桌面 GUI / 设备令牌）：配对来的网页回 forbidden。
     for params in [
+        json!({ "id": manual_id, "approval": "auto" }),
+        json!({ "threadId": id, "prompt": "x", "manual": true, "approval": "auto" }),
+    ] {
+        let method = if params.get("id").is_some() {
+            "schedule/update"
+        } else {
+            "schedule/create"
+        };
+        let refused = rpc.call(method, params).await;
+        assert_eq!(
+            refused["error"]["details"]["code"], "forbidden",
+            "{refused}"
+        );
+    }
+
+    for params in [
+        json!({ "threadId": id, "prompt": "x", "manual": true, "approval": "sometimes" }),
+        json!({ "threadId": id, "prompt": "x", "manual": true, "approvalTimeoutSecs": "soon" }),
         json!({ "threadId": id, "prompt": "x", "watch": { "everySecs": 120 } }),
         json!({ "threadId": id, "prompt": "x", "watch": { "command": "ls", "when": "matches" } }),
         json!({ "threadId": id, "prompt": "x", "files": { "paths": [] } }),

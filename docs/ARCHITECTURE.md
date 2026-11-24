@@ -22,7 +22,7 @@ cordis-spine/            Agent 循环、工具粒、MCP、会话、预设、权�
   src/llm/               sampler、http/（三条 wire）、compact/
   src/prompt/            assemble、context_book、listing、project_instructions、context_usage
   src/tools/             registry（那张唯一的 "tools" 表）+ 全部工具插件
-  src/host/              宿主 live-look 的表：settings、permissions、slash、tui_slots、user_edits；
+  src/host/              宿主 live-look 的表：settings、permissions（+ approval：智能授权的规则与判断模型）、slash、tui_slots、user_edits；
                          宿主之间的契约：session_port、tabs（分页）、gateway_port（配对）
   presets/               内置 Agent 预设 YAML（code / minimal / cordis / warden）
   tests/                 round.rs（install_app_registers）、dynamic.rs、subagents.rs
@@ -67,7 +67,7 @@ config.toml.example      用户 / 项目模型目录样例
 |---|---|---|
 | Spine 五件套 | `sessions` `llm` `tools` `systemPrompt` `agents` | 同名 |
 | 循环 | `agent-loop` 提供 `LoopHandle` | `agentLoop` |
-| 其它 spine | `context` `settings` `turn` `permissions` `cron` `roster` `jobs` `todos` `planMode` `ask` `mcp` `goal` `lsp` `skills` `subagents` `memory` `browser` `computer` `workflows` `slash` `status.items` `tool.views` `plugin.settings` `user.edits` `agentPresets` `dynamicCordisRunner` `turnCards` `compact` `auth` | 同名 |
+| 其它 spine | `context` `settings` `turn` `permissions` `approvalJudge` `cron` `roster` `jobs` `todos` `planMode` `ask` `mcp` `goal` `lsp` `skills` `subagents` `memory` `browser` `computer` `workflows` `slash` `status.items` `tool.views` `plugin.settings` `user.edits` `agentPresets` `dynamicCordisRunner` `turnCards` `compact` `auth` | 同名 |
 | 斜杠命令 | `command-session` `command-settings` `command-hooks` `command-goal` `command-plan` `command-loop` `command-workflow` `command-compact`（宿主无关，带 handler）；TUI 的 `tui.commands`（终端专属） | 向 `"slash"` `register_command`；命令体收调用页的 ctx，回 `SlashOutcome`，TUI / 网关各自呈现 |
 | 工具插件 | `tool-web` `tool-todo` `plan-mode` `tool-ask-user` `tool-jobs` `tool-scheduler` `tool-task` `tool-memory` `tool-monitor` `tool-goal` `tool-lsp` `tool-skills` `tool-workflow` `mcp-client` `tool-cordis` | 向 `"tools"` `register` |
 | 流程钩子插件 | `hooks-bridge`（跑 Dock / Claude Code / Codex 格式的 command hook，见 `docs/HOOKS.md`） | 挂 `tools/pre-execute` `tools/execute` `agent/pre-step` `agent/step-start` `agent/turn-end` |

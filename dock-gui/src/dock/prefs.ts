@@ -3,7 +3,7 @@
 
 import { useSyncExternalStore } from "react";
 
-export type Approval = "ask" | "auto";
+export type Approval = "ask" | "smart" | "auto";
 export type FontSize = "sm" | "md" | "lg";
 export type ChatFont = keyof typeof CHAT_FONTS;
 export type CodeFont = keyof typeof CODE_FONTS;

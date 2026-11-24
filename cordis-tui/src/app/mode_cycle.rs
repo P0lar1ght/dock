@@ -1,5 +1,6 @@
 //! Shift+Tab session cycle copied from Grok `dispatch_cycle_mode_inner`
-//! with Auto gated off: Normal → Plan → Always-Approve → Normal.
+//! with Auto gated off, plus Dock's 智能授权:
+//! 询问 → 智能授权 → 计划 → 始终允许 → 询问。
 
 use cordis_spine::PermissionMode;
 
@@ -9,11 +10,15 @@ pub fn cycle_session_mode(
     perm: PermissionMode,
 ) -> (bool, PermissionMode, &'static str) {
     match (in_plan, perm) {
-        // Normal → Plan. Permission stays Ask.
-        (false, PermissionMode::Ask) => (true, PermissionMode::Ask, "计划模式"),
-        // Plan → Always-Approve (auto gated off).
-        (true, PermissionMode::Ask) => (false, PermissionMode::Allow, "模式：始终允许"),
-        // Always-Approve → Normal. Also collapses plan+allow.
+        // 询问 → 智能授权。
+        (false, PermissionMode::Ask) => (false, PermissionMode::Smart, "模式：智能授权"),
+        // 智能授权 → 计划。计划里权限回到询问。
+        (false, PermissionMode::Smart) => (true, PermissionMode::Ask, "计划模式"),
+        // 计划 → 始终允许（auto gated off）。
+        (true, PermissionMode::Ask | PermissionMode::Smart) => {
+            (false, PermissionMode::Allow, "模式：始终允许")
+        }
+        // 始终允许 → 询问。Also collapses plan+allow.
         (_, PermissionMode::Allow) => (false, PermissionMode::Ask, "模式：询问"),
     }
 }
@@ -23,32 +28,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn grok_ring_without_auto() {
-        let mut plan = false;
-        let mut perm = PermissionMode::Ask;
-        let (p, m, flash) = cycle_session_mode(plan, perm);
-        assert!(p);
-        assert_eq!(m, PermissionMode::Ask);
-        assert_eq!(flash, "计划模式");
-        plan = p;
-        perm = m;
-
-        let (p, m, flash) = cycle_session_mode(plan, perm);
-        assert!(!p);
-        assert_eq!(m, PermissionMode::Allow);
-        assert_eq!(flash, "模式：始终允许");
-        plan = p;
-        perm = m;
-
-        let (p, m, flash) = cycle_session_mode(plan, perm);
-        assert!(!p);
-        assert_eq!(m, PermissionMode::Ask);
-        assert_eq!(flash, "模式：询问");
-        plan = p;
-        perm = m;
-
-        let (p, m, _) = cycle_session_mode(plan, perm);
-        assert!(p);
-        assert_eq!(m, PermissionMode::Ask);
+    fn the_ring_goes_ask_smart_plan_allow() {
+        let mut state = (false, PermissionMode::Ask);
+        for (plan, perm, flash) in [
+            (false, PermissionMode::Smart, "模式：智能授权"),
+            (true, PermissionMode::Ask, "计划模式"),
+            (false, PermissionMode::Allow, "模式：始终允许"),
+            (false, PermissionMode::Ask, "模式：询问"),
+            (false, PermissionMode::Smart, "模式：智能授权"),
+        ] {
+            let (p, m, f) = cycle_session_mode(state.0, state.1);
+            assert_eq!((p, m, f), (plan, perm, flash));
+            state = (p, m);
+        }
     }
 }

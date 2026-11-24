@@ -5,10 +5,28 @@ use cordis::{plugin, Inject, Plugin};
 use crate::names::SETTINGS;
 use cordis_base::config::{self, ApiBackend, ModelChoice};
 
+/// 权限档位：要过权限门的工具调用怎么批。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PermissionMode {
+    /// 每次都问人（「始终允许」过的除外）。
     Ask,
+    /// 智能授权：只读命令、项目里的编辑直接放行；硬清单上的（sudo、rm -rf、碰密钥、
+    /// 往外传文件、桌面操作……）一定问人；其余交给判断模型，它说安全才放行，拿不准就问人。
+    /// 见 `host::approval`。
+    Smart,
+    /// 都不问。
     Allow,
+}
+
+impl PermissionMode {
+    /// 给人看的名字。
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Ask => "询问",
+            Self::Smart => "智能授权",
+            Self::Allow => "始终允许",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -208,11 +226,12 @@ impl AppSettings {
         *self.permission_mode.lock().unwrap() = mode;
     }
 
-    /// Settings modal Ask ↔ Always-allow. Shift+Tab session cycle lives in
-    /// the TUI (`mode_cycle`): Normal → Plan → Always-Approve → Normal.
+    /// 设置面板里循环：询问 → 智能授权 → 始终允许 → 询问。Shift+Tab 那一圈
+    /// （还夹着计划模式）在 TUI 的 `mode_cycle`。
     pub fn cycle_permission_mode(&self) -> PermissionMode {
         let next = match self.permission_mode() {
-            PermissionMode::Ask => PermissionMode::Allow,
+            PermissionMode::Ask => PermissionMode::Smart,
+            PermissionMode::Smart => PermissionMode::Allow,
             PermissionMode::Allow => PermissionMode::Ask,
         };
         self.set_permission_mode(next);
@@ -414,9 +433,10 @@ api_backends = ["responses", "chat_completions"]
     }
 
     #[test]
-    fn settings_modal_cycles_ask_and_allow() {
+    fn settings_modal_cycles_ask_smart_and_allow() {
         let settings = AppSettings::new("x");
         assert_eq!(settings.permission_mode(), PermissionMode::Ask);
+        assert_eq!(settings.cycle_permission_mode(), PermissionMode::Smart);
         assert_eq!(settings.cycle_permission_mode(), PermissionMode::Allow);
         assert_eq!(settings.cycle_permission_mode(), PermissionMode::Ask);
     }

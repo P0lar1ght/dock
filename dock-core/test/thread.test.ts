@@ -185,6 +185,25 @@ test('权限门拒绝的工具是 denied，和普通失败分开', () => {
   assert.equal(tool.kind === 'tool' && tool.status, 'denied');
 });
 
+test('智能授权替用户做的决定挂到那次工具调用上', () => {
+  seq = 0;
+  const s = run(
+    note('turn/started'),
+    note('item/tool_started', { toolCallId: 'a', toolName: 'bash', arguments: { command: 'npm test' } }),
+    note('item/tool_approval', { toolCallId: 'a', by: 'judge', reason: '跑项目的测试' }),
+    note('item/tool_completed', { toolCallId: 'a', toolName: 'bash', output: 'ok', status: 'completed' }),
+    note('item/tool_started', { toolCallId: 'b', toolName: 'bash', arguments: { command: 'git push' } }),
+    note('item/tool_approval', { toolCallId: 'b', by: 'timeout', reason: '等了 15 分钟没人批准，这次没执行' }),
+    note('item/tool_completed', { toolCallId: 'b', toolName: 'bash', output: '权限被拒绝：没人批准', status: 'denied' }),
+    note('item/tool_started', { toolCallId: 'c', toolName: 'bash', arguments: { command: 'ls' } }),
+  );
+  const [a, b, c] = s.turns[0].items;
+  assert.deepEqual(a.kind === 'tool' && a.approval, { by: 'judge', reason: '跑项目的测试' });
+  assert.equal(a.kind === 'tool' && a.status, 'completed', '跑完不丢说明');
+  assert.deepEqual(b.kind === 'tool' && b.approval, { by: 'timeout', reason: '等了 15 分钟没人批准，这次没执行' });
+  assert.equal(c.kind === 'tool' && c.approval, undefined);
+});
+
 test('没见过 turn/started 的事件（订阅晚了）补一轮，不丢', () => {
   seq = 0;
   const s = run(note('item/message_delta', { delta: '中途加入' }, 't9'));

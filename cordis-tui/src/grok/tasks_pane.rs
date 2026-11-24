@@ -865,6 +865,8 @@ mod tests {
             target: cordis_spine::CronTarget::Session,
             preset: None,
             paused: false,
+            approval: cordis_spine::CronApproval::Smart,
+            approval_timeout: None,
             done: false,
             pending: false,
             history: Vec::new(),

@@ -4,9 +4,9 @@
 
 import { useEffect, useState, type ReactNode } from "react";
 import { formatElapsed } from "./chrome";
-import { AlertCircle, ChevronRight, CircleSlash, LoaderCircle, ShieldX, type LucideIcon } from "lucide-react";
+import { AlertCircle, ChevronRight, CircleSlash, LoaderCircle, ShieldCheck, ShieldX, type LucideIcon } from "lucide-react";
 import { toolCardFeatures } from "../features/registry";
-import type { ToolImage, ToolStatus } from "dock-core";
+import type { ToolApprovalBy, ToolImage, ToolStatus } from "dock-core";
 import { ToolImages } from "./tools/parts";
 import { exitCode, specFor } from "./tools/specs";
 
@@ -24,6 +24,8 @@ export interface ToolCardProps {
   itemId?: string;
   /** 工具结果里的图（只有元数据，像素展开时按 `item/image` 取）。 */
   images?: ToolImage[];
+  /** 智能授权替用户做的决定：判断模型放行（理由悬停看）/ 无人值守时等审批超时。 */
+  approval?: { by: ToolApprovalBy; reason: string };
 }
 
 /**
@@ -34,7 +36,7 @@ export interface ToolCardProps {
  * - 已中断：黄色「已中断」角标，展开的输出放灰框。
  * - 已拒绝（muid）：红色「已拒绝」角标，展开的输出放红框（Dock 报 denied）。
  */
-export function ToolCard({ tool, args, output = "", status, startedAt, endedAt, initialOpen = false, threadId, itemId, images = [] }: ToolCardProps) {
+export function ToolCard({ tool, args, output = "", status, startedAt, endedAt, initialOpen = false, threadId, itemId, images = [], approval }: ToolCardProps) {
   // 功能登记的头部图标（插件工具 → Puzzle）。登记顺序固定，按顺序调 hook。
   const featureIcon = toolCardFeatures().reduce<LucideIcon | null>((found, f) => f.useIcon?.(tool, args) ?? found, null);
   const [open, setOpen] = useState(initialOpen);
@@ -45,6 +47,9 @@ export function ToolCard({ tool, args, output = "", status, startedAt, endedAt, 
   const failed = status === "failed";
   const interrupted = status === "cancelled";
   const denied = status === "denied";
+  // 无人值守的一轮里等审批超时：也是被拒绝，但不是你拒的。
+  const unattended = denied && approval?.by === "timeout";
+  const judged = approval?.by === "judge";
   const running = status === "running";
   const Icon = failed ? AlertCircle : (featureIcon ?? spec.icon);
   const shots = threadId && itemId && images.length > 0 ? images : [];
@@ -100,10 +105,22 @@ export function ToolCard({ tool, args, output = "", status, startedAt, endedAt, 
               执行失败{startedAt !== undefined && endedAt && endedAt - startedAt >= 100 ? ` · ${formatSeconds(endedAt - startedAt)}` : ""}
             </span>
           )}
+          {judged && (
+            <span
+              title={`智能授权放行：${approval.reason}`}
+              className="enter-fade flex items-center gap-1 rounded-sm border border-line-strong bg-fill px-1.5 py-px text-[11px] font-medium text-ink-3"
+            >
+              <ShieldCheck size={11} />
+              智能授权
+            </span>
+          )}
           {denied && (
-            <span className="enter-fade flex items-center gap-1 rounded-sm border border-[#fecaca] bg-[#fef2f2] px-1.5 py-px text-[11px] font-medium text-[#c0392b]">
+            <span
+              title={unattended ? approval.reason : undefined}
+              className="enter-fade flex items-center gap-1 rounded-sm border border-[#fecaca] bg-[#fef2f2] px-1.5 py-px text-[11px] font-medium text-[#c0392b]"
+            >
               <ShieldX size={11} />
-              已拒绝
+              {unattended ? "没人批准" : "已拒绝"}
             </span>
           )}
           {interrupted && (
@@ -120,7 +137,9 @@ export function ToolCard({ tool, args, output = "", status, startedAt, endedAt, 
           <div className="pb-1.5 pl-[26px] pt-1">
             {hasBody && (open || seen) &&
               (denied ? (
-                <div className="rounded-lg border border-[#fecaca] bg-[#fef6f6] px-3 py-2 text-[12px] text-[#c0392b]">用户拒绝了这次调用</div>
+                <div className="rounded-lg border border-[#fecaca] bg-[#fef6f6] px-3 py-2 text-[12px] text-[#c0392b]">
+                  {unattended ? `定时任务这一轮没人在：${approval.reason}` : "用户拒绝了这次调用"}
+                </div>
               ) : (failed || interrupted) && tool !== "bash" ? (
                 // 失败 / 中断：原样给出 Dock 回的说明（错误原文最要紧），bash 照常按终端画。
                 <div

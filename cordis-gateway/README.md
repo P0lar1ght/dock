@@ -276,7 +276,7 @@ MCP 服务器向用户要信息（表单 / URL）。网关把提问投影成 `el
 - 终端自己开页（`Ctrl+N`、分叉、`/btw`）仍是 9 页：`Alt+1..9` 直达、标签栏一行放得下。
 - 每页常驻内存（实测调试版约 26MB）：客户端可以自己关掉闲着的页（桌面端的做法见 dock-gui）。
 
-投影每页一份（`handle.rs` 的 `transcripts`，共用一条 broadcast，事件带页身份）；订阅是「页 → 客户端订阅时用的 `threadId`」，推送时用那个 id。会话事件按 `session/page-event` 路由，`turn/completed` 只在那一页记下 `LogEvent::TurnEnd` 时发（一轮一次，流式中途不发；和其它会话事件一样按 `session/page-event` 路由），`status` 是 `completed` / `cancelled` / `failed`，失败带 `error`（错误文本，以前只回给 TUI）；`item/tool_completed` 的 `status` 照 Dock 落下的 `is_error` 报：`completed` / `failed`，停止时的中断结果（以「已中断。」开头，可能带运行时长和已产出的输出）为 `cancelled`，权限门拒绝的为 `denied`；权限 / 提问 / 计划 / elicitation 的事件载荷是 `()`，挨页按队首序号（`front_seq`）对账——同一条不重报，换了一条先报旧的 resolved。elicitation 的 `elicit/requested` 另带 `server` / `message` / `heading`；URL 模式再带 `url`（完整地址）、`urlDomain`（域名，给客户端高亮）、`urlWarning`（可疑地址的警告：Punycode / 明文 http）——这三个字段老网关不带，客户端按 `null` 兜。提问（`interaction/requested`）每题带 `multiSelect`（多选题可以选多个）；`handoff_to_user` 的提问另带 `browserHandoff: true`（`kind` 仍是 `user_input`），客户端据此打开这个会话的浏览器面板；`interaction/respond` 的 `answers[]` 每题 `{questionId, values: [选项标签…], other?}`，`other` 是自己写的回答，既算答案也作为备注交给模型；旧形状 `{questionId, value, kind: option|other}` 仍收。线程级的斜杠命令用 `GatewayHandle::scoped(page)`，下面一串 `cmd_*` 读的 `gateway.ctx()` 就是那一页。
+投影每页一份（`handle.rs` 的 `transcripts`，共用一条 broadcast，事件带页身份）；订阅是「页 → 客户端订阅时用的 `threadId`」，推送时用那个 id。会话事件按 `session/page-event` 路由，`turn/completed` 只在那一页记下 `LogEvent::TurnEnd` 时发（一轮一次，流式中途不发；和其它会话事件一样按 `session/page-event` 路由），`status` 是 `completed` / `cancelled` / `failed`，失败带 `error`（错误文本，以前只回给 TUI）；`item/tool_completed` 的 `status` 照 Dock 落下的 `is_error` 报：`completed` / `failed`，停止时的中断结果（以「已中断。」开头，可能带运行时长和已产出的输出）为 `cancelled`，权限门拒绝的（以「权限被拒绝」开头，含无人值守时等审批超时的）为 `denied`；权限 / 提问 / 计划 / elicitation 的事件载荷是 `()`，挨页按队首序号（`front_seq`）对账——同一条不重报，换了一条先报旧的 resolved。elicitation 的 `elicit/requested` 另带 `server` / `message` / `heading`；URL 模式再带 `url`（完整地址）、`urlDomain`（域名，给客户端高亮）、`urlWarning`（可疑地址的警告：Punycode / 明文 http）——这三个字段老网关不带，客户端按 `null` 兜。提问（`interaction/requested`）每题带 `multiSelect`（多选题可以选多个）；`handoff_to_user` 的提问另带 `browserHandoff: true`（`kind` 仍是 `user_input`），客户端据此打开这个会话的浏览器面板；`interaction/respond` 的 `answers[]` 每题 `{questionId, values: [选项标签…], other?}`，`other` 是自己写的回答，既算答案也作为备注交给模型；旧形状 `{questionId, value, kind: option|other}` 仍收。线程级的斜杠命令用 `GatewayHandle::scoped(page)`，下面一串 `cmd_*` 读的 `gateway.ctx()` 就是那一页。
 
 ### 浏览器画面（能力 `browserView`，`handlers/browser_view.rs`）
 
@@ -734,7 +734,7 @@ MCP 服务器给工具挂的 `ui://` 界面（见 `docs/tools/mcp.md`「MCP Apps
   - `context?`（算出来了才有）：`{ used, window, compactAt }` —— 这个子代理自己那份上下文
     的占用、窗口和自动压缩门槛（`window × 85%`）。算法跟主会话同一套（上游 usage 锚点
     加锚点之后的本地估算），所以面板上的数就是它真正触发压缩的那个数；
-  - `approval`：`inherit`（跟这一页的档位）/ `ask` / `auto`，见下；
+  - `approval`：`inherit`（跟这一页的档位）/ `ask` / `smart` / `auto`，见下；
   - `readOnly`：它的角色在这一页预设里是不是只读（关着的线程一律 `false`）。
 - 子代理的事件：
   - 第一条 `item/user_message` 是父级派的任务（原文，含 `[type] 描述` 开头和回报说明）；
@@ -750,7 +750,7 @@ MCP 服务器给工具挂的 `ui://` 界面（见 `docs/tools/mcp.md`「MCP Apps
   - 子代理发的 `permission/requested` 带 `agentId`（它的 id），主会话发的是 `null`；
   - `permission/resolve { always: true }` 记在这一页上，之后这页和它的子代理调同一颗工具都不再问。
 - 每个子代理可以单独设审批档位（`subagent/approval/set`）：
-  - `mode`：`inherit`（默认，跟 `thread/approval/set` 设的那一页走）/ `ask`（请求批准）/ `auto`（自动批准）；
+  - `mode`：`inherit`（默认，跟 `thread/approval/set` 设的那一页走）/ `ask`（请求批准）/ `smart`（智能授权）/ `auto`（自动批准）；
   - 单独设的盖过这一页的：页是自动批准、它设成 `ask` 照样问，反过来也一样；
   - 落在自动批准上（单独设的或跟页的）的只读子代理，碰到会改东西的命令直接拒、不弹（只读的保证还在）；
   - 切到自动批准时，它已经排着的请求一并处理掉（普通的放行、只读的拒绝）；
@@ -892,13 +892,16 @@ bash 里改的不算。轮次用投影里的 `turnId`（和 `item/user_message` 
     `expiresAtMs`（`null` = 不过期）/ `lastFiredAtMs`；
   - `runs`（自动触发次数，手动不算）/ `maxRuns`（`null` = 不限）/ `catchUp`（错过了补一次）/ `finished`；
   - `target`（`session` / `newSession`）/ `preset`（新开会话用的预设）/ `paused` / `pending`（有一次等着马上跑）；
-  - `history[]`：最近 20 次运行，新的在前：`{ atMs, reason, outcome, threadId, lateMs, error }`，
+  - `approval`：每一轮要过权限门的调用怎么批，`ask` / `smart`（默认）/ `auto`；`approvalTimeoutSecs`：
+    这一轮的权限请求等多久没人点就按拒绝处理（默认 900，`0` = 一直等），见「智能授权」；
+  - `history[]`：最近 20 次运行，新的在前：`{ atMs, reason, outcome, threadId, lateMs, error, approvalTimeouts }`，
+    `approvalTimeouts`：这一轮里有几次权限请求等超时了；
     `reason`：`schedule` / `catchUp` / `immediate` / `manual` / `watch` / `files`；
     `outcome`：`sent` / `coalesced`（上一次还在排队 / 还在跑，这次跳过）/ `failed`；`threadId` 是送进的会话；
   - `watch`：条件命令上一次检查 `{ checkedAtMs, exit, matched, error }`，别的种类为 `null`；
   - `lastError`：上次没送到的原因（开不了页之类）或文件监听挂不上的原因，下次送到就清掉；跑完了的任务带着它就留在表上；
   - `heldHere`：这个进程持有它；`holderLive`：有活着的 Dock 持有它（`false` = 现在没有 Dock 会去跑它）。
-- `schedule/create { threadId, prompt, <触发方式>, fireImmediately?, expiresAtMs?, maxRuns?, catchUp?, target?, preset?, paused? }` → `{ task }`。
+- `schedule/create { threadId, prompt, <触发方式>, fireImmediately?, expiresAtMs?, maxRuns?, catchUp?, target?, preset?, paused?, approval?, approvalTimeoutSecs? }` → `{ task }`。
   - 触发方式只给一个：`interval`（同 `/loop`：`5m` / `2h` / `1d`）或 `everySecs`（最小 60）、
     `cron`（`0 9 * * 1-5`）、`atMs`（毫秒时间戳）或 `at`（`30m` / `2026-11-23 09:00`，本机时区）、
     `watch: { command, everySecs?（默认 300，最小 60）, when?（默认 changed）, pattern? }`、
@@ -910,15 +913,35 @@ bash 里改的不算。轮次用投影里的 `turnId`（和 `item/user_message` 
   - `threadId` 开着的页（含 `live`）取它正在写的会话；关着的按会话列表找。还没落盘的回 `invalid_params`。
   - 这里是用户自己建的，不过权限门；模型的 `scheduler_create` 带 `watch` 时另有权限键 `scheduler_create:watch`，
     监听项目外的文件时另有 `scheduler_create:files`。
-- `schedule/update { id, <触发方式>?, prompt?, expiresAtMs?, maxRuns?, catchUp?, target?, preset?, paused? }` → `{ task }`：
+  - `approval: "auto"`（始终允许）只认受信连接，配对来的网页回 `forbidden`：它落盘、跨重启，
+    之后每一轮都在没人看着时放宽权限门。模型的 `scheduler_create` 只能选 `smart` / `ask`。
+- `schedule/update { id, <触发方式>?, prompt?, expiresAtMs?, maxRuns?, catchUp?, target?, preset?, paused?, approval?, approvalTimeoutSecs? }` → `{ task }`：
   固定间隔改间隔保持相位；换种类从现在起重排；不续期（只有给了 `expiresAtMs` 才动）。`maxRuns: null` = 不限，
-  `preset: null` = 不指定。`paused: false` 继续时跳过暂停期间的时刻。
+  `preset: null` = 不指定，`approvalTimeoutSecs: null` = 回到默认。`paused: false` 继续时跳过暂停期间的时刻。
 - `schedule/run { id, input? }` → `{ ok }`：马上跑一次，不占次数、不动排期；暂停、跑完的任务也能跑。持有它的 Dock
   （可能是别的进程）一秒内送出。`input` 附在这次的提问上给模型看。没有这个 id 回 `not_found`。
 - `schedule/delete { id }` → `{ deleted }`；没有这个 id 回 `not_found`，`schedules.json` 读写失败（如文件写坏了、
   是更新版本的 Dock 写的）回 `store_failed`，不混成 `not_found`。
 - 推送 `schedule/changed {}`：**连接级**，初始化过就收到，不用订阅线程。任何一处改了（含模型的
   `scheduler_*`、`dock schedule`、别的 Dock 进程、到点触发、检查结果）最多 1 秒后到；收到后重拉 `schedule/list`。
+
+### 智能授权（能力 `smartApproval`）
+
+审批三档：`ask`（每次问）/ `smart`（智能授权）/ `auto`（都不问）。`thread/approval/set { mode }` 收三档，
+`thread/environment/get` 的 `approval.options` 是 `["ask", "smart", "auto"]`。
+
+- `smart` 下要过权限门的调用：
+  - 只读命令、项目目录里的编辑直接放行；
+  - 硬清单一定问人（判断模型推翻不了）：sudo、rm -rf、碰 `~/.ssh` / `.env`、写项目目录外、改 `.git` / `.dock`、
+    git push --force、把文件传出去、桌面操作、加载插件、建条件命令 / 监听项目外文件的定时任务；
+  - 其余交给判断模型（`[approval] model`，没配用这一页的模型）。它只看工具、参数、目录和用户最近一条消息，
+    不看工具输出；说安全才放行，说有风险或没判成就问人，`permission/requested` 的 `summary` 末尾写明为什么问。
+- 推送 `item/tool_approval { toolCallId, itemId, by, reason }`：替用户做了决定时挂到那次工具调用上，
+  `by`：`judge`（判断模型放行，`reason` 是它的理由）/ `timeout`（无人值守时等审批超时）。规则放行的不推。
+  跟着会话落盘（`notice` 行，`kind: "approval"`），`thread/history` 回放同样有。
+- 定时任务那一轮按任务自己的 `approval` 批（不看这一页的档位），权限请求等 `approvalTimeoutSecs` 没人点
+  就按拒绝处理：审批框撤掉（`permission/resolved` 报 `deny`），工具结果以「权限被拒绝」开头、告诉模型用户不在，
+  这一轮照常收尾；运行记录的 `approvalTimeouts` 加一。人在那一页发了别的消息（含插话），这一页回到自己的档位。
 
 ### 记忆图谱（能力 `memoryGraph`，`handlers/memory.rs`）
 

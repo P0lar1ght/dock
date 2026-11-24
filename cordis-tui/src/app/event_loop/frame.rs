@@ -71,11 +71,8 @@ pub(super) fn prompt_chrome_info(ctx: &Context) -> String {
     let model = cordis_spine::model_label(&catalog, &id);
     let perm = settings
         .as_ref()
-        .map(|s| match s.permission_mode() {
-            PermissionMode::Ask => "询问",
-            PermissionMode::Allow => "始终允许",
-        })
-        .unwrap_or("询问");
+        .map(|s| s.permission_mode().label())
+        .unwrap_or(PermissionMode::Ask.label());
     let preset = ctx.get::<AgentPresets>(AGENT_PRESETS).map(|p| {
         let cur = p.current();
         let name = cur.name.trim();

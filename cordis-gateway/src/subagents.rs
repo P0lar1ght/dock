@@ -115,6 +115,7 @@ pub fn with_approval(mut agent: Value, page: Option<&Context>) -> Value {
     agent["approval"] = json!(match mode {
         None => "inherit",
         Some(PermissionMode::Ask) => "ask",
+        Some(PermissionMode::Smart) => "smart",
         Some(PermissionMode::Allow) => "auto",
     });
     let read_only = page

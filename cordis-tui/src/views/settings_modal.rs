@@ -100,6 +100,7 @@ pub fn value_text(field: SettingsField, settings: &AppSettings) -> String {
         }
         SettingsField::PermissionMode => match settings.permission_mode() {
             PermissionMode::Ask => "询问".into(),
+            PermissionMode::Smart => "智能授权".into(),
             PermissionMode::Allow => "自动允许".into(),
         },
         SettingsField::MermaidEngine => match settings.mermaid_engine() {
@@ -143,6 +144,7 @@ pub fn enum_choices(field: SettingsField, settings: &AppSettings) -> Vec<(String
             .collect(),
         SettingsField::PermissionMode => vec![
             ("询问".into(), "每次需确认".into()),
+            ("智能授权".into(), "AI 判断安全性，仅高风险时询问".into()),
             ("自动允许".into(), "不再询问".into()),
         ],
         SettingsField::MermaidEngine => vec![
@@ -163,10 +165,10 @@ pub fn apply_choice(field: SettingsField, value: &str, settings: &AppSettings) {
         SettingsField::Model => settings.set_model(value),
         SettingsField::Effort => settings.set_effort(value),
         SettingsField::PermissionMode => {
-            let mode = if value == "allow" || value == "自动允许" {
-                PermissionMode::Allow
-            } else {
-                PermissionMode::Ask
+            let mode = match value {
+                "allow" | "自动允许" => PermissionMode::Allow,
+                "smart" | "智能授权" => PermissionMode::Smart,
+                _ => PermissionMode::Ask,
             };
             settings.set_permission_mode(mode);
         }

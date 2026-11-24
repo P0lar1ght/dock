@@ -923,7 +923,7 @@ export class DockStore {
       const r = await this.client.call<{ thread: WireThread }>("thread/start", { cwd, presetId });
       // 新对话默认值（常规 › 新对话）：和 Dock 默认一样的就不发。
       const p = prefs.get();
-      if (p.approval === "auto") await this.client.call("thread/approval/set", { threadId: r.thread.id, mode: "auto" }).catch(() => {});
+      if (p.approval !== "ask") await this.client.call("thread/approval/set", { threadId: r.thread.id, mode: p.approval }).catch(() => {});
       if (!p.thinking) await this.client.call("thread/reasoning/set", { threadId: r.thread.id, effort: "none" }).catch(() => {});
       // 在移除过的项目里开了新对话：项目回到侧栏，不然新会话看不见。
       if (this.removed.delete(projectId(presetId, cwd))) localStorage.setItem(this.scoped(REMOVED_KEY), JSON.stringify([...this.removed]));

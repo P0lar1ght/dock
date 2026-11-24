@@ -111,7 +111,16 @@ fn settings_gate(
             .get("path")
             .and_then(Value::as_str)
             .is_some_and(|p| std::path::Path::new(p.trim()).is_absolute());
-    if (desktop_control || outside_read || crate::methods::policy_of(gateway, method).trusted_only)
+    // 定时任务设成「始终允许」：落盘、跨重启，之后每一轮都在没人看着时放宽权限门
+    // （同 `subagent/approval/set` 的 `auto`）。配对来的网页只能选询问 / 智能授权。
+    let unattended_allow = matches!(
+        method,
+        protocol::SCHEDULE_CREATE | protocol::SCHEDULE_UPDATE
+    ) && params.get("approval").and_then(Value::as_str) == Some("auto");
+    if (desktop_control
+        || outside_read
+        || unattended_allow
+        || crate::methods::policy_of(gateway, method).trusted_only)
         && !auth.is_some_and(Auth::trusted)
     {
         return Err(RpcError::app(

@@ -44,6 +44,8 @@ export function GeneralPane() {
             desc={
               p.approval === "auto" ? (
                 <span className="text-[#c93400]">「始终允许」有风险：bash、文件写入、桌面操作都不再问你</span>
+              ) : p.approval === "smart" ? (
+                "只读命令、项目里的编辑直接跑；sudo、删目录、碰密钥、往外传文件、桌面操作一定问你；其余由判断模型决定"
               ) : (
                 "新对话里工具要跑之前先问你"
               )
@@ -53,6 +55,7 @@ export function GeneralPane() {
               value={p.approval}
               options={[
                 { value: "ask", label: "询问" },
+                { value: "smart", label: "智能授权" },
                 { value: "auto", label: "始终允许" },
               ]}
               onChange={(v) => set("approval", v)}

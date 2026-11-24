@@ -7,6 +7,7 @@ import type {
   CompactionProgress,
   DockEvent,
   Question,
+  ToolApprovalBy,
   ToolEndStatus,
   ToolImage,
   UserImage,
@@ -48,6 +49,8 @@ export type TurnItem =
       endedAt: number | null;
       /** 结果里的图（截图等）；跑完之前是空的。 */
       images: ToolImage[];
+      /** 智能授权替用户做的决定（判断模型放行的理由 / 无人值守时等审批超时）。没有就是人批的或不用批。 */
+      approval?: { by: ToolApprovalBy; reason: string };
     }
   | {
       kind: 'permission';
@@ -210,6 +213,11 @@ export function reduceThread(state: ThreadState, event: DockEvent): ThreadState 
           endedAt: null,
           images: [],
         });
+
+      case 'item/tool_approval': {
+        const approval = { by: event.by, reason: event.reason };
+        return update(turn, (i) => (i.kind === 'tool' && i.id === event.toolCallId ? { ...i, approval } : i));
+      }
 
       case 'item/tool_completed': {
         const done = { output: event.output, status: event.status, endedAt: event.at, images: event.images };

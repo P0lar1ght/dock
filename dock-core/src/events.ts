@@ -14,6 +14,8 @@ export interface EventBase {
 export type TurnEndStatus = 'completed' | 'cancelled' | 'failed';
 /** `denied`：用户在权限门拒绝了这次调用（工具没跑）。 */
 export type ToolEndStatus = 'completed' | 'failed' | 'cancelled' | 'denied';
+/** 谁替用户做的这次权限决定：判断模型放行，或无人值守时等审批超时。 */
+export type ToolApprovalBy = 'judge' | 'timeout';
 
 export interface ImageAttachment {
   type: 'image';
@@ -124,7 +126,7 @@ export interface SubagentInfo {
   activity: SubagentActivity | null;
   /** 只在盘上（不在 Dock 内存里）：会话关过、Dock 重启过、早就收掉的。发消息会同一个 id 接着聊。 */
   persisted: boolean;
-  /** 审批档位：`inherit` 跟这一页走（默认）/ `ask` / `auto`（`subagent/approval/set` 单独设的）。 */
+  /** 审批档位：`inherit` 跟这一页走（默认）/ `ask` / `smart`（智能授权）/ `auto`（`subagent/approval/set` 单独设的）。 */
   approval: SubagentApproval;
   /** 它的角色是只读的（落在自动批准上时，会改东西的命令直接拒）。关着的线程一律 `false`。 */
   readOnly: boolean;
@@ -146,7 +148,7 @@ export interface SubagentContext {
   compactAt: number;
 }
 
-export type SubagentApproval = 'inherit' | 'ask' | 'auto';
+export type SubagentApproval = 'inherit' | 'ask' | 'smart' | 'auto';
 
 /** `subagent/updated` 的 `agent`（或 `subagent/list` 的一项）→ 子代理。没有 id 返回 `null`。 */
 export function parseSubagent(raw: Record<string, unknown>): SubagentInfo | null {
@@ -175,7 +177,7 @@ export function parseSubagent(raw: Record<string, unknown>): SubagentInfo | null
     error: str(raw.error) || null,
     activity,
     persisted: raw.persisted === true,
-    approval: oneOf(raw.approval, ['inherit', 'ask', 'auto'] as const, 'inherit'),
+    approval: oneOf(raw.approval, ['inherit', 'ask', 'smart', 'auto'] as const, 'inherit'),
     readOnly: raw.readOnly === true,
     context:
       num(c.window) > 0
@@ -363,6 +365,11 @@ export type DockEvent = EventBase &
         /** 旧网关不带：空数组。 */
         images: ToolImage[];
       }
+    /**
+     * 智能授权替用户做的决定，挂到那次工具调用上：`judge` = 判断模型看过、放行了；
+     * `timeout` = 无人值守的一轮（定时任务）里等审批超时，按拒绝处理。旧网关不推。
+     */
+    | { method: 'item/tool_approval'; toolCallId: string; by: ToolApprovalBy; reason: string }
     | {
         method: 'permission/requested';
         requestId: string;
@@ -498,6 +505,14 @@ export function parseEvent(method: string, params: Raw): DockEvent | null {
         toolName: str(params.toolName),
         chunk: num(params.chunk),
         delta: str(params.delta),
+      };
+    case 'item/tool_approval':
+      return {
+        ...base,
+        method,
+        toolCallId: str(params.toolCallId),
+        by: oneOf(params.by, ['judge', 'timeout'] as const, 'judge'),
+        reason: str(params.reason),
       };
     case 'item/tool_completed':
       return {

@@ -855,6 +855,7 @@ const Item = memo(function Item({ item }: { item: TurnItem }) {
           threadId={threadId}
           itemId={item.id}
           images={item.images}
+          approval={item.approval}
         />
       );
     }

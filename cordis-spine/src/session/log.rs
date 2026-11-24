@@ -6,6 +6,7 @@ use std::time::{Instant, SystemTime};
 
 use cordis::{plugin, Context, Inject, Plugin};
 
+use crate::host::permissions::RunApproval;
 use crate::host::settings::AppSettings;
 use crate::names::{
     SESSIONS, SESSION_CHILD_EVENT, SESSION_COMPACTION, SESSION_EVENT, SESSION_PAGE_EVENT,
@@ -190,6 +191,11 @@ pub struct Sessions {
     /// (display `/loop …` vs `loop_schedule_instruction`, or a scheduled-fire
     /// reminder). Hidden from the pager as [`LogEvent::SystemReminder`].
     pending_user_addons: Arc<Mutex<VecDeque<(String, String)>>>,
+    /// 同 `pending_user_addons` 的配法：哪条提问开始跑时，这一轮按什么批（定时任务）。
+    pending_run_approvals: Arc<Mutex<VecDeque<(String, RunApproval)>>>,
+    /// 这一页正在跑的这一轮按什么批；`None` = 跟这一页的档位走。每条用户消息进来
+    /// 时重新定：是挂过的那条就生效，否则（人发的、插话）撤掉。
+    run_approval: Arc<Mutex<Option<RunApproval>>>,
     /// When set, archive / live snapshots write Grok-style folders under
     /// `$DOCK_HOME/sessions/<cwd-key>/`. Isolated child logs stay memory-only.
     /// 子代理的落盘目录（`<父会话>/subagents/<id>/`）：设了就把这份日志写到那里，
@@ -429,6 +435,8 @@ impl Sessions {
             steers: Arc::new(Mutex::new(VecDeque::new())),
             side_notes: Arc::new(Mutex::new(Vec::new())),
             pending_user_addons: Arc::new(Mutex::new(VecDeque::new())),
+            pending_run_approvals: Arc::new(Mutex::new(VecDeque::new())),
+            run_approval: Arc::new(Mutex::new(None)),
             disk_cwd: Arc::new(Mutex::new(None)),
             child_dir: Arc::new(Mutex::new(None)),
             plan_cwd: Arc::new(Mutex::new(None)),
@@ -629,6 +637,20 @@ impl Sessions {
             .lock()
             .unwrap()
             .push_back((expected_user.into(), text.into()));
+    }
+
+    /// 正文是 `expected_user` 的那条提问开始跑时，这一轮按 `approval` 批（定时任务的
+    /// 无人值守运行）。配法同 [`Self::arm_user_addon`]。
+    pub fn arm_run_approval(&self, expected_user: impl Into<String>, approval: RunApproval) {
+        self.pending_run_approvals
+            .lock()
+            .unwrap()
+            .push_back((expected_user.into(), approval));
+    }
+
+    /// 这一页正在跑的这一轮是不是无人值守的运行（见 [`Self::arm_run_approval`]）。
+    pub fn run_approval(&self) -> Option<RunApproval> {
+        self.run_approval.lock().unwrap().clone()
     }
 
     pub fn identity(&self) -> &str {
@@ -900,6 +922,13 @@ impl Sessions {
         self.bump_events_rev();
         self.emit_session(event.clone());
         if let LogEvent::User(user_msg) = &event {
+            let approval = {
+                let mut q = self.pending_run_approvals.lock().unwrap();
+                q.iter()
+                    .position(|(expected, _)| expected == &user_msg.text)
+                    .map(|i| q.remove(i).unwrap().1)
+            };
+            *self.run_approval.lock().unwrap() = approval;
             let addon = {
                 let mut q = self.pending_user_addons.lock().unwrap();
                 q.iter()
@@ -1107,6 +1136,19 @@ impl Sessions {
 
     pub fn events(&self) -> Vec<LogEvent> {
         self.events.lock().unwrap().clone()
+    }
+
+    /// 最近一条用户消息的正文（智能授权拿它当「用户要做什么」）。不整份拷日志。
+    pub fn last_user_text(&self) -> Option<String> {
+        self.events
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find_map(|e| match e {
+                LogEvent::User(m) => Some(m.text.clone()),
+                _ => None,
+            })
     }
 
     /// History sent to the sampler. After compact this is the summary prefix
@@ -1539,6 +1581,8 @@ impl Sessions {
         }
         self.pending_images.lock().unwrap().clear();
         self.pending_user_addons.lock().unwrap().clear();
+        self.pending_run_approvals.lock().unwrap().clear();
+        *self.run_approval.lock().unwrap() = None;
         *self.pending_call.lock().unwrap() = None;
         *self.turn_started.lock().unwrap() = None;
         // 历史被整段改写，旧锚点对不上；下一次采样再落新的。

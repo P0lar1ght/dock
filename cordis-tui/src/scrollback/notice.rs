@@ -126,7 +126,7 @@ fn accent_of(kind: NoticeKind, theme: &Theme) -> Color {
     match kind {
         NoticeKind::WorkflowReport => theme.accent_running,
         NoticeKind::WorkflowDone => theme.accent_success,
-        NoticeKind::Other => theme.gray_bright,
+        NoticeKind::Approval | NoticeKind::Other => theme.gray_bright,
     }
 }
 
@@ -134,8 +134,27 @@ fn label_of(kind: NoticeKind) -> &'static str {
     match kind {
         NoticeKind::WorkflowReport => "上报",
         NoticeKind::WorkflowDone => "工作流",
+        NoticeKind::Approval => "授权",
         NoticeKind::Other => "通知",
     }
+}
+
+/// 智能授权替用户做的决定：不是卡片，紧挨在那次工具调用上面的一行灰字——
+/// 「智能授权放行：跑项目脚本」「没人批准：等了 15 分钟没人批准，这次没执行」。
+pub fn approval_line(
+    note: &cordis_spine::ApprovalNote,
+    theme: &Theme,
+    width: usize,
+) -> Line<'static> {
+    let head = match note.by {
+        cordis_spine::ApprovalBy::Judge => "智能授权放行：",
+        cordis_spine::ApprovalBy::Timeout => "没人批准：",
+    };
+    let line = Line::from(vec![
+        Span::styled(format!("  {head}"), Style::default().fg(theme.gray)),
+        Span::styled(note.reason.clone(), Style::default().fg(theme.gray_dim)),
+    ]);
+    truncate_line(line, width)
 }
 
 #[cfg(test)]
@@ -162,6 +181,26 @@ mod tests {
         );
         let open = text_of(&side_note_lines(&note, &theme, 80, ToolMode::Expanded));
         assert!(open.contains("结论 10"), "{open}");
+    }
+
+    /// 智能授权替用户做的决定画成一行灰字，写清是谁做的、为什么。
+    #[test]
+    fn an_approval_note_is_one_line_saying_who_decided() {
+        let theme = Theme::current();
+        let judged = cordis_spine::ApprovalNote {
+            call_id: "c1".into(),
+            by: cordis_spine::ApprovalBy::Judge,
+            reason: "跑项目的测试".into(),
+        };
+        let line = text_of(&[approval_line(&judged, &theme, 80)]);
+        assert_eq!(line.trim(), "智能授权放行：跑项目的测试");
+        let timed_out = cordis_spine::ApprovalNote {
+            by: cordis_spine::ApprovalBy::Timeout,
+            reason: "等了 15 分钟没人批准，这次没执行".into(),
+            ..judged
+        };
+        let line = text_of(&[approval_line(&timed_out, &theme, 80)]);
+        assert!(line.contains("没人批准："), "{line}");
     }
 
     fn text_of(lines: &[Line<'static>]) -> String {
