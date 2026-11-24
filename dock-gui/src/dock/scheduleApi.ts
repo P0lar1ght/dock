@@ -27,7 +27,12 @@ export interface ScheduleRun {
   threadId: string | null;
   lateMs: number | null;
   error: string | null;
+  /** 这一轮里有几次权限请求等超时了（没人批准，按拒绝处理）。旧 Dock 不带。 */
+  approvalTimeouts?: number;
 }
+
+/** 每一轮要过权限门的调用怎么批：询问 / 智能授权 / 始终允许。 */
+export type ScheduleApproval = "ask" | "smart" | "auto";
 
 export interface ScheduleTask {
   id: string;
@@ -61,6 +66,10 @@ export interface ScheduleTask {
   /** 新开会话时用的预设。 */
   preset: string | null;
   paused: boolean;
+  /** 每一轮要过权限门的调用怎么批。旧 Dock 不带（按当时的会话档位批）。 */
+  approval?: ScheduleApproval;
+  /** 权限请求等多久没人点就按拒绝处理（秒，0 = 一直等）。 */
+  approvalTimeoutSecs?: number;
   /** 有一次等着马上跑（手动运行 / 条件满足 / 文件改了）。 */
   pending: boolean;
   finished: boolean;
@@ -91,6 +100,9 @@ type TaskOptions = {
   catchUp?: boolean;
   target?: "session" | "newSession";
   paused?: boolean;
+  approval?: ScheduleApproval;
+  /** 0 = 一直等；null = 回到默认（15 分钟）。 */
+  approvalTimeoutSecs?: number | null;
 };
 
 export const scheduleList = () => dock.call<{ tasks: ScheduleTask[] }>("schedule/list").then((r) => r.tasks);

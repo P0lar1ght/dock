@@ -1039,6 +1039,46 @@ async fn a_new_session_task_opens_a_fresh_session_for_each_run() {
     ));
 }
 
+/// 定时任务的那一轮按任务自己的授权档位批、等审批有超时（无人值守），不按这一页的档位；
+/// 人回来发了别的消息，这一页回到自己的档位。
+#[tokio::test]
+async fn a_scheduled_run_is_approved_by_its_tasks_rules() {
+    let (root, project, page) = schedule_fixture("cron-approval").await;
+    page.get::<AppSettings>(cordis_spine::SETTINGS)
+        .unwrap()
+        .set_permission_mode(PermissionMode::Allow);
+    let cron = root.get::<cordis_spine::Cron>(cordis_spine::CRON).unwrap();
+    let id = cron
+        .create(cordis_spine::NewCronTask {
+            owner: Some(owner_of(&page, &project)),
+            approval: cordis_spine::CronApproval::Ask,
+            approval_timeout_secs: Some(300),
+            ..cordis_spine::NewCronTask::new(cordis_spine::CronSchedule::Manual, "整理今天的提交")
+        })
+        .unwrap();
+    cron.trigger(&id, None, cordis_spine::FireReason::Manual, None)
+        .unwrap();
+    let sessions = page.get::<Sessions>(SESSIONS).unwrap();
+    eventually_within(10, "送进会话", || said(&sessions, "整理今天的提交")).await;
+    let perms = page.get::<Permissions>(cordis_spine::PERMISSIONS).unwrap();
+    assert_eq!(
+        perms.run_approval(),
+        Some(cordis_spine::RunApproval {
+            mode: PermissionMode::Ask,
+            timeout: Some(std::time::Duration::from_secs(300)),
+            task_id: id.clone(),
+        })
+    );
+    assert_eq!(perms.effective_mode(None), PermissionMode::Ask);
+
+    let port = page.get::<SessionRef>(SESSION_PORT).unwrap();
+    eventually("这一轮跑完", || !port.working() && !port.has_queued()).await;
+    port.submit("我回来了".into(), false);
+    eventually("人发的消息送到", || said(&sessions, "我回来了")).await;
+    assert_eq!(perms.run_approval(), None);
+    assert_eq!(perms.effective_mode(None), PermissionMode::Allow);
+}
+
 /// 条件命令「成功时」：驱动马上在项目目录里跑一次命令，成功了就送进会话，提醒里带着
 /// 命令和它的输出（模型据此知道发生了什么），记成一次条件触发。
 #[tokio::test]

@@ -1,12 +1,13 @@
 import { html } from 'lit';
 import { faCheck } from '@fortawesome/free-solid-svg-icons/faCheck';
 import { faHand } from '@fortawesome/free-solid-svg-icons/faHand';
+import { faShieldHalved } from '@fortawesome/free-solid-svg-icons/faShieldHalved';
 import { faTerminal } from '@fortawesome/free-solid-svg-icons/faTerminal';
 import type { ApprovalMode } from '../../protocol/responses.js';
 import type { SessionEnvironment } from '../../session/ContextUsageModel.js';
 import { iconTemplate } from '../icons/Icon.js';
 
-/** Mirrors Dock `PermissionMode::{Ask, Allow}` and TUI chrome (`询问` / `始终允许`). */
+/** Mirrors Dock `PermissionMode::{Ask, Smart, Allow}` and TUI chrome (`询问` / `智能授权` / `始终允许`). */
 const MODES: Array<{
   id: Exclude<ApprovalMode, 'full_access'>;
   label: string;
@@ -14,6 +15,7 @@ const MODES: Array<{
   icon: typeof faHand;
 }> = [
   { id: 'ask', label: '询问', detail: '每次工具调用都请求确认', icon: faHand },
+  { id: 'smart', label: '智能授权', detail: 'AI 判断安全性，仅高风险时询问', icon: faShieldHalved },
   { id: 'auto', label: '始终允许', detail: '跳过工具审批，不再询问', icon: faTerminal }
 ];
 

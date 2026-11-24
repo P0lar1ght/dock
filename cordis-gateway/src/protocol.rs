@@ -90,6 +90,9 @@ pub const CAPABILITIES: &[(&str, bool)] = &[
     // `schedule/list` / `create` / `update` / `delete` + 连接级推送 `schedule/changed`：
     // 定时任务（落盘、属于某个会话、跨重启继续跑）。
     ("schedules", true),
+    // 审批多一档 `smart`（智能授权）+ 推送 `item/tool_approval`（判断模型放行 / 无人值守时
+    // 等审批超时，挂到那次工具调用上）+ 定时任务的 `approval` / `approvalTimeoutSecs`。
+    ("smartApproval", true),
     // `vcs/pr/list` / `vcs/pr/get`：项目的 GitHub PR（只读，经本机 gh）。gh 用不了回
     // `available: false` + `reason` / `hint`，不是错误。
     ("pullRequests", true),

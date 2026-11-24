@@ -6,6 +6,7 @@ use crate::agent::preset_propose::tool_propose_preset;
 use crate::agent::presets::agent_presets;
 use crate::agent::turn::turn;
 use crate::auth::{auth_commands, auth_manager, chatgpt_auth, grok_auth};
+use crate::host::approval::approval_judge;
 use crate::host::hooks_bridge::{hooks_bridge, hooks_command};
 use crate::host::mcp_app_context::mcp_app_context;
 use crate::host::mcp_app_views::mcp_app_views;
@@ -123,6 +124,8 @@ pub async fn install_app(ctx: &Context) -> Result<()> {
     ctx.plugin(grok_auth(), ())?.wait().await?;
     ctx.plugin(turn(), ())?.wait().await?;
     ctx.plugin(permissions(), ())?.wait().await?;
+    // 智能授权的判断模型（权限门 live-lookup；没挂时拿不准的一律问人）。
+    ctx.plugin(approval_judge(), ())?.wait().await?;
     ctx.plugin(cron(), ())?.wait().await?;
     ctx.plugin(roster(), ())?.wait().await?;
     ctx.plugin(jobs(), ())?.wait().await?;

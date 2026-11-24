@@ -49,6 +49,9 @@ pub use cordis_base::config::{
 };
 pub use cordis_base::stream_acc::StreamDelta;
 pub use cordis_base::types::{
+    approval_note, approval_notice, approval_timed_out_tool_result, ApprovalBy, ApprovalNote,
+};
+pub use cordis_base::types::{
     side_note_reminder, side_note_text, LlmOutput, LogEvent, NoticeKind, PreExecute, PreStep,
     PromptRequest, StepStart, ThinkingBlock, ToolCall, ToolResult, ToolSpec, TurnEnd, TurnEndRound,
     TurnOutcome, UserImage, AUTO_COMPACT_FAILED_PREFIX, COMPACT_NOTICE, INTERRUPTED_TOOL_RESULT,
@@ -65,6 +68,10 @@ pub use cordis_base::usage::{
     RECENT_CALLS_KEPT,
 };
 pub use error::{Error, Result};
+pub use host::approval::{
+    approval_judge, classify as classify_approval, smart_verdict, ApprovalJudge, Judge,
+    JudgeRequest, Judged, Rule as ApprovalRule, Smart,
+};
 pub use host::gateway_port::{
     CompanionStatus, GatewayPort, GatewayRef, PairingBinding, PairingError, PairingPrompt,
 };
@@ -76,7 +83,7 @@ pub use host::mcp_app_views::{
     mcp_app_views, McpAppViews, ViewCall, ViewExpose, ViewTool, APP_VIEW_TOOL_PREFIX,
     VIEW_CALL_TIMEOUT,
 };
-pub use host::permissions::{permissions, PermissionPrompt, Permissions};
+pub use host::permissions::{permissions, Decision, PermissionPrompt, Permissions, RunApproval};
 pub use host::plugin_settings::{plugin_settings, FieldErrors, PluginSettings};
 pub use host::session_port::{QueuedItem, SessionPort, SessionRef};
 pub use host::settings::{settings, AppSettings, MermaidEngineKind, ModelOverride, PermissionMode};
@@ -160,11 +167,12 @@ pub use tools::computer::{
     tool_computer, Computer, ComputerState, CuaAction, CuaJobView, CUA_DRIVER_SERVER,
 };
 pub use tools::cron::{
-    cron, parse_at, run_check, Cron, CronCheck, CronError, CronExpiry, CronFire, CronJob,
-    CronOwner, CronPatch, CronRun, CronSchedule, CronTarget, CronTick, CronWatchState, FileWatches,
-    FilesReady, FilesSpec, FireReason, FireReport, NewCronTask, RunOutcome, WatchObservation,
-    WatchSpec, WatchWhen, CHECK_TIMEOUT, DEFAULT_CHECK_EVERY, DEFAULT_FILES_DEBOUNCE, HISTORY_LEN,
-    MAX_SCHEDULED_TASKS, MIN_CHECK_EVERY, MISSED_GRACE, RECURRING_TASK_TTL_DAYS, SCHEDULES_FILE,
+    cron, parse_at, run_check, Cron, CronApproval, CronCheck, CronError, CronExpiry, CronFire,
+    CronJob, CronOwner, CronPatch, CronRun, CronSchedule, CronTarget, CronTick, CronWatchState,
+    FileWatches, FilesReady, FilesSpec, FireReason, FireReport, NewCronTask, RunOutcome,
+    WatchObservation, WatchSpec, WatchWhen, CHECK_TIMEOUT, DEFAULT_APPROVAL_TIMEOUT,
+    DEFAULT_CHECK_EVERY, DEFAULT_FILES_DEBOUNCE, HISTORY_LEN, MAX_SCHEDULED_TASKS, MIN_CHECK_EVERY,
+    MISSED_GRACE, RECURRING_TASK_TTL_DAYS, SCHEDULES_FILE,
 };
 pub use tools::dynamic_runner::{
     builtins_lines, delete_secret, dynamic_runner, find_disk, persist_root, plugin_roots,

@@ -365,6 +365,7 @@ function Entry({ item, sub, task }: { item: TurnItem; sub: Subagent; task: boole
           status={item.status}
           startedAt={item.startedAt}
           endedAt={item.endedAt}
+          approval={item.approval}
         />
       );
     default:
@@ -420,6 +421,7 @@ function ReportCard({ text }: { text: string }) {
 const APPROVAL: { id: SubagentApproval; label: string; hint: string }[] = [
   { id: "inherit", label: "跟随会话", hint: "" },
   { id: "ask", label: "请求批准", hint: "逐次确认" },
+  { id: "smart", label: "智能授权", hint: "仅高风险时询问" },
   { id: "auto", label: "自动批准", hint: "不再询问" },
 ];
 const chip = "flex h-7 items-center gap-1.5 rounded-full bg-[#f5f5f7] px-2.5 text-xs font-medium text-ink-3 hover:bg-[#ececf0]";
@@ -450,7 +452,8 @@ export function Composer({
   const sub = useSubagents(threadId).byId[agentId];
   const info = sub?.info ?? null;
   const usage = info ? usageOf(info) : null;
-  const page = useEnv(threadId).approval === "auto" ? "自动批准" : "请求批准";
+  const pageMode = useEnv(threadId).approval;
+  const page = pageMode === "auto" ? "自动批准" : pageMode === "smart" ? "智能授权" : "请求批准";
   const mode = sub?.info.approval ?? "inherit";
   const current = APPROVAL.find((a) => a.id === mode) ?? APPROVAL[0];
   const readOnly = sub?.info.readOnly ?? false;

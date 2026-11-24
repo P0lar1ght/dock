@@ -8,9 +8,37 @@ use cordis::{plugin, Context, Inject, Plugin};
 use tokio::sync::oneshot;
 
 use crate::host::settings::{AppSettings, PermissionMode};
-use crate::names::{PERMISSIONS, PERMISSION_EVENT, SETTINGS, SUBAGENT_CHANGED};
+use crate::names::{PERMISSIONS, PERMISSION_EVENT, SESSIONS, SETTINGS, SUBAGENT_CHANGED};
+use crate::session::log::Sessions;
 use crate::tools::task::SubagentChanged;
 use cordis_base::acp::PermissionOptionKind;
+
+/// 一轮无人值守的运行（定时任务触发的那一轮）怎么批：用任务自己的档位，权限请求
+/// 等 `timeout` 没人点就按拒绝处理（`None` = 一直等）。由驱动在送提问时挂上
+/// （[`crate::session::log::Sessions::arm_run_approval`]），那条提问开始跑时生效，
+/// 下一条用户消息（包括插话——人回来了）进来就撤掉。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RunApproval {
+    pub mode: PermissionMode,
+    pub timeout: Option<std::time::Duration>,
+    /// 哪个定时任务的这一轮（超时记进它的运行记录）。
+    pub task_id: String,
+}
+
+/// 一次权限请求的结局。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Decision {
+    Allowed,
+    Denied,
+    /// 无人值守的一轮里等了这么久没人点，按拒绝处理。
+    TimedOut(std::time::Duration),
+}
+
+impl Decision {
+    pub fn allowed(self) -> bool {
+        self == Self::Allowed
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct PermissionPrompt {
@@ -161,10 +189,12 @@ impl Permissions {
         );
     }
 
-    /// 这次请求实际按哪一档：子代理单独设过的优先，否则这一页的。
-    fn effective_mode(&self, agent_id: Option<&str>) -> PermissionMode {
+    /// 这次请求实际按哪一档：子代理单独设过的优先，其次是这一轮无人值守运行的档位
+    /// （[`RunApproval`]），最后是这一页的。
+    pub fn effective_mode(&self, agent_id: Option<&str>) -> PermissionMode {
         agent_id
             .and_then(|id| self.agent_mode(id))
+            .or_else(|| self.run_approval().map(|r| r.mode))
             .or_else(|| {
                 self.ctx
                     .get::<AppSettings>(SETTINGS)
@@ -173,12 +203,34 @@ impl Permissions {
             .unwrap_or(PermissionMode::Ask)
     }
 
+    /// 这一页正在跑的是不是一轮无人值守的运行，按什么批。
+    pub fn run_approval(&self) -> Option<RunApproval> {
+        self.ctx
+            .get::<Sessions>(SESSIONS)
+            .and_then(|s| s.run_approval())
+    }
+
+    /// 这个权限键点过「始终允许」。
+    pub fn is_always(&self, key: &str) -> bool {
+        self.always.lock().unwrap().contains(key)
+    }
+
+    /// 这个权限键点过「始终拒绝」。
+    pub fn is_never(&self, key: &str) -> bool {
+        self.never.lock().unwrap().contains(key)
+    }
+
     pub async fn request(&self, tool: &str, summary: &str) -> bool {
-        self.ask(tool, summary, None, false).await
+        self.ask(tool, summary, None, false).await.allowed()
     }
 
     /// 同 [`Self::request`]，并记下是哪个子代理发的（`agent_id`，展示用）。
     pub async fn request_from(&self, tool: &str, summary: &str, agent_id: Option<String>) -> bool {
+        self.ask(tool, summary, agent_id, false).await.allowed()
+    }
+
+    /// 同 [`Self::request_from`]，但分得清「被拒绝」和「无人值守时等超时了」。
+    pub async fn decide(&self, tool: &str, summary: &str, agent_id: Option<String>) -> Decision {
         self.ask(tool, summary, agent_id, false).await
     }
 
@@ -192,21 +244,40 @@ impl Permissions {
         summary: &str,
         agent_id: Option<String>,
     ) -> bool {
+        self.ask(tool, summary, agent_id, true).await.allowed()
+    }
+
+    /// 同 [`Self::request_strict`]，分得清超时。
+    pub async fn decide_strict(
+        &self,
+        tool: &str,
+        summary: &str,
+        agent_id: Option<String>,
+    ) -> Decision {
         self.ask(tool, summary, agent_id, true).await
     }
 
-    async fn ask(&self, tool: &str, summary: &str, agent_id: Option<String>, strict: bool) -> bool {
+    async fn ask(
+        &self,
+        tool: &str,
+        summary: &str,
+        agent_id: Option<String>,
+        strict: bool,
+    ) -> Decision {
         let auto = self.effective_mode(agent_id.as_deref()) == PermissionMode::Allow;
         if strict {
             if auto && agent_id.is_some() {
-                return false;
+                return Decision::Denied;
             }
         } else if auto || self.always.lock().unwrap().contains(tool) {
-            return true;
+            return Decision::Allowed;
         }
         if self.never.lock().unwrap().contains(tool) {
-            return false;
+            return Decision::Denied;
         }
+        // 无人值守的一轮：等不到人就按拒绝处理，这一轮才能结束（不然那一页一直算忙，
+        // 定时任务之后每次到点都只记成「合并掉」）。
+        let timeout = self.run_approval().and_then(|r| r.timeout);
         let (tx, rx) = oneshot::channel();
         let seq = self
             .next_seq
@@ -226,7 +297,19 @@ impl Permissions {
         // 等的一方可能被丢掉（这一轮被停掉，工具的 future 跟着没了）：请求要跟着撤出队列，
         // 不然它一直挂在队首，后面的真请求被它挡着，各端显示的还是它的摘要。
         let _withdraw = Withdraw { perms: self, seq };
-        rx.await.ok().is_some_and(PermissionOptionKind::is_allow)
+        let answer = match timeout {
+            Some(limit) => match tokio::time::timeout(limit, rx).await {
+                Ok(answer) => answer,
+                // 超时：守卫把请求撤出队列，各端的审批框跟着消失。
+                Err(_) => return Decision::TimedOut(limit),
+            },
+            None => rx.await,
+        };
+        if answer.ok().is_some_and(PermissionOptionKind::is_allow) {
+            Decision::Allowed
+        } else {
+            Decision::Denied
+        }
     }
 
     /// 撤掉一条还在队列里的请求（等它的一方已经不在了）。已经被处理掉的什么也不做。
@@ -277,7 +360,7 @@ mod tests {
         let perms = std::sync::Arc::new(Permissions::new(ctx));
         let ask = |tool: &'static str, strict: bool| {
             let perms = perms.clone();
-            tokio::spawn(async move { perms.ask(tool, "s", None, strict).await })
+            tokio::spawn(async move { perms.ask(tool, "s", None, strict).await.allowed() })
         };
         let first = ask("bash", false);
         let second = ask("bash", false);
@@ -320,7 +403,12 @@ mod tests {
         let perms = std::sync::Arc::new(Permissions::new(ctx));
         let stale = {
             let perms = perms.clone();
-            tokio::spawn(async move { perms.ask("bash", "$ echo hello", None, false).await })
+            tokio::spawn(async move {
+                perms
+                    .ask("bash", "$ echo hello", None, false)
+                    .await
+                    .allowed()
+            })
         };
         while perms.front().is_none() {
             tokio::task::yield_now().await;
@@ -336,7 +424,12 @@ mod tests {
 
         let real = {
             let perms = perms.clone();
-            tokio::spawn(async move { perms.ask("bash", "$ rm -rf build", None, false).await })
+            tokio::spawn(async move {
+                perms
+                    .ask("bash", "$ rm -rf build", None, false)
+                    .await
+                    .allowed()
+            })
         };
         while perms.front().is_none() {
             tokio::task::yield_now().await;
@@ -369,7 +462,12 @@ mod tests {
     ) -> tokio::task::JoinHandle<bool> {
         let perms = perms.clone();
         let agent = agent.map(str::to_string);
-        tokio::spawn(async move { perms.ask("bash", "$ touch x", agent, strict).await })
+        tokio::spawn(async move {
+            perms
+                .ask("bash", "$ touch x", agent, strict)
+                .await
+                .allowed()
+        })
     }
 
     /// 子代理单独设的档位盖过这一页的：页是自动批准、它设成请求批准就照样问；

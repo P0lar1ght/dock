@@ -7,10 +7,10 @@ use serde_json::{json, Value};
 use tokio::sync::broadcast;
 
 use cordis_spine::{
-    side_note_text, Ask, CompactProgress, CompactStatus, ElicitPrompt, LogEvent, PageToolInput,
-    PermissionOptionKind, PermissionPrompt, PlanApprovalPrompt, PlanDecision, Sessions,
-    TurnEndStatus, UserImage, AUTO_COMPACT_FAILED_PREFIX, COMPACT_NOTICE, INTERRUPTED_TOOL_RESULT,
-    PERMISSION_DENIED_TOOL_RESULT, ROOT_IDENTITY, STEER_REMINDER,
+    approval_note, side_note_text, Ask, CompactProgress, CompactStatus, ElicitPrompt, LogEvent,
+    NoticeKind, PageToolInput, PermissionOptionKind, PermissionPrompt, PlanApprovalPrompt,
+    PlanDecision, Sessions, TurnEndStatus, UserImage, AUTO_COMPACT_FAILED_PREFIX, COMPACT_NOTICE,
+    INTERRUPTED_TOOL_RESULT, PERMISSION_DENIED_TOOL_RESULT, ROOT_IDENTITY, STEER_REMINDER,
 };
 
 use crate::protocol::LIVE_THREAD_ID;
@@ -443,7 +443,10 @@ impl Transcript {
                     "completed"
                 } else if content.trim_start().starts_with(INTERRUPTED_TOOL_RESULT) {
                     "cancelled"
-                } else if content.trim() == PERMISSION_DENIED_TOOL_RESULT {
+                } else if content
+                    .trim_start()
+                    .starts_with(PERMISSION_DENIED_TOOL_RESULT)
+                {
                     "denied"
                 } else {
                     "failed"
@@ -545,7 +548,25 @@ impl Transcript {
                     self.push("item/system_reminder", payload);
                 }
             }
-            // Notice 只给 TUI 用户看，不进 dock.1 投影，也不该变成一条聊天消息。
+            // 智能授权替用户做的决定（判断模型放行、无人值守时等审批超时）：挂到那次
+            // 工具调用上，客户端画成工具卡上的一行，不是一条消息。
+            event @ LogEvent::Notice {
+                kind: NoticeKind::Approval,
+                ..
+            } => {
+                if let Some(note) = approval_note(&event) {
+                    self.push(
+                        "item/tool_approval",
+                        json!({
+                            "toolCallId": note.call_id,
+                            "itemId": note.call_id,
+                            "by": note.by.as_str(),
+                            "reason": note.reason,
+                        }),
+                    );
+                }
+            }
+            // 别的 Notice 只给 TUI 用户看，不进 dock.1 投影，也不该变成一条聊天消息。
             LogEvent::PreStep
             | LogEvent::Prompt(_)
             | LogEvent::SystemReminder(_)
@@ -2372,6 +2393,10 @@ mod tests {
             "partial line",
         );
         t.ingest_log(tool("e", &stopped, true));
+        // 无人值守时等审批超时：也是被拒绝（以拒绝的那句开头）。
+        let timed_out =
+            cordis_spine::approval_timed_out_tool_result(std::time::Duration::from_secs(900));
+        t.ingest_log(tool("f", &timed_out, true));
         let statuses: Vec<_> = t
             .history_since(0)
             .into_iter()
@@ -2380,8 +2405,55 @@ mod tests {
             .collect();
         assert_eq!(
             statuses,
-            ["completed", "failed", "cancelled", "denied", "cancelled"]
+            [
+                "completed",
+                "failed",
+                "cancelled",
+                "denied",
+                "cancelled",
+                "denied"
+            ]
         );
+    }
+
+    /// 智能授权替用户做的决定挂到那次工具调用上（`item/tool_approval`），回放也一样；
+    /// 别的 Notice 照旧不投影。
+    #[test]
+    fn approval_notes_attach_to_their_tool_call() {
+        let events = vec![
+            LogEvent::User("跑测试".into()),
+            cordis_spine::approval_notice("c1", cordis_spine::ApprovalBy::Judge, "跑项目的测试"),
+            LogEvent::Notice {
+                kind: NoticeKind::WorkflowDone,
+                title: "x".into(),
+                body: "y".into(),
+            },
+            cordis_spine::approval_notice(
+                "c2",
+                cordis_spine::ApprovalBy::Timeout,
+                "等了 15 分钟没人批准",
+            ),
+        ];
+        let mut live = Transcript::new();
+        for e in events.clone() {
+            live.ingest_log(e);
+        }
+        let mut replayed = Transcript::new();
+        let times = vec![UNIX_EPOCH; events.len()];
+        replayed.replay(&events, &times);
+        for t in [live, replayed] {
+            let notes: Vec<_> = t
+                .history_since(0)
+                .into_iter()
+                .filter(|e| e.method == "item/tool_approval")
+                .map(|e| e.payload)
+                .collect();
+            assert_eq!(notes.len(), 2, "{notes:?}");
+            assert_eq!(notes[0]["toolCallId"], "c1");
+            assert_eq!(notes[0]["by"], "judge");
+            assert_eq!(notes[0]["reason"], "跑项目的测试");
+            assert_eq!(notes[1]["by"], "timeout");
+        }
     }
 
     /// 回归：从落盘事件重建投影（重开会话、看关着的会话）以前时间戳全是「现在」，

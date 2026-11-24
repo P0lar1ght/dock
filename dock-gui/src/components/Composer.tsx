@@ -32,6 +32,7 @@ const MAX_HEIGHT = 200;
 
 const APPROVAL = [
   { id: "ask", label: "请求批准", hint: "逐次确认" },
+  { id: "smart", label: "智能授权", hint: "仅高风险时询问" },
   { id: "auto", label: "自动批准", hint: "不再询问" },
 ];
 const EFFORT: Record<string, string> = {

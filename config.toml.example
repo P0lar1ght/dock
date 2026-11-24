@@ -178,6 +178,12 @@ prompt_cache = true
 # Default headless (CI-safe). Toggle from /browser with `h`, or set here.
 # DOCK_BROWSER_HEADED (any non-empty) overrides to headed at launch; empty/unset → use [browser].headed.
 #
+# 智能授权（审批选「智能授权」时）：规则拿不准的操作交给这个模型判断。只看操作本身，
+# 挑个便宜快的就够；不写就用当前会话的模型。只认用户配置（$DOCK_HOME/config.toml），
+# 项目里的 .dock/config.toml 改不了它。
+# [approval]
+# model = "deepseek/deepseek-chat"
+
 # [browser]
 # headed = false
 

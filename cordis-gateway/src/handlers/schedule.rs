@@ -8,10 +8,13 @@
 //!
 //! - `schedule/list {}` → `{ tasks[] }`，全部会话的任务（GUI 的「定时任务」页）。
 //! - `schedule/create { threadId, prompt, <触发方式>, fireImmediately?, expiresAtMs?, maxRuns?,
-//!   catchUp?, target?, preset?, paused? }` → `{ task }`。`expiresAtMs` 省略 = 默认（比一天
-//!   还勤的 7 天后过期），`null` = 不过期。
+//!   catchUp?, target?, preset?, paused?, approval?, approvalTimeoutSecs? }` → `{ task }`。
+//!   `expiresAtMs` 省略 = 默认（比一天还勤的 7 天后过期），`null` = 不过期。`approval`：每一轮
+//!   要过权限门的调用怎么批（`ask` / `smart` 默认 / `auto`）；`approvalTimeoutSecs`：等多久
+//!   没人点就按拒绝处理（默认 900，`0` = 一直等）。
 //! - `schedule/update { id, <触发方式>?, prompt?, expiresAtMs?, maxRuns?, catchUp?, target?,
-//!   preset?, paused? }` → `{ task }`。`maxRuns: null` = 不限次数，`preset: null` = 不指定。
+//!   preset?, paused?, approval?, approvalTimeoutSecs? }` → `{ task }`。`maxRuns: null` = 不限
+//!   次数，`preset: null` = 不指定，`approvalTimeoutSecs: null` = 回到默认。
 //! - `schedule/run { id, input? }` → `{ ok }`：马上跑一次（不占次数、不动排期）。`input`
 //!   附在这次的提问上给模型看。
 //! - `schedule/delete { id }` → `{ deleted }`。
@@ -23,8 +26,8 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 use cordis_spine::{
-    parse_at, parse_interval, session_cwd, AgentPresets, Cron, CronError, CronExpiry, CronJob,
-    CronOwner, CronPatch, CronSchedule, CronTarget, FireReason, NewCronTask, WatchWhen,
+    parse_at, parse_interval, session_cwd, AgentPresets, Cron, CronApproval, CronError, CronExpiry,
+    CronJob, CronOwner, CronPatch, CronSchedule, CronTarget, FireReason, NewCronTask, WatchWhen,
     AGENT_PRESETS, CRON, DEFAULT_CHECK_EVERY, DEFAULT_FILES_DEBOUNCE, SCHEDULE_CHANGED,
 };
 
@@ -146,6 +149,8 @@ pub fn create(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError>
             target,
             preset,
             paused: flag("paused").unwrap_or(false),
+            approval: approval(&params)?.unwrap_or_default(),
+            approval_timeout_secs: approval_timeout(&params)?.flatten(),
             ..NewCronTask::new(schedule, prompt)
         })
         .map_err(cron_error)?;
@@ -173,6 +178,8 @@ pub fn update(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError>
         target: target(&params)?,
         preset,
         paused: params.get("paused").and_then(Value::as_bool),
+        approval: approval(&params)?,
+        approval_timeout_secs: approval_timeout(&params)?,
     };
     if patch.is_empty() {
         return Err(RpcError::invalid_params("没有要改的字段"));
@@ -240,6 +247,33 @@ fn owner_of(
         },
         entry.preset_id,
     ))
+}
+
+/// `approval`：每一轮要过权限门的调用怎么批——`ask` / `smart`（默认）/ `auto`（始终允许）。
+/// 这里是用户自己设的，三档都行（模型的 `scheduler_create` 只能选前两档）。
+fn approval(params: &Value) -> Result<Option<CronApproval>, RpcError> {
+    match params.get("approval").and_then(Value::as_str) {
+        None => Ok(None),
+        Some("ask") => Ok(Some(CronApproval::Ask)),
+        Some("smart") => Ok(Some(CronApproval::Smart)),
+        Some("auto") => Ok(Some(CronApproval::Allow)),
+        Some(other) => Err(RpcError::invalid_params(format!(
+            "approval 是 ask / smart / auto，收到了 {other}"
+        ))),
+    }
+}
+
+/// `approvalTimeoutSecs`：权限请求等多久没人点就按拒绝处理。省略 = 不改 / 默认，
+/// `null` = 回到默认（15 分钟），`0` = 一直等。
+fn approval_timeout(params: &Value) -> Result<Option<Option<u64>>, RpcError> {
+    match params.get("approvalTimeoutSecs") {
+        None => Ok(None),
+        Some(Value::Null) => Ok(Some(None)),
+        Some(v) => v
+            .as_u64()
+            .map(|secs| Some(Some(secs)))
+            .ok_or_else(|| RpcError::invalid_params("approvalTimeoutSecs 是秒数（0 = 一直等）")),
+    }
 }
 
 /// `target`：`session`（默认）/ `newSession`。
@@ -460,6 +494,7 @@ fn task_json(job: &CronJob, title: Option<String>) -> Value {
                 "threadId": run.session,
                 "lateMs": run.late_ms,
                 "error": run.error,
+                "approvalTimeouts": run.approval_timeouts,
             })
         })
         .collect();
@@ -492,6 +527,13 @@ fn task_json(job: &CronJob, title: Option<String>) -> Value {
         "target": job.target,
         "preset": job.preset,
         "paused": job.paused,
+        "approval": match job.approval {
+            CronApproval::Ask => "ask",
+            CronApproval::Smart => "smart",
+            CronApproval::Allow => "auto",
+        },
+        // 0 = 一直等（和写入时同一个约定）。
+        "approvalTimeoutSecs": job.approval_timeout.map_or(0, |d| d.as_secs()),
         "pending": job.pending,
         "finished": job.finished(),
         "history": history,

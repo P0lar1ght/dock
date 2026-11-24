@@ -16,6 +16,7 @@
 //! | [`usage`] | 每次调用与每个会话的 token / 费用账本 |
 //! | [`chat_chunk`] [`stream_acc`] | 三条 wire 的流式分片与累积 |
 //! | [`acp`] | ACP 权限选项种类 |
+//! | [`read_only_shell`] [`risky_shell`] | bash 命令是不是只读 / 在不在智能授权的硬清单里 |
 //! | [`cua`] | cua-driver 的本机发现、安装与授权 |
 //! | [`grep`] | 进程内 ripgrep 引擎（工具插件在 spine） |
 //! | [`tool_output`] | 工具输出的共享预算：语义分页 + 溢出落盘 |
@@ -31,6 +32,7 @@ pub mod cua;
 pub mod grep;
 pub mod plugin_settings;
 pub mod read_only_shell;
+pub mod risky_shell;
 pub mod stream_acc;
 pub mod test_env;
 pub mod tool_output;

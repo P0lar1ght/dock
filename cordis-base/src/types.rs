@@ -25,6 +25,17 @@ pub fn interrupted_tool_result(elapsed: std::time::Duration, partial: &str) -> S
 /// 和普通失败分开（网关报 `denied`）。
 pub const PERMISSION_DENIED_TOOL_RESULT: &str = "权限被拒绝";
 
+/// 无人值守的一轮（定时任务）里，权限请求等了 `waited` 没人点：按拒绝这一次处理。
+/// 以 [`PERMISSION_DENIED_TOOL_RESULT`] 开头（客户端照样认成「被拒绝」），告诉模型
+/// 用户不在，别干等、别反复重试同一个操作。
+pub fn approval_timed_out_tool_result(waited: std::time::Duration) -> String {
+    let minutes = waited.as_secs().div_ceil(60).max(1);
+    format!(
+        "{PERMISSION_DENIED_TOOL_RESULT}：没人批准——这是无人值守的一轮（定时任务），等了 {minutes} 分钟没人点，\
+         这次没有执行。能换个不需要批准的办法就继续；做不了就在最后的回复里写明卡在哪一步、需要用户做什么。"
+    )
+}
+
 /// 插话（steer）落进日志时，紧挨在那条 `User` 之前的提示：这条用户消息是在一轮
 /// 进行中送达的，不是新的一轮。模型据此先回应、再接着做没做完的事；网关据此把
 /// 那条用户消息标成 `steered`。逐字比较，别改成带变量的文本。
@@ -201,6 +212,8 @@ pub enum NoticeKind {
     WorkflowReport,
     /// 一次 workflow run 收尾。
     WorkflowDone,
+    /// 智能授权替用户做了决定（见 [`approval_notice`]）：不是卡片，挂在那次工具调用上。
+    Approval,
     Other,
 }
 
@@ -209,6 +222,7 @@ impl NoticeKind {
         match self {
             Self::WorkflowReport => "workflow-report",
             Self::WorkflowDone => "workflow-done",
+            Self::Approval => "approval",
             Self::Other => "other",
         }
     }
@@ -217,14 +231,106 @@ impl NoticeKind {
         match raw {
             "workflow-report" => Self::WorkflowReport,
             "workflow-done" => Self::WorkflowDone,
+            "approval" => Self::Approval,
             _ => Self::Other,
         }
     }
 }
 
+/// 谁替用户做的这次权限决定。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ApprovalBy {
+    /// 智能授权的判断模型看过、放行了。
+    Judge,
+    /// 无人值守的一轮里等审批超时，按拒绝处理。
+    Timeout,
+}
+
+impl ApprovalBy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Judge => "judge",
+            Self::Timeout => "timeout",
+        }
+    }
+
+    fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "judge" => Some(Self::Judge),
+            "timeout" => Some(Self::Timeout),
+            _ => None,
+        }
+    }
+}
+
+/// 一次工具调用上挂的授权说明。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ApprovalNote {
+    pub call_id: String,
+    pub by: ApprovalBy,
+    /// 给人看的一句话（「在项目里跑测试」「等了 15 分钟没人批准」）。
+    pub reason: String,
+}
+
+/// 智能授权替用户做了决定时记的一条通知：只给人看（不进模型上下文），落盘跟着会话走，
+/// 界面把它挂到 `call_id` 那次工具调用的卡片上。`title` 是理由，`body` 是
+/// `<call_id>\n<by>`。
+pub fn approval_notice(call_id: &str, by: ApprovalBy, reason: &str) -> LogEvent {
+    LogEvent::Notice {
+        kind: NoticeKind::Approval,
+        title: reason.trim().to_string(),
+        body: format!("{call_id}\n{}", by.as_str()),
+    }
+}
+
+/// [`approval_notice`] 的反面：认得出就拆回来。
+pub fn approval_note(event: &LogEvent) -> Option<ApprovalNote> {
+    let LogEvent::Notice {
+        kind: NoticeKind::Approval,
+        title,
+        body,
+    } = event
+    else {
+        return None;
+    };
+    let (call_id, by) = body.split_once('\n')?;
+    Some(ApprovalNote {
+        call_id: call_id.to_string(),
+        by: ApprovalBy::parse(by)?,
+        reason: title.clone(),
+    })
+}
+
 #[cfg(test)]
 mod side_note_tests {
     use super::*;
+
+    /// 授权说明原样拆得回来；别的通知不算。
+    #[test]
+    fn an_approval_notice_round_trips() {
+        let event = approval_notice("call-1", ApprovalBy::Judge, " 在项目里跑测试 ");
+        assert_eq!(
+            approval_note(&event),
+            Some(ApprovalNote {
+                call_id: "call-1".into(),
+                by: ApprovalBy::Judge,
+                reason: "在项目里跑测试".into(),
+            })
+        );
+        let other = LogEvent::Notice {
+            kind: NoticeKind::WorkflowDone,
+            title: "x".into(),
+            body: "call-1\njudge".into(),
+        };
+        assert_eq!(approval_note(&other), None);
+        assert_eq!(
+            NoticeKind::from_str_lenient("approval"),
+            NoticeKind::Approval
+        );
+        let timed_out = approval_timed_out_tool_result(std::time::Duration::from_secs(900));
+        assert!(timed_out.starts_with(PERMISSION_DENIED_TOOL_RESULT));
+        assert!(timed_out.contains("15 分钟"), "{timed_out}");
+    }
 
     /// 包进去的笔记原样认得回来；别的提醒（插话、停止）不算笔记。
     #[test]

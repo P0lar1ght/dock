@@ -39,9 +39,10 @@ use std::time::{Duration, Instant};
 use cordis::{plugin, Context, Disposable, Inject, Plugin};
 use cordis_spine::{
     expired_task_notice, format_fire_note, missed_task_notice, run_check, session_cwd, Cron,
-    CronCheck, CronFire, CronJob, CronSchedule, CronTarget, FileWatches, FireNote, FireReason,
-    FireReport, LlmOutput, LogEvent, RunOutcome, SessionRef, Sessions, Tabs, CHECK_TIMEOUT, CRON,
-    SCHEDULE_CHANGED, SESSIONS, SESSION_PORT, TABS,
+    CronApproval, CronCheck, CronFire, CronJob, CronSchedule, CronTarget, FileWatches, FireNote,
+    FireReason, FireReport, LlmOutput, LogEvent, PermissionMode, RunApproval, RunOutcome,
+    SessionRef, Sessions, Tabs, CHECK_TIMEOUT, CRON, SCHEDULE_CHANGED, SESSIONS, SESSION_PORT,
+    TABS,
 };
 
 /// Grok polls scheduled prompts once a second.
@@ -346,6 +347,22 @@ async fn send(ctx: &Context, fire: &CronFire) -> Result<Sent, String> {
                 context: fire.context.as_deref(),
                 fresh_session: fresh,
             }),
+        );
+    }
+    if let Some(sessions) = page.get::<Sessions>(SESSIONS) {
+        // 这一轮多半没人看着：按任务自己的档位批，权限请求等不到人就按拒绝处理，
+        // 这一轮才收得了尾（不然那一页一直算忙，之后每次到点都只记成「合并掉」）。
+        sessions.arm_run_approval(
+            job.prompt.clone(),
+            RunApproval {
+                mode: match job.approval {
+                    CronApproval::Ask => PermissionMode::Ask,
+                    CronApproval::Smart => PermissionMode::Smart,
+                    CronApproval::Allow => PermissionMode::Allow,
+                },
+                timeout: job.approval_timeout,
+                task_id: job.id.clone(),
+            },
         );
     }
     port.submit(job.prompt.clone(), false);

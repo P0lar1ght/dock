@@ -998,6 +998,7 @@ pub enum KeyKind {
 
 /// 设置页能直接改的键（点分路径）。不在这里的一律拒绝。
 pub const SETTING_KEYS: &[(&str, KeyKind)] = &[
+    ("approval.model", KeyKind::Str),
     ("browser.headed", KeyKind::Bool),
     ("toolset.web_fetch.timeout_secs", KeyKind::Int),
     ("toolset.web_fetch.max_content_length", KeyKind::Int),

@@ -261,15 +261,20 @@ pub fn gateway_subagent_approval() -> Plugin {
 }
 
 /// `subagent/approval/set { threadId, agentId, mode }`（受信连接）：单独给这个子代理设审批档位，
-/// `mode` 是 `inherit`（跟这一页）/ `ask`（请求批准）/ `auto`（自动批准）。只读子代理在
+/// `mode` 是 `inherit`（跟这一页）/ `ask`（请求批准）/ `smart`（智能授权）/ `auto`（自动批准）。只读子代理在
 /// 自动批准下碰到会改东西的命令直接拒、不弹。线程得开着；只在盘上的子代理也能设，同 id
 /// 接着聊时生效。回 `{ approval }`；活着的另推一条 `subagent/updated`。
 pub fn set_approval(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
     let mode = match params.get("mode").and_then(Value::as_str).unwrap_or("") {
         "inherit" => None,
         "ask" => Some(PermissionMode::Ask),
+        "smart" => Some(PermissionMode::Smart),
         "auto" => Some(PermissionMode::Allow),
-        _ => return Err(RpcError::invalid_params("mode 只能是 inherit、ask 或 auto")),
+        _ => {
+            return Err(RpcError::invalid_params(
+                "mode 只能是 inherit、ask、smart 或 auto",
+            ))
+        }
     };
     let page = threads::resolve_param(gateway, &params)?;
     let agent_id = agent_param(&params)?;

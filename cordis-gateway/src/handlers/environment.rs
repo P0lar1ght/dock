@@ -125,6 +125,7 @@ pub fn set_approval(gateway: &GatewayHandle, params: Value) -> Result<Value, Rpc
     let settings = settings(&page_ctx(gateway, &params)?)?;
     match mode {
         "ask" => settings.set_permission_mode(PermissionMode::Ask),
+        "smart" => settings.set_permission_mode(PermissionMode::Smart),
         "auto" => settings.set_permission_mode(PermissionMode::Allow),
         "full_access" => {
             return Err(RpcError::app(
@@ -132,7 +133,7 @@ pub fn set_approval(gateway: &GatewayHandle, params: Value) -> Result<Value, Rpc
                 "full-access confirmation is not implemented",
             ))
         }
-        _ => return Err(RpcError::invalid_params("mode must be ask or auto")),
+        _ => return Err(RpcError::invalid_params("mode must be ask, smart or auto")),
     }
     get(gateway, params)
 }
@@ -235,6 +236,7 @@ fn environment_fields(ctx: &Context) -> Result<serde_json::Map<String, Value>, R
         .collect();
     let approval = match settings.permission_mode() {
         PermissionMode::Ask => "ask",
+        PermissionMode::Smart => "smart",
         PermissionMode::Allow => "auto",
     };
     let plan_on = ctx.get::<PlanMode>(PLAN_MODE).is_some_and(|p| p.active());
@@ -300,7 +302,7 @@ fn environment_fields(ctx: &Context) -> Result<serde_json::Map<String, Value>, R
         json!({
             "mode": approval,
             "canChange": true,
-            "options": ["ask", "auto"]
+            "options": ["ask", "smart", "auto"]
         }),
     );
     // 推理档位跟着当前模型走（以前写死 none/low/medium/high，GUI 里每个模型都一样）。

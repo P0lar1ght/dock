@@ -36,6 +36,7 @@ import {
   type TestResult,
 } from "../../dock/settingsApi";
 import { ProvidersTab } from "./Providers";
+import { useConfigKeys } from "./configKeys";
 import {
   Banner,
   Card,
@@ -94,6 +95,27 @@ const TEMPLATES: { label: string; entry: Partial<ModelEntry> }[] = [
 type Editing = { entry: ModelEntry; originalId: string | null };
 
 /** `editId`：进来直接打开这条的编辑页（预览截图用；"" = 添加）。 */
+/**
+ * 智能授权的判断模型（`[approval] model`，只写用户配置）。不选 = 用当前会话的模型。
+ * 判断只看一次操作本身，挑个便宜快的就够。
+ */
+function JudgeModelRow({ models }: { models: { id: string; label: string }[] }) {
+  const c = useConfigKeys();
+  const current = c.get<string>("approval.model") ?? "";
+  return (
+    <div className="flex flex-col gap-1.5">
+      <span className="text-[13px] font-medium text-ink">智能授权的判断模型</span>
+      <Select
+        width={280}
+        value={current}
+        options={[{ value: "", label: "跟当前会话的模型" }, ...models.map((m) => ({ value: m.id, label: m.label }))]}
+        onChange={(id) => void c.write("approval.model", id || null)}
+      />
+      <span className="text-xs text-ink-4">审批选「智能授权」时，规则拿不准的操作交给它判断；只看操作本身，选个便宜快的就够</span>
+    </div>
+  );
+}
+
 export function ModelsPane({ editId }: { editId?: string } = {}) {
   const [editing, setEditing] = useState<Editing | null>(null);
   const status = useLoad(configStatus);
@@ -295,6 +317,7 @@ function ModelList({
           </span>
         </div>
       )}
+      {!broken && all.length > 0 && <JudgeModelRow models={all} />}
       {!broken && (
         <SubscriptionSection
           remote={remote !== null}

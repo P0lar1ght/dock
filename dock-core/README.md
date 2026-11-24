@@ -20,6 +20,9 @@ dock.1 协议核心：线程事件的类型化契约 + 线程状态 reducer。�
 - 侧边聊天笔记：`item/side_note` 是轮里的 `sideNote` 项（`text` 是笔记原文）。
   - 挂在它落下时的那一轮上；已经结束的轮不会因为它重新跑起来。
 - 权限项带 `agentId`：子代理发的请求是它的 id，主会话发的是 `null`（旧网关不带也是 `null`）。
+- 工具项可带 `approval { by, reason }`（`item/tool_approval`）：智能授权替用户做了决定——
+  `judge` 是判断模型放行（`reason` 是理由），`timeout` 是定时任务那一轮等审批超时（状态是 `denied`）。
+  没有就是人批的、规则放行的或不用批。旧网关不推。
 - 子代理（`src/subagents.ts`）：`subagent/updated` 是状态，`subagent/event` 是它自己的对话。
   - 每个子代理的对话用同一个 `reduceThread`；父线程的 `reduceThread` 忽略这两种事件。
   - 中途接入时对话不全（`complete: false`），实时事件先攒着；`withHistory` 回放

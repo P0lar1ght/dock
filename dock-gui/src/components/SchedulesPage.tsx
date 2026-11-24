@@ -29,6 +29,7 @@ import {
   scheduleRun,
   scheduleUpdate,
   type FireReason,
+  type ScheduleApproval,
   type ScheduleInput,
   type ScheduleTask,
   type WatchWhen,
@@ -297,6 +298,11 @@ function TaskLine({
             新会话
           </span>
         )}
+        {task.approval === "auto" && (
+          <span title="每次运行都不问权限" className="shrink-0 rounded-full bg-[#fff4e5] px-2 py-0.5 text-[11px] font-medium text-[#c93400]">
+            始终允许
+          </span>
+        )}
         {!task.heldHere && task.holderLive && (
           <span
             title="另一个 Dock 进程持有它；那个进程退出后，这里会接管。"
@@ -360,6 +366,9 @@ function TaskLine({
                   {OUTCOME_TEXT[run.outcome]}
                   {run.error && `：${run.error}`}
                   {run.lateMs !== null && run.lateMs > 0 && `（晚了 ${Math.max(1, Math.round(run.lateMs / 60_000))} 分钟）`}
+                  {!!run.approvalTimeouts && (
+                    <span className="text-[#c93400]">{` · ${run.approvalTimeouts} 次等审批超时，跳过了那一步`}</span>
+                  )}
                 </span>
                 {run.threadId && (
                   <button type="button" className="ml-auto shrink-0 font-medium text-accent hover:underline" onClick={() => onOpenSession(run.threadId!)}>
@@ -425,6 +434,19 @@ const WHENS: { value: WatchWhen; label: string }[] = [
   { value: "fails", label: "失败时（退出码非 0）" },
   { value: "succeeds", label: "成功时（退出码 0）" },
   { value: "matches", label: "输出匹配正则" },
+];
+
+const APPROVALS = [
+  { value: "ask" as const, label: "询问", title: "要过权限门的每次都问你" },
+  { value: "smart" as const, label: "智能授权", title: "只读命令、项目里的编辑直接跑；高风险的问你；其余由判断模型决定" },
+  { value: "auto" as const, label: "始终允许", title: "都不问。条件命令的输出、改动的文件、网页内容都会进提问，有被借内容跑命令的风险" },
+];
+
+const WAITS: { value: string; label: string }[] = [
+  { value: "300", label: "等 5 分钟" },
+  { value: "900", label: "等 15 分钟" },
+  { value: "3600", label: "等 1 小时" },
+  { value: "0", label: "一直等" },
 ];
 
 const TARGETS = [
@@ -529,6 +551,8 @@ function TaskDialog({
   const [paths, setPaths] = useState(spec?.kind === "files" ? spec.paths.join("\n") : "");
   const [debounce, setDebounce] = useState(String(spec?.kind === "files" ? spec.debounceSecs : 10));
   const [target, setTarget] = useState<"session" | "newSession">(task?.target ?? "session");
+  const [approval, setApproval] = useState<ScheduleApproval>(task?.approval ?? "smart");
+  const [wait, setWait] = useState(String(task?.approvalTimeoutSecs ?? 900));
   const [expiry, setExpiry] = useState<ExpiryChoice>(task ? "keep" : "default");
   /** null = 跟着种类的默认（按时间 / 只一次补，按间隔不补）。 */
   const [catchUp, setCatchUp] = useState<boolean | null>(task ? task.catchUp : null);
@@ -602,6 +626,8 @@ function TaskDialog({
       ...(expiresAtMs !== undefined && { expiresAtMs }),
       ...(timeBased && catchUp !== null && catchUp !== task?.catchUp && { catchUp }),
       ...(target !== (task?.target ?? "session") && { target }),
+      ...(approval !== (task?.approval ?? "smart") && { approval }),
+      ...(Number(wait) !== (task?.approvalTimeoutSecs ?? 900) && { approvalTimeoutSecs: Number(wait) }),
     };
     try {
       if (task) await scheduleUpdate({ id: task.id, prompt: prompt.trim(), ...schedule, ...options });
@@ -756,6 +782,18 @@ function TaskDialog({
             <Segmented value={target} options={TARGETS} onChange={setTarget} />
           </div>
         </div>
+        <div className="flex flex-col gap-1.5">
+          <span className="text-[12.5px] font-medium text-ink">每次运行的授权</span>
+          <div className="flex flex-wrap items-center gap-2">
+            <Segmented value={approval} options={APPROVALS} onChange={setApproval} />
+            <Select value={wait} options={WAITS} onChange={setWait} width={120} />
+          </div>
+          <span className="text-xs leading-relaxed text-ink-4">
+            {approval === "auto"
+              ? "都不问。条件命令的输出、改动的文件、网页内容都会进提问，有被借内容跑命令的风险。"
+              : "多半没人看着：要你批准的等这么久没人点，就跳过那一步、让它接着做能做的，并在运行记录里写明。"}
+          </span>
+        </div>
         <label className="flex flex-col gap-1.5">
           <span className="text-[12.5px] font-medium text-ink">提问</span>
           <textarea
@@ -785,7 +823,7 @@ function TaskDialog({
           </label>
         )}
         <p className="text-xs leading-relaxed text-ink-4">
-          Dock 没开着的时候不运行；错过了最多补一次，不会一口气补很多次。会话忙着时到点会排队，上一次还在排就不再叠。跑起来以后照常过权限确认。
+          Dock 没开着的时候不运行；错过了最多补一次，不会一口气补很多次。会话忙着时到点会排队，上一次还在排就不再叠。
         </p>
         {error && <p className="text-[12.5px] text-[#d70015]">{error}</p>}
         <div className="flex items-center gap-2">
