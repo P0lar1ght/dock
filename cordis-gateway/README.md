@@ -942,6 +942,7 @@ bash 里改的不算。轮次用投影里的 `turnId`（和 `item/user_message` 
 - 定时任务那一轮按任务自己的 `approval` 批（不看这一页的档位），权限请求等 `approvalTimeoutSecs` 没人点
   就按拒绝处理：审批框撤掉（`permission/resolved` 报 `deny`），工具结果以「权限被拒绝」开头、告诉模型用户不在，
   这一轮照常收尾；运行记录的 `approvalTimeouts` 加一。人在那一页发了别的消息（含插话），这一页回到自己的档位。
+  这一页点过的「始终允许」在这一轮里照算，硬清单除外（还是要人点头，等不到就超时拒绝）。
 
 ### 记忆图谱（能力 `memoryGraph`，`handlers/memory.rs`）
 

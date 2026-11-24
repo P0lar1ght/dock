@@ -737,8 +737,8 @@ fn subagent_of(exec: &Context) -> Option<String> {
 }
 
 /// 普通权限门：按这次调用实际的档位走。智能授权档先过规则和判断模型（「始终允许 /
-/// 始终拒绝」过的照旧直接算数），放行了不弹框、把判断模型的理由挂到工具卡上；要问人
-/// 时在审批框末尾写明为什么问。
+/// 始终拒绝」过的照旧直接算数，只是无人值守的一轮里硬清单不吃「始终允许」），放行了
+/// 不弹框、把判断模型的理由挂到工具卡上；要问人时在审批框末尾写明为什么问。
 async fn gate(
     exec: &Context,
     perms: &Permissions,
@@ -747,10 +747,26 @@ async fn gate(
     summary: &str,
 ) -> Decision {
     let agent = subagent_of(exec);
-    let smart = perms.effective_mode(agent.as_deref()) == PermissionMode::Smart
-        && !perms.is_always(key)
-        && !perms.is_never(key);
-    if !smart {
+    let mode = perms.effective_mode(agent.as_deref());
+    if mode == PermissionMode::Allow || perms.is_never(key) {
+        return perms.decide(key, summary, agent).await;
+    }
+    if perms.is_always(key) {
+        // 点过「始终允许」：交互时照算。无人值守的一轮（定时任务）里硬清单不吃它——
+        // 用户当时是看着点的，没人看着时 sudo、rm -rf 这几样还是要人点头（等不到就按
+        // 超时拒绝）；别的照旧直接跑，不去问判断模型。
+        if perms.run_approval().is_some() {
+            let cwd = crate::session::cwd::session_cwd(exec);
+            if let approval::Rule::Hard(why) =
+                approval::classify(&call.name, key, &call.arguments, &cwd)
+            {
+                let summary = format!("{summary}\n智能授权：高风险（{why}），没人看着时需要你确认");
+                return perms.decide_strict(key, &summary, agent).await;
+            }
+        }
+        return Decision::Allowed;
+    }
+    if mode != PermissionMode::Smart {
         return perms.decide(key, summary, agent).await;
     }
     match approval::smart_verdict(exec, &call.name, key, &call.arguments).await {
@@ -2080,6 +2096,94 @@ mod pre_execute_tests {
                 cordis_base::types::PERMISSION_DENIED_TOOL_RESULT
             );
         }
+    }
+
+    /// 这一页点过 bash 的「始终允许」：交互时照算（sudo 也放行，和以前一样）；无人值守的
+    /// 一轮里硬清单不吃它——没人看着时 sudo 还是要人点头，等不到就按超时拒绝；别的命令
+    /// 照旧按「始终允许」直接跑，不去问判断模型（#312 审阅）。
+    #[tokio::test]
+    async fn an_unattended_run_does_not_let_always_allow_skip_the_hard_list() {
+        use crate::host::approval::{ApprovalJudge, Judged};
+        use crate::host::permissions::RunApproval;
+        use crate::host::settings::{AppSettings, PermissionMode};
+        use crate::names::{APPROVAL_JUDGE, SETTINGS};
+        use cordis_base::acp::PermissionOptionKind;
+        use cordis_base::types::{LogEvent, UserMessage};
+
+        let ctx = Context::new();
+        let settings = AppSettings::new("x");
+        settings.set_permission_mode(PermissionMode::Ask);
+        let _s = ctx.provide(SETTINGS, settings).unwrap();
+        let _perm = ctx
+            .provide(PERMISSIONS, Permissions::new(ctx.clone()))
+            .unwrap();
+        let _sessions = ctx.provide(SESSIONS, Sessions::new(ctx.clone())).unwrap();
+        let judged = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = judged.clone();
+        let _judge = ctx
+            .provide(
+                APPROVAL_JUDGE,
+                ApprovalJudge::scripted(move |_| {
+                    seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Judged::Ask("拿不准".into())
+                }),
+            )
+            .unwrap();
+        let tools = Tools::workspace(ctx.clone());
+        let perms = ctx.get::<Permissions>(PERMISSIONS).unwrap();
+        let sessions = ctx.get::<Sessions>(SESSIONS).unwrap();
+
+        // 用户在这一页对 bash 点了「始终允许」。
+        let t = tools.clone();
+        let first = tokio::spawn(async move {
+            t.execute(call_as("a", "bash", r#"{"command":"echo $(echo first)"}"#))
+                .await
+        });
+        wait_front(&perms).await.expect("询问档要问");
+        perms.resolve(PermissionOptionKind::AllowAlways);
+        assert!(first.await.unwrap().content.contains("first"));
+        // 交互时「始终允许」照算：sudo 不弹框（`-n`：要密码就直接失败，不会卡住）。
+        let sudo = r#"{"command":"sudo -n true 2>/dev/null; echo sudo-ran"}"#;
+        let out = tools.execute(call_as("b", "bash", sudo)).await;
+        assert!(out.content.contains("sudo-ran"), "{}", out.content);
+
+        sessions.arm_run_approval(
+            "跑日报",
+            RunApproval {
+                mode: PermissionMode::Smart,
+                timeout: Some(std::time::Duration::from_millis(150)),
+                task_id: "cron-x".into(),
+            },
+        );
+        sessions.append(LogEvent::User(UserMessage::new("跑日报")));
+
+        let t = tools.clone();
+        let run = tokio::spawn(async move { t.execute(call_as("c", "bash", sudo)).await });
+        let front = wait_front(&perms)
+            .await
+            .expect("无人值守时硬清单不吃「始终允许」");
+        assert!(
+            front.summary.contains("高风险（sudo）"),
+            "{}",
+            front.summary
+        );
+        let out = run.await.unwrap();
+        assert!(out.is_error);
+        assert!(out.content.contains("没人批准"), "{}", out.content);
+
+        let other = tools
+            .execute(call_as("d", "bash", r#"{"command":"echo $(echo other)"}"#))
+            .await;
+        assert!(
+            other.content.contains("other"),
+            "别的照旧按始终允许：{}",
+            other.content
+        );
+        assert_eq!(
+            judged.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "始终允许过的不去问判断模型"
+        );
     }
 
     /// 无人值守的一轮（定时任务）：权限请求等不到人就按拒绝处理，告诉模型用户不在、

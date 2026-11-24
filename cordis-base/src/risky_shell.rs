@@ -116,36 +116,57 @@ fn segments(command: &str) -> Option<Vec<Vec<String>>> {
     Some(out)
 }
 
-/// 包在真正的程序外面、不改变「跑的是谁」的前缀。
+/// 包在真正的程序外面、不改变「跑的是谁」的前缀。它们的参数形状各不相同（`nice -n 5`、
+/// `env -u FOO`、`timeout --foreground 10`、`flock 文件`），不逐个解析：后面每个位置都当成
+/// 真正的程序再查一遍——宁可多认，也不能让加个前缀就绕过硬清单。
 const WRAPPERS: &[&str] = &[
     "env",
     "nohup",
     "time",
     "nice",
+    "ionice",
+    "chrt",
+    "taskset",
     "exec",
     "command",
     "builtin",
     "caffeinate",
+    "timeout",
+    "gtimeout",
+    "stdbuf",
+    "unbuffer",
+    "setsid",
+    "flock",
+    "watch",
+    "busybox",
+    "xargs",
 ];
 
+/// `FOO=1`：命令前的环境变量赋值。
+fn is_assignment(word: &str) -> bool {
+    word.split_once('=').is_some_and(|(key, _)| {
+        !key.is_empty() && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    })
+}
+
 fn segment_reason(words: &[String], depth: usize) -> Option<&'static str> {
-    let mut i = 0;
-    // `FOO=1 cmd`、`env FOO=1 cmd`、`nohup cmd`、`timeout 10 cmd`：找到真正的程序。
-    while let Some(w) = words.get(i) {
-        let w = w.as_str();
-        if (w.contains('=') && !w.starts_with('-')) || WRAPPERS.contains(&w) {
-            i += 1;
-        } else if w == "timeout" {
-            i += 2;
-        } else if w.starts_with('-') && i > 0 {
-            // 包装程序自己的参数（`nice -n 5`、`env -i`）。
-            i += 1;
-        } else {
-            break;
-        }
+    // `FOO=1 cmd`：跳过前面的赋值，找到真正的程序。
+    let start = words.iter().position(|w| !is_assignment(w))?;
+    if WRAPPERS.contains(&program(&words[start])) {
+        return (start + 1..words.len()).find_map(|at| program_reason(&words[at..], depth));
     }
-    let prog = words.get(i)?.rsplit('/').next().unwrap_or_default();
-    let args = &words[i + 1..];
+    program_reason(&words[start..], depth)
+}
+
+/// 去掉路径，只留程序名（`/usr/bin/sudo` → `sudo`）。
+fn program(word: &str) -> &str {
+    word.rsplit('/').next().unwrap_or_default()
+}
+
+/// `words[0]` 是程序，后面是它的参数。
+fn program_reason(words: &[String], depth: usize) -> Option<&'static str> {
+    let prog = program(words.first()?);
+    let args = &words[1..];
     match prog {
         "sudo" | "doas" | "su" | "pkexec" => Some("sudo"),
         "rm" if rm_is_recursive_force(args) => Some("rm -rf"),
@@ -169,11 +190,6 @@ fn segment_reason(words: &[String], depth: usize) -> Option<&'static str> {
                 .and_then(|s| scan(s, depth + 1))
         }
         "eval" => scan(&args.join(" "), depth + 1),
-        "xargs" => {
-            // `xargs rm -rf`：xargs 后面第一个不是参数的词起是命令。
-            let rest = args.iter().position(|a| !a.starts_with('-'))?;
-            segment_reason(&args[rest..], depth)
-        }
         _ => None,
     }
 }
@@ -296,6 +312,32 @@ mod tests {
             ("echo 'unclosed", "引号没配对，看不清这条命令"),
         ] {
             assert_eq!(risky_reason(cmd), Some(why), "{cmd}");
+        }
+    }
+
+    /// 包装命令带着自己的参数（`nice -n 5`、`env -u FOO`、`timeout --foreground 10`、
+    /// `busybox`）也认得出后面真正跑的程序——硬清单不能靠加个前缀绕过去（#312 审阅）。
+    #[test]
+    fn wrapper_options_do_not_hide_the_real_program() {
+        for (cmd, why) in [
+            ("nice -n 5 sudo rm -rf /", "sudo"),
+            ("env -u FOO sudo ls", "sudo"),
+            ("env -i PATH=/bin sudo ls", "sudo"),
+            ("timeout --foreground 10 sudo ls", "sudo"),
+            ("timeout -s KILL 10 rm -rf build", "rm -rf"),
+            ("busybox rm -rf build", "rm -rf"),
+            ("stdbuf -oL git push -f", "git push --force"),
+            ("nohup nice -n 19 scp a host:/tmp", "把文件传出去"),
+            ("ionice -c 3 nice -n 19 sudo true", "sudo"),
+        ] {
+            assert_eq!(risky_reason(cmd), Some(why), "{cmd}");
+        }
+        for cmd in [
+            "nice -n 5 cargo test",
+            "timeout 60 npm test",
+            "env -u CI make",
+        ] {
+            assert_eq!(risky_reason(cmd), None, "{cmd}");
         }
     }
 

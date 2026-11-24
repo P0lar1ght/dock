@@ -54,11 +54,13 @@ impl ApprovalJudge {
 
     /// 判一次。`page` 是会话身份：结论按页记，别的页同样的操作照样再判。
     pub async fn judge(&self, exec: &Context, page: &str, request: JudgeRequest) -> Judged {
+        // 用户的要求也在键里：同一页换了提问，同样的操作要按新的要求再判。
         let key = format!(
-            "{page}\u{0}{}\u{0}{}\u{0}{}",
+            "{page}\u{0}{}\u{0}{}\u{0}{}\u{0}{}",
             request.tool,
             request.cwd.display(),
-            request.action
+            request.action,
+            request.request
         );
         if let Some(hit) = self.cache.lock().unwrap().get(&key) {
             return hit.clone();
@@ -189,5 +191,11 @@ mod tests {
         judge.judge(&ctx, "main", req("flaky")).await;
         judge.judge(&ctx, "main", req("flaky")).await;
         assert_eq!(calls.load(Ordering::SeqCst), 4, "没判成的不记");
+        let asked_again = JudgeRequest {
+            request: "这次只看看，别改东西".into(),
+            ..req("cargo test")
+        };
+        judge.judge(&ctx, "main", asked_again).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 5, "换了提问另判");
     }
 }
