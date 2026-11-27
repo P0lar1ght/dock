@@ -213,7 +213,12 @@ async fn curl(port: u16, args: &[&str]) -> (bool, String) {
 
 /// 记录是在正文读完、记录的最后一份引用放掉时交出来的：等一会儿。
 async fn wait_flows(flows: &Arc<Mutex<Vec<Flow>>>, n: usize) -> Vec<Flow> {
-    for _ in 0..100 {
+    wait_flows_for(flows, n, Duration::from_secs(2)).await
+}
+
+async fn wait_flows_for(flows: &Arc<Mutex<Vec<Flow>>>, n: usize, limit: Duration) -> Vec<Flow> {
+    let deadline = std::time::Instant::now() + limit;
+    while std::time::Instant::now() < deadline {
         if flows.lock().unwrap().len() >= n {
             break;
         }
@@ -339,13 +344,33 @@ async fn a_client_that_rejects_dock_is_passed_through_afterwards() {
     let rig = rig(vec![pki.ca_der]).await;
     let only_upstream = upstream_ca.path().display().to_string();
     let url = format!("https://localhost:{server}/again");
-    let (ok, _) = curl(rig.port, &["--cacert", &only_upstream, &url]).await;
-    assert!(!ok, "信不过 Dock 根证书的客户端第一次会失败");
+    let (ok, first_out) = curl(rig.port, &["--cacert", &only_upstream, &url]).await;
+    assert!(!ok, "信不过 Dock 根证书的客户端第一次会失败：{first_out}");
     // curl 发完 alert 就退出了，代理读到它、记进直通名单是异步的：等代理发出这一次的出错
     // 记录（和记名单在同一个分支里，紧跟在后面）再看名单。以前 curl 一返回就看，
     // Linux CI 上跑得快，看早了，名单还是空的。
     let first = wait_flows(&rig.flows, 1).await;
-    let rejected = first.first().expect("第一次要记一条出错记录");
+    if first.is_empty() {
+        // 诊断（只在已经失败时跑）：再等一会儿，看代理最后记成了什么。
+        let late = wait_flows_for(&rig.flows, 1, Duration::from_secs(10)).await;
+        let late: Vec<_> = late
+            .iter()
+            .map(|f| {
+                (
+                    f.kind,
+                    f.decrypted,
+                    f.note.clone(),
+                    f.error.clone(),
+                    f.duration_ms,
+                )
+            })
+            .collect();
+        panic!(
+            "第一次要记一条出错记录；curl：{first_out}；直通名单：{:?}；10 秒后的记录：{late:?}",
+            rig.learned.lock().unwrap()
+        );
+    }
+    let rejected = &first[0];
     assert!(
         rejected
             .error
