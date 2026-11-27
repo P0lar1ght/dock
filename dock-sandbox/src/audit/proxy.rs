@@ -384,7 +384,7 @@ impl Proxy {
                         buf.push(byte[0]);
                     }
                     let line = String::from_utf8_lossy(&buf);
-                    if !line.split_whitespace().nth(1).is_some_and(|c| c == "200") {
+                    if line.split_whitespace().nth(1).is_none_or(|c| c != "200") {
                         return Err(io::Error::other(format!(
                             "上游代理拒绝：{}",
                             line.lines().next().unwrap_or("")
