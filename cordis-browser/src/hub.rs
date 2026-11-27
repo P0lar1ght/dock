@@ -413,27 +413,52 @@ impl BrowserHub {
         }
     }
 
+    /// 打开 `url`：本会话还没有页就先开一个（[`BrowserHub::create_group`]），然后在活动页上
+    /// 跳转——和已有页时同一条路：被对话框挡着就报错指路，跳转本身和对话框、[`CALL_LIMIT`]
+    /// 赛跑（第一页加载时弹的框也一样）。
     async fn open(&self, session: &str, url: &str) -> Result<String, String> {
-        if let Some(group) = self.live_group(session).await {
-            let mut g = group.lock().await;
-            // 已经有页：等于 navigate，同样会被对话框挡住（含 beforeunload）。
-            let watch = g.dialog_watch();
-            if let Some(blocked) = blocked_by_dialog(&watch, "browser_open") {
-                return Err(blocked.text);
+        let fresh = self.live_group(session).await.is_none();
+        if fresh {
+            // 拉起 / 连上 Chromium、开空白页、挂监听：整段也有上限，不让第一次调用无限挂着。
+            tokio::time::timeout(CALL_LIMIT, self.create_group(session))
+                .await
+                .map_err(|_| {
+                    format!(
+                        "opening a tab did not finish within {}s (Chromium did not start or answer)",
+                        CALL_LIMIT.as_secs()
+                    )
+                })??;
+            if url == "about:blank" {
+                return Ok("opened about:blank".into());
             }
-            let nav = async {
-                match g.navigate(url).await {
-                    Ok(cur) => CallOutput::ok(format!("navigated to {cur}")),
-                    Err(e) => CallOutput::err(e),
-                }
-            };
-            let out = guarded("browser_open", CALL_LIMIT, Some(watch), nav).await;
-            return if out.is_error {
-                Err(out.text)
-            } else {
-                Ok(out.text)
-            };
         }
+        let group = self
+            .live_group(session)
+            .await
+            .ok_or_else(|| NEED_OPEN.to_string())?;
+        let mut g = group.lock().await;
+        // 已经有页：等于 navigate，同样会被对话框挡住（含 beforeunload）。
+        let watch = g.dialog_watch();
+        if let Some(blocked) = blocked_by_dialog(&watch, "browser_open") {
+            return Err(blocked.text);
+        }
+        let verb = if fresh { "opened" } else { "navigated to" };
+        let nav = async {
+            match g.navigate(url).await {
+                Ok(cur) => CallOutput::ok(format!("{verb} {cur}")),
+                Err(e) => CallOutput::err(e),
+            }
+        };
+        let out = guarded("browser_open", CALL_LIMIT, Some(watch), nav).await;
+        if out.is_error {
+            Err(out.text)
+        } else {
+            Ok(out.text)
+        }
+    }
+
+    /// 给本会话开第一个标签页（空白页）：没有 Chromium 就连上已经在跑的、或者拉起一个。
+    async fn create_group(&self, session: &str) -> Result<(), String> {
         let fresh = {
             let mut chromium = self.chromium.lock().await;
             if chromium.is_none() {
@@ -441,11 +466,7 @@ impl BrowserHub {
                 *chromium = Some(Chromium::attach_or_launch(headed).await?);
             }
             let chromium = chromium.as_ref().expect("just ensured");
-            ConnectedSession::open(chromium, Some(url)).await?
-        };
-        let url_now = match fresh.active_page() {
-            Ok(p) => p.url().await.ok().flatten().unwrap_or_else(|| url.into()),
-            Err(_) => url.into(),
+            ConnectedSession::open(chromium).await?
         };
         let (targets, active) = (fresh.target_ids(), fresh.active_target_id());
         let group = Arc::new(Mutex::new(fresh));
@@ -460,19 +481,21 @@ impl BrowserHub {
                 }
             }
         };
-        if loser.is_none() {
-            self.index
-                .lock()
-                .unwrap()
-                .insert(session.to_string(), SessionTabs { targets, active });
-            self.publish();
-        }
-        if let Some(loser) = loser {
-            if let Ok(g) = Arc::try_unwrap(loser) {
-                g.into_inner().shutdown().await;
+        match loser {
+            None => {
+                self.index
+                    .lock()
+                    .unwrap()
+                    .insert(session.to_string(), SessionTabs { targets, active });
+                self.publish();
+            }
+            Some(loser) => {
+                if let Ok(g) = Arc::try_unwrap(loser) {
+                    g.into_inner().shutdown().await;
+                }
             }
         }
-        Ok(format!("opened {url_now}"))
+        Ok(())
     }
 
     async fn close(&self, session: &str) {

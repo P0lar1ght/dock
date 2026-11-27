@@ -19,6 +19,20 @@ const guidePath = process.argv[3];
 const { chromium } = await import(pathToFileURL(playwrightPath).href);
 
 const RESULT_MAX = 12_000;
+/**
+ * 动作 / 等待的默认超时。Playwright 默认 30 秒：定位不到、按钮一直灰着时每次白等 30 秒
+ * （实测 21 次）。参考 Codex 的浏览器插件：日常动作不手写超时，慢的那一步再显式给。
+ */
+const ACTION_TIMEOUT_MS = 10_000;
+const NAVIGATION_TIMEOUT_MS = 30_000;
+/**
+ * `page.goto` 没写 `waitUntil` 时：到 DOMContentLoaded 就返回，`load` 最多再等这么久（和
+ * browser_navigate 一致）。Playwright 默认等 `load`，图片、广告、统计脚本常把它拖上好几秒，
+ * 页面早就能读能点了；之后的定位器本来就会自己等元素出现。写了 `waitUntil` 照写的来。
+ */
+const LOAD_GRACE_MS = 1_000;
+/** 定位超时时附上的页面结构（ARIA 快照）最多这么多字。 */
+const SNAPSHOT_ON_ERROR_MAX = 3_000;
 const AsyncFunction = (async () => {}).constructor;
 
 /** 每个会话一份，跨调用保留（模型把句柄、中间结果放这里）。 */
@@ -39,7 +53,11 @@ async function browserFor(ws) {
   if (connected && connected.ws === ws && connected.browser.isConnected()) return connected.browser;
   const browser = await chromium.connectOverCDP(ws);
   connected = { ws, browser };
-  for (const ctx of browser.contexts()) keepDialogsOpen(ctx);
+  for (const ctx of browser.contexts()) {
+    keepDialogsOpen(ctx);
+    ctx.setDefaultTimeout(ACTION_TIMEOUT_MS);
+    ctx.setDefaultNavigationTimeout(NAVIGATION_TIMEOUT_MS);
+  }
   return browser;
 }
 
@@ -47,8 +65,23 @@ async function browserFor(ws) {
  * Playwright 在页面没有 dialog 监听时会自动关掉对话框。Dock 的规矩是对话框交给 agent
  * 处理（browser_handle_dialog），所以每个页挂一个空监听，让它留着。
  */
+function fastGoto(page) {
+  if (page.__dockFastGoto) return;
+  page.__dockFastGoto = true;
+  const goto = page.goto.bind(page);
+  page.goto = async (url, opts = {}) => {
+    if (opts.waitUntil) return goto(url, opts);
+    const response = await goto(url, { ...opts, waitUntil: "domcontentloaded" });
+    await page.waitForLoadState("load", { timeout: LOAD_GRACE_MS }).catch(() => {});
+    return response;
+  };
+}
+
 function keepDialogsOpen(ctx) {
-  const hold = (p) => p.on("dialog", () => {});
+  const hold = (p) => {
+    p.on("dialog", () => {});
+    fastGoto(p);
+  };
   ctx.pages().forEach(hold);
   ctx.on("page", hold);
 }
@@ -93,6 +126,99 @@ function hintsFor(code) {
     );
   }
   return hints;
+}
+
+/** 一页里最多带几个 iframe 的内容进快照。 */
+const SNAPSHOT_FRAMES_MAX = 10;
+
+/**
+ * ARIA 快照。看整页（`selector` 是 `body`）时把 iframe 里面也带上：`locator.ariaSnapshot()`
+ * 不进 iframe，只给一行 `- iframe`，iframe 里的表单对模型是看不见的。每个 iframe 一段，
+ * 标出它的网址 / name，好用 `page.frameLocator(…)` 或 `page.frame({ url })` 去动它。
+ */
+async function ariaTree(page, selector = "body", opts = {}) {
+  const main = await page.locator(selector).ariaSnapshot(opts);
+  if (selector !== "body") return main;
+  const frames = page
+    .frames()
+    .filter((f) => f !== page.mainFrame() && f.url() && f.url() !== "about:blank")
+    .slice(0, SNAPSHOT_FRAMES_MAX);
+  const parts = [main];
+  for (const f of frames) {
+    const tree = await f
+      .locator("body")
+      .ariaSnapshot({ timeout: Math.min(opts.timeout ?? 2000, 2000) })
+      .catch(() => null);
+    if (!tree) continue;
+    const name = f.name() ? ` name=${JSON.stringify(f.name())}` : "";
+    const body = tree
+      .split("\n")
+      .map((l) => `  ${l}`)
+      .join("\n");
+    parts.push(`- frame ${JSON.stringify(f.url())}${name}:\n${body}`);
+  }
+  return parts.join("\n");
+}
+
+/** 这些请求可能一直不结束（推送流、媒体），不算「还在加载」。 */
+const LONG_LIVED = new Set(["eventsource", "websocket", "media"]);
+
+/**
+ * 等页面安静下来：本页没有在飞的请求，DOM 内容（增删节点、改文字）也有 `quietMs` 没变；
+ * 最多 `timeoutMs`，到点照常返回（`settled: false`），不抛错。比固定 sleep 快：页面一停就走。
+ * `inflight` 是本页在飞的请求（脚本开始后才开始的那些）。
+ */
+async function settleOn(p, inflight, { quietMs = 500, timeoutMs = 5000 } = {}) {
+  const start = Date.now();
+  const mutations = () =>
+    p
+      .evaluate(() => {
+        if (!window.__dockMutations) {
+          const box = { n: 0 };
+          new MutationObserver(() => box.n++).observe(document, { subtree: true, childList: true, characterData: true });
+          window.__dockMutations = box;
+        }
+        return window.__dockMutations.n;
+      })
+      // 正在跳转（执行上下文没了）：当成还在变。
+      .catch(() => -1);
+  let last = await mutations();
+  let quietSince = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const n = await mutations();
+    if (n === -1 || n !== last || (inflight?.size ?? 0) > 0) {
+      last = n;
+      quietSince = Date.now();
+      continue;
+    }
+    if (Date.now() - quietSince >= quietMs) return { settled: true, ms: Date.now() - start };
+  }
+  return { settled: false, ms: Date.now() - start, pendingRequests: inflight?.size ?? 0 };
+}
+
+/** 定位超时、而且根本没找到元素（call log 里没有 `resolved to`）：那时页面上有什么。 */
+async function pageNowFor(page, error) {
+  if (!/Timeout \d+ms exceeded/.test(error) || /resolved to/.test(error)) return null;
+  try {
+    const tree = await ariaTree(page, "body", { timeout: 2000 });
+    const chars = Array.from(tree);
+    return chars.length > SNAPSHOT_ON_ERROR_MAX
+      ? `${chars.slice(0, SNAPSHOT_ON_ERROR_MAX).join("")}\n…(truncated, ${chars.length} chars)`
+      : tree;
+  } catch {
+    return null;
+  }
+}
+
+/** 脚本跑完时活动页的网址和标题（给模型确认跳到了哪儿，省一次截图）。页卡住时不等。 */
+async function pageState(page) {
+  if (!page || page.isClosed()) return null;
+  const title = await Promise.race([
+    page.title().catch(() => ""),
+    new Promise((resolve) => setTimeout(() => resolve(""), 1000)),
+  ]);
+  return { url: page.url(), title };
 }
 
 /**
@@ -147,7 +273,7 @@ async function readPagesIn(context, urls, opts = {}, scriptDeadline = Infinity) 
 
 /** 只有一个表达式时当返回值（`page.title()`）；否则当函数体，用 return 给结果。 */
 function compile(code) {
-  const params = ["page", "context", "browser", "state", "log", "snapshot", "screenshot", "docs", "onDialog", "tabs", "readPages"];
+  const params = ["page", "context", "browser", "state", "log", "snapshot", "screenshot", "docs", "onDialog", "tabs", "readPages", "settle"];
   try {
     return new AsyncFunction(...params, `return (${code}\n);`);
   } catch {
@@ -194,7 +320,7 @@ async function run(req) {
   const state = states.get(req.session) ?? {};
   states.set(req.session, state);
   const log = (...args) => logs.push(plain(args.map((a) => (typeof a === "string" ? a : show(a))).join(" ")));
-  const snapshot = (selector = "body") => page.locator(selector).ariaSnapshot();
+  const snapshot = (selector = "body", target = page) => ariaTree(target, selector);
   const screenshot = async (opts = {}) => {
     const file = path.join(req.shotDir, `js-${Date.now()}-${images.length}.png`);
     await page.screenshot({ ...opts, path: file });
@@ -218,6 +344,9 @@ async function run(req) {
   // 只认 tabs.new 开的页：直接 context.newPage() 的页分不清是哪个会话的，不收。
   const order = [...(req.tabs ?? [req.target])];
   const opened = [];
+  /** tabs.new 开的页（按 target id）：回话时只报还开着的，关掉的不用 Rust 侧去收。 */
+  const openedPages = new Map();
+  const stillOpen = () => opened.filter((id) => !openedPages.get(id)?.isClosed());
   let activate = null;
   // 本会话的页都要盯对话框（watch 在下面定义好 dialogListener 之后才可用）。
   let watch = () => {};
@@ -245,9 +374,20 @@ async function run(req) {
       const id = await targetIdOf(p);
       order.push(id);
       opened.push(id);
+      openedPages.set(id, p);
       watch(p);
       if (url) await p.goto(url);
       return p;
+    },
+    async close(which) {
+      const p = typeof which === "number" ? await pageAt(which) : which;
+      const id = await targetIdOf(p);
+      if (!order.includes(id)) throw new Error("tabs.close: not one of this session's tabs");
+      if (order.length === 1) throw new Error("tabs.close: this is the session's last tab (browser_close closes the session)");
+      await p.close();
+      order.splice(order.indexOf(id), 1);
+      if (activate === id) activate = null;
+      return order.length;
     },
     async select(which) {
       const p = typeof which === "number" ? await pageAt(which) : which;
@@ -297,10 +437,29 @@ async function run(req) {
   // 盯本会话的每一页：开始时的活动页、tabs.get / new / select 拿到的页、这些页点出来的弹出页。
   // 以前只盯活动页：别的页上弹框时 onDialog 不生效、也不提前返回，脚本卡到超时。
   const watched = new Set();
+  /** 每页在飞的请求（settle 用）。 */
+  const inflight = new Map();
+  // Service Worker 发的请求没有 frame（`frame()` 会抛错）：不归哪一页，不算。
+  const pageOfRequest = (r) => {
+    try {
+      return r.frame().page();
+    } catch {
+      return null;
+    }
+  };
+  const onRequest = (r) => {
+    if (LONG_LIVED.has(r.resourceType())) return;
+    inflight.get(pageOfRequest(r))?.add(r);
+  };
+  const onRequestDone = (r) => inflight.get(pageOfRequest(r))?.delete(r);
   watch = (p) => {
     if (watched.has(p)) return;
     watched.add(p);
+    inflight.set(p, new Set());
     p.on("dialog", dialogListener);
+    p.on("request", onRequest);
+    p.on("requestfinished", onRequestDone);
+    p.on("requestfailed", onRequestDone);
   };
   watch(page);
   const onPopup = async (p) => {
@@ -316,14 +475,23 @@ async function run(req) {
   // 留 3 秒给脚本收尾、回话：readPages 到点收手，不拖到执行器超时重启。
   const scriptDeadline = Date.now() + Math.max(1000, req.timeoutMs - 3000);
   const readPages = (urls, opts) => readPagesIn(page.context(), urls, opts, scriptDeadline);
-  const script = fn(page, page.context(), browser, state, log, snapshot, screenshot, docs, onDialog, tabs, readPages);
+  const settle = (opts = {}) => {
+    const p = opts.page ?? page;
+    watch(p);
+    return settleOn(p, inflight.get(p), opts);
+  };
+  const script = fn(page, page.context(), browser, state, log, snapshot, screenshot, docs, onDialog, tabs, readPages, settle);
   script.then(
     () => busy.delete(req.session),
     () => busy.delete(req.session),
   );
+  // 跑完之后的活动页：tabs.select 指定的那页，否则还是开始时那页。
+  const activePage = async () => (activate ? await pageFor(browser, activate).catch(() => null) : page);
   try {
     const out = await Promise.race([script.then((value) => ({ value })), dialog.then((d) => ({ dialog: d })), timeout]);
-    return { ok: true, result: clip(show(out.value)), logs, images, dialog: out.dialog, opened, activate, hints: hintsFor(req.code) };
+    // 对话框开着时页面不响应，不去读标题。
+    const state = out.dialog ? null : await pageState(await activePage());
+    return { ok: true, result: clip(show(out.value)), logs, images, dialog: out.dialog, opened: stillOpen(), activate, page: state, hints: hintsFor(req.code) };
   } catch (e) {
     if (e instanceof ScriptTimeout) {
       return {
@@ -334,18 +502,27 @@ async function run(req) {
         fatal: true,
       };
     }
+    const error = clip(plain(e?.stack?.split("\n").slice(0, 6).join("\n") ?? String(e)));
+    const current = await activePage();
     return {
       ok: false,
-      error: clip(plain(e?.stack?.split("\n").slice(0, 6).join("\n") ?? String(e))),
+      error,
       logs,
       images,
-      opened,
+      opened: stillOpen(),
       activate,
+      page: await pageState(current),
+      pageNow: current ? await pageNowFor(current, error) : null,
       hints: hintsFor(req.code),
     };
   } finally {
     clearTimeout(timer);
-    for (const p of watched) p.off("dialog", dialogListener);
+    for (const p of watched) {
+      p.off("dialog", dialogListener);
+      p.off("request", onRequest);
+      p.off("requestfinished", onRequestDone);
+      p.off("requestfailed", onRequestDone);
+    }
     page.context().off("page", onPopup);
   }
 }
