@@ -61,6 +61,7 @@
   - 上游证书过不了系统校验（自签的开发服务器、客户端加了 `-k`）：交给客户端自己判断。
   - 客户端只说 h2（gRPC）：解密后只能讲 HTTP/1.1。
   - 客户端拒绝了 Dock 根证书：那一次失败，主机记进 `$DOCK_HOME/audit/passthrough.json`，之后一直原样转发。
+    两种都认：握手里就拒绝的（macOS 的 curl），和握手做完才验证书、3 秒内一个字节不发就断开的（Linux 上 curl 8 + OpenSSL）。
   - 已知不读证书环境变量的：macOS 上的 Go、Java（看 CONNECT 的 User-Agent）。
   - 不是 TLS 的隧道（SSH over CONNECT 之类）。
 - 凭据类的头（`Authorization`、`Cookie`、`Set-Cookie`、`X-Api-Key`…）遮住，留长度和 sha256 前 12 位：

@@ -346,9 +346,9 @@ async fn a_client_that_rejects_dock_is_passed_through_afterwards() {
     let url = format!("https://localhost:{server}/again");
     let (ok, first_out) = curl(rig.port, &["--cacert", &only_upstream, &url]).await;
     assert!(!ok, "信不过 Dock 根证书的客户端第一次会失败：{first_out}");
-    // curl 发完 alert 就退出了，代理读到它、记进直通名单是异步的：等代理发出这一次的出错
-    // 记录（和记名单在同一个分支里，紧跟在后面）再看名单。以前 curl 一返回就看，
-    // Linux CI 上跑得快，看早了，名单还是空的。
+    // 代理记名单和 curl 退出不同步：等它发出这一次的出错记录（和记名单在一处）再看名单。
+    // 拒绝有两种：macOS 的 curl 在握手里就拒绝；Linux 上 curl 8 + OpenSSL 握手做完才验证书，
+    // 验不过直接断开（见下一条用例）。
     let first = wait_flows(&rig.flows, 1).await;
     if first.is_empty() {
         // 诊断（只在已经失败时跑）：再等一会儿，看代理最后记成了什么。
@@ -390,6 +390,49 @@ async fn a_client_that_rejects_dock_is_passed_through_afterwards() {
         last.note.as_deref().unwrap_or("").contains("拒绝过"),
         "{last:?}"
     );
+}
+
+/// 有的客户端握手做完才自己验证书（curl 8 + OpenSSL，Linux 上的常态）：验不过就一个字节
+/// 不发、直接断开，不在握手里拒绝。这也算拒绝了 Dock 根证书：记进直通名单，之后原样转发。
+/// 以前代理只认握手中途的拒绝，这种客户端每次都失败、名单永远学不到。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_that_drops_right_after_the_handshake_is_passed_through_afterwards() {
+    let pki = test_pki();
+    let server = serve(Some(pki.server)).await;
+    let rig = rig(vec![pki.ca_der]).await;
+    let mut tcp = tokio::net::TcpStream::connect(("127.0.0.1", rig.port))
+        .await
+        .unwrap();
+    tcp.write_all(
+        format!("CONNECT localhost:{server} HTTP/1.1\r\nHost: localhost:{server}\r\n\r\n")
+            .as_bytes(),
+    )
+    .await
+    .unwrap();
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") {
+        assert_eq!(tcp.read(&mut byte).await.unwrap(), 1, "代理没回 CONNECT");
+        head.push(byte[0]);
+    }
+    assert!(String::from_utf8_lossy(&head).contains(" 200"), "{head:?}");
+    // 握手时什么证书都收，握手做完就断开、不发请求。
+    let connector = tokio_native_tls::TlsConnector::from(
+        native_tls::TlsConnector::builder()
+            .danger_accept_invalid_certs(true)
+            .build()
+            .unwrap(),
+    );
+    let tls = connector.connect("localhost", tcp).await.unwrap();
+    drop(tls);
+
+    let flows = wait_flows(&rig.flows, 1).await;
+    let f = flows.first().expect("要记一条出错记录");
+    assert!(
+        f.error.as_deref().unwrap_or("").contains("没发请求"),
+        "{f:?}"
+    );
+    assert_eq!(rig.learned.lock().unwrap().as_slice(), ["localhost"]);
 }
 
 /// 沙箱策略的关卡：阻断的连接回 403、记一条，命令拿到的是明确的拒绝，别的照常走。

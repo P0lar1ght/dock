@@ -57,6 +57,9 @@ type ProxyBody = BoxBody<Bytes, hyper::Error>;
 const FIRST_BYTE_WAIT: Duration = Duration::from_secs(3);
 const HELLO_MAX: usize = 64 * 1024;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+/// 解密的连接握手做完后，等客户端第一个请求的时间：这之内一个字节不发就断开的，当它拒绝了
+/// Dock 根证书（握手后才验证书的客户端）。过了这个时间还没说话的照常等着。
+const FIRST_REQUEST_WAIT: Duration = Duration::from_secs(3);
 
 #[derive(Clone)]
 pub struct Options {
@@ -419,20 +422,29 @@ impl Proxy {
             Err(e) => return self.emit_error(&tag, "https", &name, port, e),
         };
         let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
-        let tls = match acceptor.accept(Rewind::new(prefix, client)).await {
+        let mut tls = match acceptor.accept(Rewind::new(prefix, client)).await {
             Ok(tls) => tls,
             Err(e) => {
                 let why = format!("客户端拒绝了 Dock 根证书（{e}），之后这个主机原样转发");
-                self.passthrough
-                    .lock()
-                    .unwrap()
-                    .insert(name.to_ascii_lowercase());
-                if let Some(learn) = &self.learn {
-                    learn(&name, &why);
-                }
-                return self.emit_error(&tag, "https", &name, port, why);
+                return self.learn_rejection(&tag, &name, port, why);
             }
         };
+        // 有的客户端握手做完才自己验证书（curl 8 + OpenSSL，Linux 上的常态）：验不过就一个
+        // 字节不发、直接断开。握手后很快断开、什么都没发的，也当它拒绝了 Dock 根证书——
+        // 不然这种客户端每次都失败。一直不说话的（连接池预热）不算，照常等。
+        let mut first = vec![0u8; 4096];
+        let first = match tokio::time::timeout(FIRST_REQUEST_WAIT, tls.read(&mut first)).await {
+            Ok(Ok(0)) | Ok(Err(_)) => {
+                let why = "客户端握手后没发请求就断开了（多半是握手后才验证书、不信 Dock 根证书），之后这个主机原样转发".to_string();
+                return self.learn_rejection(&tag, &name, port, why);
+            }
+            Ok(Ok(n)) => {
+                first.truncate(n);
+                first
+            }
+            Err(_) => Vec::new(),
+        };
+        let tls = Rewind::new(first, tls);
         let (sender, conn) = match hyper::client::conn::http1::Builder::new()
             .preserve_header_case(true)
             .handshake::<_, ProxyBody>(TokioIo::new(upstream))
@@ -662,6 +674,19 @@ impl Proxy {
         }
         flow.duration_ms = t0.elapsed().as_millis() as u64;
         (self.sink)(flow);
+    }
+
+    /// 客户端不信 Dock 根证书：这个主机之后原样转发（记进直通名单、交给 `learn` 存盘），
+    /// 这一次记一条出错。
+    fn learn_rejection(&self, tag: &str, name: &str, port: u16, why: String) {
+        self.passthrough
+            .lock()
+            .unwrap()
+            .insert(name.to_ascii_lowercase());
+        if let Some(learn) = &self.learn {
+            learn(name, &why);
+        }
+        self.emit_error(tag, "https", name, port, why);
     }
 
     fn emit_error(&self, tag: &str, scheme: &'static str, host: &str, port: u16, error: String) {
