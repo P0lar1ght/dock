@@ -1077,6 +1077,11 @@ action = "deny"
         match dock_sandbox::availability() {
             Availability::Ready { .. } => true,
             Availability::Unavailable { reason } => {
+                // CI 上设了 DOCK_SANDBOX_REQUIRE：后端不可用就是失败，不悄悄跳过。
+                assert!(
+                    std::env::var_os("DOCK_SANDBOX_REQUIRE").is_none(),
+                    "DOCK_SANDBOX_REQUIRE 设了，但沙箱后端不可用：{reason}"
+                );
                 eprintln!("SKIP: 沙箱后端不可用：{reason}");
                 false
             }

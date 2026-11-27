@@ -72,11 +72,17 @@ jobs:
       # 沙箱引擎：策略 / 规则 / 审计代理的单测，加真起系统沙箱的端到端（后端不可用时自己跳过）。
       - name: Test (dock-sandbox)
         if: steps.filter.outputs.rust == 'true'
+        # 后端（Linux 上是 Landlock + seccomp）不可用时端到端用例会自己跳过、照样绿；
+        # CI 上要它真跑，不可用就失败。spine 里的沙箱用例同理。
+        env:
+          DOCK_SANDBOX_REQUIRE: "1"
         run: cargo test --locked -p dock-sandbox
 
       # 进程级 DOCK_HOME / cwd 由 test_env::scoped() 串行化，可以并行跑。见 docs/DEVELOPMENT.md「CI」。
       - name: Test (spine)
         if: steps.filter.outputs.rust == 'true'
+        env:
+          DOCK_SANDBOX_REQUIRE: "1"
         run: cargo test --locked -p cordis-spine
 
       - name: Skip Rust gates (no relevant changes)

@@ -73,10 +73,14 @@ jobs:
         run: cargo test --locked -p dock-memory
 
       - name: Test (dock-sandbox)
+        env:
+          DOCK_SANDBOX_REQUIRE: "1"
         run: cargo test --locked -p dock-sandbox
 
       # 进程级 DOCK_HOME / cwd 由 test_env::scoped() 串行化，可以并行跑。见 docs/DEVELOPMENT.md「CI」。
       - name: Test (spine)
+        env:
+          DOCK_SANDBOX_REQUIRE: "1"
         run: cargo test --locked -p cordis-spine
 
       # 内核单列（AGENTS.md 的「Commands」把它写成独立一条）。clippy --all-targets

@@ -111,7 +111,7 @@ cargo fmt --check -p cordis -p cordis-spine -p cordis-tui -p cordis-gateway -p c
 cargo clippy --locked -p cordis -p cordis-spine -p cordis-tui -p cordis-gateway -p cordis-app -p cordis-markdown -p xai-grok-mermaid -p dock-memory -p cordis-browser -p cordis-apps -p dock-sandbox --all-targets --no-deps -- -D warnings
 cargo test --locked -p cordis-gateway -p cordis-tui -p cordis-app -p cordis-browser -p cordis-apps
 cargo test --locked -p dock-memory
-cargo test --locked -p dock-sandbox
+DOCK_SANDBOX_REQUIRE=1 cargo test --locked -p dock-sandbox   # CI 上沙箱后端不可用就失败，不跳过
 cargo test --locked -p cordis-spine
 ```
 
