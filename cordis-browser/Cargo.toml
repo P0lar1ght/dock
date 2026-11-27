@@ -7,6 +7,8 @@ description = "Dock 浏览器 MCP 服务：chromiumoxide CDP，按会话分标�
 license = "Apache-2.0"
 
 [dependencies]
+# 和 chromiumoxide 同一个版本 / 特性（Cargo.lock 里已有）：跳转走一条单独的 CDP 连接，见 session.rs 的 goto_ready。
+async-tungstenite = { version = "0.32", features = ["tokio-runtime"] }
 base64 = "0.22"
 chromiumoxide = { version = "0.9", default-features = true }
 cordis-base = { path = "../cordis-base" }

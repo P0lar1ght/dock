@@ -1255,3 +1255,459 @@ fn jpeg_width(bytes: &[u8]) -> Option<u32> {
     }
     None
 }
+
+/// 本地测试站（每个连接一个线程）：
+/// - `/page`：DOM 立刻就绪，但有一张图 `/slow?4000` 4 秒才回来，`load` 被它拖住。
+/// - `/delayed`：点按钮 300ms 后发一个 600ms 的请求，回来再改字。
+/// - 其余路径：普通页（标题 Other）。
+fn slow_site() -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for conn in listener.incoming().flatten() {
+            std::thread::spawn(move || serve_one(conn));
+        }
+    });
+    port
+}
+
+fn serve_one(mut conn: std::net::TcpStream) {
+    use std::io::{BufRead, BufReader, Write};
+    let Ok(clone) = conn.try_clone() else {
+        return;
+    };
+    let mut reader = BufReader::new(clone);
+    let mut line = String::new();
+    if reader.read_line(&mut line).is_err() {
+        return;
+    }
+    loop {
+        let mut header = String::new();
+        if reader.read_line(&mut header).is_err() || header == "\r\n" || header.is_empty() {
+            break;
+        }
+    }
+    let path = line.split_whitespace().nth(1).unwrap_or("/").to_string();
+    let (ctype, body): (&str, String) = if let Some(ms) = path.strip_prefix("/slow?") {
+        std::thread::sleep(std::time::Duration::from_millis(ms.parse().unwrap_or(1000)));
+        ("image/gif", "GIF89a".into())
+    } else if path == "/page" {
+        (
+            "text/html",
+            "<title>Slow</title><h1 id=h>ready</h1><img src=\"/slow?4000\">".into(),
+        )
+    } else if path == "/delayed" {
+        (
+            "text/html",
+            "<title>Delayed</title><button id=b onclick=\"setTimeout(() => fetch('/slow?600').then(() => { document.getElementById('r').textContent = 'loaded' }), 300)\">Load</button><p id=r></p>".into(),
+        )
+    } else {
+        ("text/html", "<title>Other</title><p>other</p>".into())
+    };
+    let _ = write!(
+        conn,
+        "HTTP/1.1 200 OK\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+}
+
+/// 以前 browser_navigate 等到 `load`：一张 4 秒的图就让它等 4 秒；chromiumoxide 还把同一页的
+/// 跳转排队，紧接着的下一次跳转要等上一页的慢图；连不上的地址等满它的 30 秒请求超时才报
+/// `Request timed out`。现在到 DOMContentLoaded 就回（`load` 最多再等 1 秒），跳转不排队，
+/// 网络错误当场报，锚点跳转马上回来。
+#[tokio::test]
+#[ignore = "needs a real Chrome; page text and snapshots differ by Chrome version/locale"]
+async fn navigate_returns_at_dom_ready_without_queueing_behind_slow_loads() {
+    let dock_home = tempfile::tempdir().unwrap();
+    let _env = cordis_base::test_env::scoped().set("DOCK_HOME", dock_home.path());
+    if !chrome_or_skip("fast navigate") {
+        return;
+    }
+    let port = slow_site();
+    let base = format!("http://127.0.0.1:{port}");
+    let hub = BrowserHub::new();
+    ok(
+        &hub,
+        "s",
+        "browser_open",
+        json!({"url": "data:text/html,<p>home</p>"}),
+    )
+    .await;
+
+    let t = std::time::Instant::now();
+    let out = ok(
+        &hub,
+        "s",
+        "browser_navigate",
+        json!({"url": format!("{base}/page")}),
+    )
+    .await;
+    assert!(out.text.ends_with("/page"), "{}", out.text);
+    assert!(
+        t.elapsed() < std::time::Duration::from_secs(3),
+        "等了慢图：{:?}",
+        t.elapsed()
+    );
+
+    // 紧接着跳走：上一页的图还在加载，这一次不能排在它后面。
+    let t = std::time::Instant::now();
+    ok(
+        &hub,
+        "s",
+        "browser_navigate",
+        json!({"url": format!("{base}/other")}),
+    )
+    .await;
+    assert!(
+        t.elapsed() < std::time::Duration::from_secs(2),
+        "排队了：{:?}",
+        t.elapsed()
+    );
+
+    // 页内锚点跳转：没有新文档，马上回来，网址带上锚点。
+    let t = std::time::Instant::now();
+    let out = ok(
+        &hub,
+        "s",
+        "browser_navigate",
+        json!({"url": format!("{base}/other#part")}),
+    )
+    .await;
+    assert!(out.text.ends_with("/other#part"), "{}", out.text);
+    assert!(
+        t.elapsed() < std::time::Duration::from_secs(1),
+        "{:?}",
+        t.elapsed()
+    );
+
+    // 连不上：当场报网络错误。
+    let t = std::time::Instant::now();
+    let out = hub
+        .call(
+            "s",
+            "browser_navigate",
+            &json!({"url": "http://127.0.0.1:1/"}),
+        )
+        .await;
+    assert!(
+        out.is_error && out.text.contains("net::ERR"),
+        "{}",
+        out.text
+    );
+    assert!(
+        t.elapsed() < std::time::Duration::from_secs(5),
+        "{:?}",
+        t.elapsed()
+    );
+
+    // 下一次跳转不被上一次的错误页带歪（迟到的事件不算这一次的）。
+    let out = ok(
+        &hub,
+        "s",
+        "browser_navigate",
+        json!({"url": format!("{base}/other")}),
+    )
+    .await;
+    assert!(out.text.ends_with("/other"), "{}", out.text);
+    hub.shutdown().await;
+}
+
+/// 第一页加载时就弹框（`<script>alert()</script>`）：以前 new_page 等 `load`，被对话框挡住，
+/// 一直等到 45 秒超时报错。现在先开空白页、挂好监听再跳转，调用当场返回、说明弹了什么。
+#[tokio::test]
+#[ignore = "needs a real Chrome; page text and snapshots differ by Chrome version/locale"]
+async fn first_open_returns_when_the_page_alerts_while_loading() {
+    let dock_home = tempfile::tempdir().unwrap();
+    let _env = cordis_base::test_env::scoped().set("DOCK_HOME", dock_home.path());
+    if !chrome_or_skip("alert on first load") {
+        return;
+    }
+    let hub = BrowserHub::new();
+    let t = std::time::Instant::now();
+    let out = ok(
+        &hub,
+        "s",
+        "browser_open",
+        json!({"url": "data:text/html,<script>alert('on load')</script><p>after</p>"}),
+    )
+    .await;
+    assert!(
+        out.text.contains("dialog") && out.text.contains("on load"),
+        "{}",
+        out.text
+    );
+    assert!(
+        t.elapsed() < std::time::Duration::from_secs(20),
+        "{:?}",
+        t.elapsed()
+    );
+    let handled = ok(&hub, "s", "browser_handle_dialog", json!({"accept": true})).await;
+    assert!(handled.text.contains("on load"), "{}", handled.text);
+    let snap = ok(&hub, "s", "browser_snapshot", json!({"interactive": false})).await;
+    assert!(!snap.text.contains("dialog is open"), "{}", snap.text);
+    hub.shutdown().await;
+}
+
+/// browser_js 的速度与覆盖：page.goto 不等慢图、settle() 等页面安静、snapshot() 看得到 iframe
+/// 里面、tabs.close、脚本里关掉的页不让调用干等、定位不到时 10 秒就回并附上页面结构、结果
+/// 带上跑完时在哪一页。
+#[tokio::test]
+#[ignore = "needs a real Chrome, Node 18+ and npm (installs playwright-core)"]
+async fn browser_js_is_fast_and_sees_frames() {
+    let dock_home = tempfile::tempdir().unwrap();
+    let _env = cordis_base::test_env::scoped().set("DOCK_HOME", dock_home.path());
+    if !chrome_or_skip("browser_js speed") {
+        return;
+    }
+    let port = slow_site();
+    let base = format!("http://127.0.0.1:{port}");
+    let hub = BrowserHub::new();
+    ok(
+        &hub,
+        "s",
+        "browser_open",
+        json!({"url": format!("{base}/other")}),
+    )
+    .await;
+
+    let t = std::time::Instant::now();
+    let out = ok(
+        &hub,
+        "s",
+        "browser_js",
+        json!({"code": format!("await page.goto('{base}/page'); return await page.locator('#h').innerText();")}),
+    )
+    .await;
+    assert!(out.text.contains("ready"), "{}", out.text);
+    assert!(
+        out.text.contains(&format!("page: {base}/page (Slow)")),
+        "{}",
+        out.text
+    );
+    assert!(
+        t.elapsed() < std::time::Duration::from_secs(3),
+        "page.goto 等了慢图：{:?}",
+        t.elapsed()
+    );
+
+    // settle()：点了之后等请求回来、DOM 改完，不用猜要 sleep 多久。
+    ok(
+        &hub,
+        "s",
+        "browser_navigate",
+        json!({"url": format!("{base}/delayed")}),
+    )
+    .await;
+    let out = ok(
+        &hub,
+        "s",
+        "browser_js",
+        json!({"code": "await page.locator('#b').click(); const s = await settle(); return s.settled + ':' + await page.locator('#r').innerText();"}),
+    )
+    .await;
+    assert!(out.text.contains("true:loaded"), "{}", out.text);
+
+    // iframe 里面也进快照。
+    let out = ok(
+        &hub,
+        "s",
+        "browser_js",
+        json!({"code": "await page.setContent('<h1>outer</h1><iframe src=\"data:text/html,<button>Inside</button>\"></iframe>'); await page.frames()[1]?.waitForLoadState(); return await snapshot();"}),
+    )
+    .await;
+    assert!(
+        out.text.contains("- frame \"data:text/html"),
+        "{}",
+        out.text
+    );
+    assert!(out.text.contains("button \"Inside\""), "{}", out.text);
+    // srcdoc 的 iframe（网址是 about:srcdoc）也进快照。以前按网址把 about:* 的 iframe 都去掉了。
+    let out = ok(
+        &hub,
+        "s",
+        "browser_js",
+        json!({"code": "await page.setContent('<h1>outer</h1><iframe srcdoc=\"<button>InSrcdoc</button>\"></iframe>'); await page.frames()[1]?.waitForLoadState(); return await snapshot();"}),
+    )
+    .await;
+    assert!(out.text.contains("button \"InSrcdoc\""), "{}", out.text);
+    // settle() 等完就把页面里的 MutationObserver 拆掉，不一直挂着。
+    let out = ok(
+        &hub,
+        "s",
+        "browser_js",
+        json!({"code": "await settle({ quietMs: 100 }); return String(await page.evaluate(() => window.__dockMutations));"}),
+    )
+    .await;
+    assert!(out.text.contains("undefined"), "{}", out.text);
+
+    // tabs.close；脚本里开了又关的页不让调用干等（以前等满 3 秒）。
+    let out = ok(
+        &hub,
+        "s",
+        "browser_js",
+        json!({"code": "const p = await tabs.new('data:text/html,x'); return 'left ' + await tabs.close(p);"}),
+    )
+    .await;
+    assert!(out.text.contains("left 1"), "{}", out.text);
+    let t = std::time::Instant::now();
+    ok(
+        &hub,
+        "s",
+        "browser_js",
+        json!({"code": "const p = await tabs.new('data:text/html,y'); await p.close(); return 1;"}),
+    )
+    .await;
+    assert!(
+        t.elapsed() < std::time::Duration::from_secs(2),
+        "{:?}",
+        t.elapsed()
+    );
+    let tabs = ok(&hub, "s", "browser_tabs", json!({})).await;
+    assert_eq!(tabs.text.lines().count(), 1, "{}", tabs.text);
+
+    // 定位不到：默认 10 秒就回（以前 Playwright 默认 30 秒），附上当时页面上有什么。
+    let t = std::time::Instant::now();
+    let out = hub
+        .call(
+            "s",
+            "browser_js",
+            &json!({"code": "await page.getByRole('button', { name: 'Nope' }).click();"}),
+        )
+        .await;
+    assert!(out.is_error, "{}", out.text);
+    assert!(
+        out.text.contains("page now (ARIA snapshot)"),
+        "{}",
+        out.text
+    );
+    assert!(out.text.contains("outer"), "{}", out.text);
+    assert!(
+        t.elapsed() < std::time::Duration::from_secs(13),
+        "{:?}",
+        t.elapsed()
+    );
+    hub.shutdown().await;
+}
+
+/// 以前点击 / 选择 / 填表 / 拖拽 / 上传之后整份快照的 refs 全部作废：接着用同一份快照里的
+/// 下一个 ref 就报 `unknown ref (have 0 refs)`，只能再拍一次（实测 8 次，click 失败率 40%）。
+/// 现在 refs 留到页面真的变了（跳转、换标签页、新快照）；节点真没了才报，并说清要重拍。
+#[tokio::test]
+#[ignore = "needs a real Chrome; page text and snapshots differ by Chrome version/locale"]
+async fn refs_from_one_snapshot_survive_several_actions() {
+    let dock_home = tempfile::tempdir().unwrap();
+    let _env = cordis_base::test_env::scoped().set("DOCK_HOME", dock_home.path());
+    if !chrome_or_skip("refs across actions") {
+        return;
+    }
+    let hub = BrowserHub::new();
+    ok(
+        &hub,
+        "s",
+        "browser_open",
+        json!({"url": "data:text/html,<input aria-label=Email id=e><select aria-label=City id=c><option value=''>--</option><option value=bj>Beijing</option></select><button onclick=\"document.getElementById('o').textContent=document.getElementById('e').value+':'+document.getElementById('c').value\">Go</button><p id=o></p>"}),
+    )
+    .await;
+    let snap = ok(&hub, "s", "browser_snapshot", json!({})).await;
+    let email = ref_of(&snap.text, "Email");
+    let city = ref_of(&snap.text, "City");
+    let go = ref_of(&snap.text, "Go");
+    ok(
+        &hub,
+        "s",
+        "browser_type",
+        json!({"ref": email, "text": "a@b.c"}),
+    )
+    .await;
+    ok(
+        &hub,
+        "s",
+        "browser_select_option",
+        json!({"ref": city, "value": "bj"}),
+    )
+    .await;
+    ok(
+        &hub,
+        "s",
+        "browser_fill_form",
+        json!({"fields": [{"ref": email, "value": "x@y.z"}]}),
+    )
+    .await;
+    ok(&hub, "s", "browser_click", json!({"ref": go})).await;
+    let out = ok(
+        &hub,
+        "s",
+        "browser_evaluate",
+        json!({"expression": "document.getElementById('o').textContent"}),
+    )
+    .await;
+    assert_eq!(out.text, "x@y.z:bj");
+
+    ok(
+        &hub,
+        "s",
+        "browser_evaluate",
+        json!({"expression": "document.body.innerHTML = '<button>new</button>'; 1"}),
+    )
+    .await;
+    let gone = hub.call("s", "browser_click", &json!({"ref": go})).await;
+    assert!(gone.is_error, "{}", gone.text);
+    assert!(gone.text.contains("no longer on the page"), "{}", gone.text);
+    hub.shutdown().await;
+}
+
+/// 回归：点击把主框架带到了新文档，refs 也作废（同 browser_navigate），不拿旧文档的节点号
+/// 去点新文档。以前只有 browser_navigate / 后退 / 换标签才清，点击、输入带走的跳转要等下一次
+/// 操作失败才知道，新文档要是重用了那个节点号就点错了地方。
+#[tokio::test]
+#[ignore = "needs a real Chrome"]
+async fn a_click_that_navigates_invalidates_the_refs() {
+    let dock_home = tempfile::tempdir().unwrap();
+    let _env = cordis_base::test_env::scoped().set("DOCK_HOME", dock_home.path());
+    if !chrome_or_skip("refs after a navigating click") {
+        return;
+    }
+    let port = slow_site();
+    let base = format!("http://127.0.0.1:{port}");
+    let hub = BrowserHub::new();
+    ok(
+        &hub,
+        "s",
+        "browser_open",
+        json!({"url": format!("{base}/other")}),
+    )
+    .await;
+    ok(
+        &hub,
+        "s",
+        "browser_evaluate",
+        json!({"expression": "document.body.innerHTML = '<a href=\"/page\">Next</a><button>Stay</button>'; 1"}),
+    )
+    .await;
+    let snap = ok(&hub, "s", "browser_snapshot", json!({})).await;
+    let next = ref_of(&snap.text, "Next");
+    let stay = ref_of(&snap.text, "Stay");
+    ok(&hub, "s", "browser_click", json!({"ref": next})).await;
+    // 等到新文档。用 browser_evaluate 看，不用 browser_js：browser_js 跑完本来就清 refs，
+    // 拿它等就测不出点击带走页面这条路。
+    let mut arrived = false;
+    for _ in 0..100 {
+        let out = hub
+            .call(
+                "s",
+                "browser_evaluate",
+                &json!({"expression": "location.pathname"}),
+            )
+            .await;
+        if !out.is_error && out.text.contains("/page") {
+            arrived = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(arrived, "点击之后没跳到 /page");
+    let stale = hub.call("s", "browser_click", &json!({"ref": stay})).await;
+    assert!(stale.is_error, "{}", stale.text);
+    assert!(stale.text.contains("unknown ref"), "{}", stale.text);
+    hub.shutdown().await;
+}

@@ -414,6 +414,14 @@ pub async fn run_use_tool(tools: &Tools, exec: &cordis::Context, call: ToolCall)
     }
     let resolved = resolve_hidden_name(tools, exec, &tool_name);
     if tools.hidden_on(exec, &resolved) {
+        let tool_input = match tool_input {
+            Ok(input) => input,
+            Err(why) => {
+                let mut result = tool_result(call, format!("Error: {why}"));
+                result.is_error = true;
+                return result;
+            }
+        };
         let inner = ToolCall {
             id: call.id.clone(),
             name: resolved,
@@ -654,7 +662,9 @@ fn parse_limit(arguments: &str) -> usize {
         .min(MAX_SEARCH_LIMIT)
 }
 
-fn parse_use_args(arguments: &str) -> (String, String) {
+/// `use_tool` 的 `(tool_name, tool_input 的 JSON 文本)`。`tool_input` 不是 JSON 对象时回
+/// `Err(说明)`、不执行：以前坏 JSON 被悄悄换成 `{}` 发出去，目标工具拿着空参数照跑。
+fn parse_use_args(arguments: &str) -> (String, Result<String, String>) {
     let v: Value = serde_json::from_str(arguments).unwrap_or(Value::Null);
     let name = v
         .get("tool_name")
@@ -663,9 +673,22 @@ fn parse_use_args(arguments: &str) -> (String, String) {
         .trim()
         .to_string();
     let input = match v.get("tool_input") {
-        Some(Value::String(s)) => s.clone(),
-        Some(other) => other.to_string(),
-        None => "{}".into(),
+        Some(Value::Object(map)) => Ok(Value::Object(map.clone()).to_string()),
+        None | Some(Value::Null) => Ok("{}".into()),
+        // 字符串形式的参数对象（以前就认）。
+        Some(Value::String(s)) => match serde_json::from_str::<Value>(s) {
+            Ok(Value::Object(_)) => Ok(s.clone()),
+            Ok(_) => Err(
+                "tool_input must be a JSON object with the tool's arguments, \
+                 not a string holding some other JSON value."
+                    .to_string(),
+            ),
+            Err(e) => Err(format!(
+                "tool_input is a string that is not valid JSON ({e}). Nothing was run. \
+                 Pass tool_input as a JSON object, not as a string."
+            )),
+        },
+        Some(_) => Err("tool_input must be a JSON object with the tool's arguments.".to_string()),
     };
     (name, input)
 }
@@ -1190,6 +1213,54 @@ mod tests {
         .await;
         assert!(native.content.contains("first-class tool"), "{native:?}");
         assert!(native.content.contains("bash"), "{native:?}");
+    }
+
+    /// `tool_input` 必须是 JSON 对象（或装着 JSON 对象的字符串）；别的形状报错、不执行。
+    #[test]
+    fn use_tool_input_shapes_models_actually_send() {
+        let input = |args: &str| parse_use_args(args).1;
+        assert_eq!(
+            input(r#"{"tool_name":"t","tool_input":{"code":"1"}}"#).unwrap(),
+            r#"{"code":"1"}"#
+        );
+        assert_eq!(
+            input(r#"{"tool_name":"t","tool_input":"{\"code\":\"1\"}"}"#).unwrap(),
+            r#"{"code":"1"}"#
+        );
+        assert_eq!(input(r#"{"tool_name":"t"}"#).unwrap(), "{}");
+        assert_eq!(
+            input(r#"{"tool_name":"t","tool_input":null}"#).unwrap(),
+            "{}"
+        );
+        // 字符串里是坏 JSON：说清楚，不发出去。
+        let bad = input(r#"{"tool_name":"t","tool_input":"{\"code\": \"a \\' b\"}"}"#).unwrap_err();
+        assert!(bad.contains("not valid JSON"), "{bad}");
+        assert!(input(r#"{"tool_name":"t","tool_input":"[1]"}"#).is_err());
+        assert!(input(r#"{"tool_name":"t","tool_input":[1]}"#).is_err());
+    }
+
+    #[tokio::test]
+    async fn use_tool_reports_a_broken_tool_input_instead_of_running_with_nothing() {
+        let ctx = cordis::Context::new();
+        let tools = Tools::echo(ctx.clone());
+        let _mcp = tools
+            .register_mcp(spec("mcp_probe__ping", "ping"), stub_body())
+            .unwrap();
+        let out = run_use_tool(
+            &tools,
+            &ctx,
+            ToolCall {
+                id: "1".into(),
+                name: USE_TOOL_NAME.into(),
+                arguments:
+                    r#"{"tool_name":"mcp_probe__ping","tool_input":"{\"code\": 1 \"x\": 2}"}"#
+                        .into(),
+            },
+        )
+        .await;
+        assert!(out.is_error, "{out:?}");
+        assert!(out.content.contains("not valid JSON"), "{out:?}");
+        assert_ne!(out.content, "pong", "must not run the tool with {{}}");
     }
 
     /// 实测会话的目录：常驻 `job` / `bash`，按需 `kill_task`，外加几颗描述里碰巧

@@ -24,9 +24,9 @@ use chromiumoxide::cdp::browser_protocol::network::{
     EventRequestWillBeSent, EventResponseReceived,
 };
 use chromiumoxide::cdp::browser_protocol::page::{
-    EventJavascriptDialogClosed, EventJavascriptDialogOpening, FrameId, FrameTree,
-    GetFrameTreeParams, GetNavigationHistoryParams, HandleJavaScriptDialogParams,
-    NavigateToHistoryEntryParams,
+    EventFrameNavigated, EventJavascriptDialogClosed, EventJavascriptDialogOpening,
+    EventLifecycleEvent, FrameId, FrameTree, GetFrameTreeParams, GetNavigationHistoryParams,
+    HandleJavaScriptDialogParams, NavigateToHistoryEntryParams,
 };
 use chromiumoxide::cdp::browser_protocol::target::{
     ActivateTargetParams, CloseTargetParams, GetTargetsParams, TargetId,
@@ -52,6 +52,9 @@ const LAUNCH_TIMEOUT: Duration = Duration::from_secs(30);
 const ATTACH_TIMEOUT: Duration = Duration::from_secs(3);
 const DEVTOOLS_ACTIVE_PORT: &str = "DevToolsActivePort";
 const NAV_TIMEOUT: Duration = Duration::from_secs(45);
+/// DOMContentLoaded 之后最多再等 `load` 这么久。图片、广告、统计脚本常把 `load` 拖上好几秒，
+/// 页面早就能读能点了（本地测：DOM 立刻就绪、一张图 4 秒，以前 navigate 陪着等满 4 秒）。
+const LOAD_GRACE: Duration = Duration::from_secs(1);
 const ACTION_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Clone, Debug)]
@@ -430,35 +433,42 @@ pub struct ConnectedSession {
     dialog_seq: Arc<tokio::sync::watch::Sender<u64>>,
     capture: Arc<AsyncMutex<CaptureBuffers>>,
     pub refs: HashMap<String, RefEntry>,
+    /// 每一页主框架换过几次文档（`Page.frameNavigated`，没有父框架）。按页记：后台标签页
+    /// 自己刷新不碰当前页的 refs；同文档内的跳转（SPA 路由、锚点）不算换文档。
+    docs: Arc<std::sync::Mutex<HashMap<String, u64>>>,
+    /// `refs` 是哪一页、第几份文档上拍的。那一页换了文档就作废（[`Self::drop_stale_refs`]）。
+    refs_doc: Option<(String, u64)>,
 }
 
 impl ConnectedSession {
-    /// 在共享的 Chromium 里给这个会话开第一个标签页。
-    pub async fn open(chromium: &Chromium, url: Option<&str>) -> Result<Self, String> {
+    /// 在共享的 Chromium 里给这个会话开第一个标签页（空白页）。先挂好对话框与 console /
+    /// network 监听再跳转（[`ConnectedSession::navigate`]）：第一页加载时弹的框、打的日志、
+    /// 发的请求都收得到，跳转也走同一条有上限、会和对话框赛跑的路。
+    pub async fn open(chromium: &Chromium) -> Result<Self, String> {
         let browser = chromium.browser.clone();
-        let start = url.unwrap_or("about:blank");
         let page = with_timeout(
-            NAV_TIMEOUT,
+            ACTION_TIMEOUT,
             async {
                 browser
-                    .new_page(start)
+                    .new_page("about:blank")
                     .await
                     .map_err(|e| format!("new_page: {e}"))
             },
-            || "timed out opening page".into(),
+            || "timed out opening a tab".into(),
         )
-        .await
-        .map_err(|e| format!("new_page({start}): {e}"))?;
+        .await?;
 
         let pending_dialog = Arc::new(std::sync::Mutex::new(None));
         let dialog_seq = Arc::new(tokio::sync::watch::channel(0u64).0);
         let capture = Arc::new(AsyncMutex::new(CaptureBuffers::new()));
+        let docs = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let mut dialog_tasks = Vec::new();
         let mut capture_tasks = Vec::new();
         dialog_tasks.push(
             Self::spawn_dialog_listener(&page, pending_dialog.clone(), dialog_seq.clone()).await?,
         );
-        capture_tasks.extend(Self::attach_page_capture(&page, capture.clone()).await?);
+        capture_tasks
+            .extend(Self::attach_page_capture(&page, capture.clone(), docs.clone()).await?);
 
         Ok(Self {
             browser,
@@ -470,6 +480,8 @@ impl ConnectedSession {
             dialog_seq,
             capture,
             refs: HashMap::new(),
+            docs,
+            refs_doc: None,
         })
     }
 
@@ -534,8 +546,9 @@ impl ConnectedSession {
             };
             self.dialog_tasks
                 .push(self.dialog_listener_for(&page).await?);
-            self.capture_tasks
-                .extend(Self::attach_page_capture(&page, self.capture.clone()).await?);
+            self.capture_tasks.extend(
+                Self::attach_page_capture(&page, self.capture.clone(), self.docs.clone()).await?,
+            );
             self.pages.insert(at + 1, page);
             self.active = at + 1;
             changed = true;
@@ -562,16 +575,33 @@ impl ConnectedSession {
                 page = Some(p);
                 break;
             }
+            // 脚本里开了又关掉的页：Chrome 里已经没有了，不用干等（以前白等满 3 秒）。
+            if !self.chrome_has_target(target).await {
+                return Ok(());
+            }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         let page =
             page.ok_or_else(|| format!("tab {target} opened by the script is not reachable"))?;
         self.dialog_tasks
             .push(self.dialog_listener_for(&page).await?);
-        self.capture_tasks
-            .extend(Self::attach_page_capture(&page, self.capture.clone()).await?);
+        self.capture_tasks.extend(
+            Self::attach_page_capture(&page, self.capture.clone(), self.docs.clone()).await?,
+        );
         self.pages.push(page);
         Ok(())
+    }
+
+    /// Chrome 里还有没有这个 target。问不到时当它还在（让调用方照常等）。
+    async fn chrome_has_target(&self, target: &str) -> bool {
+        match self.browser.execute(GetTargetsParams::default()).await {
+            Ok(r) => r
+                .result
+                .target_infos
+                .iter()
+                .any(|t| t.target_id.inner() == target),
+            Err(_) => true,
+        }
     }
 
     /// 记下 `browser_js` 执行器看到、本组自己的监听没赶上的对话框（弹在这次脚本才开的页上：
@@ -673,11 +703,23 @@ impl ConnectedSession {
     async fn attach_page_capture(
         page: &Page,
         capture: Arc<AsyncMutex<CaptureBuffers>>,
+        docs: Arc<std::sync::Mutex<HashMap<String, u64>>>,
     ) -> Result<Vec<JoinHandle<()>>, String> {
         // Network/Runtime are enabled by chromiumoxide's frame/network managers
         // on target attach. Do not re-send Enable — it can time out the command
         // queue. Event listeners alone surface request/console traffic.
-        let mut tasks = Vec::with_capacity(3);
+        let mut tasks = Vec::with_capacity(4);
+        // 主框架换了文档：这一页拍的 refs 作废（点击 / 输入带走了页面也算，不只 browser_navigate）。
+        if let Ok(mut events) = page.event_listener::<EventFrameNavigated>().await {
+            let target = page.target_id().inner().to_string();
+            tasks.push(tokio::spawn(async move {
+                while let Some(ev) = events.next().await {
+                    if ev.frame.parent_id.is_none() {
+                        *docs.lock().unwrap().entry(target.clone()).or_default() += 1;
+                    }
+                }
+            }));
+        }
         if let Ok(mut events) = page.event_listener::<EventRequestWillBeSent>().await {
             let capture = capture.clone();
             tasks.push(tokio::spawn(async move {
@@ -750,24 +792,31 @@ impl ConnectedSession {
             .get(self.active)
             .ok_or_else(|| "no active tab".to_string())?
             .clone();
-        with_timeout(
-            NAV_TIMEOUT,
-            async {
-                page.goto(url).await.map_err(|e| format!("goto: {e}"))?;
-                Ok::<_, String>(())
-            },
-            || "navigate timeout".into(),
-        )
+        let ws = self.browser.websocket_address().clone();
+        with_timeout(NAV_TIMEOUT, goto_ready(&page, &ws, url), || {
+            format!(
+                "did not reach DOMContentLoaded within {}s",
+                NAV_TIMEOUT.as_secs()
+            )
+        })
         .await
         .map_err(|e| format!("navigate({url}): {e}"))?;
         self.refs.clear();
-        let cur = page
-            .url()
+        // 页里自己的 `location.href`：chromiumoxide 记的网址跟不上页内（锚点）跳转。
+        let cur: Option<String> = page
+            .evaluate("location.href")
             .await
             .ok()
-            .flatten()
-            .unwrap_or_else(|| url.into());
-        Ok(cur)
+            .and_then(|v| v.into_value().ok());
+        match cur {
+            Some(cur) => Ok(cur),
+            None => Ok(page
+                .url()
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| url.into())),
+        }
     }
 
     pub async fn snapshot(
@@ -801,17 +850,31 @@ impl ConnectedSession {
         .await
         .map_err(|e| format!("browser_snapshot: {e}"))?;
         self.refs = snap.refs.clone();
+        let target = page.target_id().inner().to_string();
+        let doc = self.doc_of(&target);
+        self.refs_doc = Some((target, doc));
         Ok(snap)
     }
 
+    /// `target` 这一页主框架换过几次文档。
+    fn doc_of(&self, target: &str) -> u64 {
+        self.docs.lock().unwrap().get(target).copied().unwrap_or(0)
+    }
+
+    /// 拍 refs 的那一页换了文档：refs 作废，不拿旧文档的节点号去点新文档。
+    fn drop_stale_refs(&mut self) {
+        let stale = self
+            .refs_doc
+            .as_ref()
+            .is_some_and(|(target, doc)| self.doc_of(target) != *doc);
+        if stale {
+            self.refs.clear();
+            self.refs_doc = None;
+        }
+    }
+
     pub async fn click_ref(&mut self, ref_id: &str) -> Result<String, String> {
-        let key = snapshot::parse_ref(ref_id).ok_or_else(|| "missing ref".to_string())?;
-        let entry = self.refs.get(&key).cloned().ok_or_else(|| {
-            format!(
-                "unknown ref `{key}` — call browser_snapshot first (have {} refs)",
-                self.refs.len()
-            )
-        })?;
+        let (key, entry) = self.lookup_ref(ref_id)?;
         let backend = snapshot::backend_id(&entry)
             .ok_or_else(|| format!("ref `{key}` has no backend DOM node"))?;
         let page = self.active_page()?.clone();
@@ -842,9 +905,8 @@ impl ConnectedSession {
                 Ok::<_, String>(())
             }
         })
-        .await?;
-
-        self.refs.clear();
+        .await
+        .map_err(|e| ref_gone(&key, e))?;
         Ok(format!("clicked @{key} ({})", entry.role))
     }
 
@@ -856,24 +918,12 @@ impl ConnectedSession {
     ) -> Result<String, String> {
         let page = self.active_page()?.clone();
         if let Some(raw) = ref_id {
-            let key = snapshot::parse_ref(raw).ok_or_else(|| "missing ref".to_string())?;
-            let entry = self
-                .refs
-                .get(&key)
-                .cloned()
-                .ok_or_else(|| format!("unknown ref `{key}` — call browser_snapshot first"))?;
+            let (key, entry) = self.lookup_ref(raw)?;
             let backend = snapshot::backend_id(&entry)
                 .ok_or_else(|| format!("ref `{key}` has no backend DOM node"))?;
-            page.execute(
-                ScrollIntoViewIfNeededParams::builder()
-                    .backend_node_id(backend)
-                    .build(),
-            )
-            .await
-            .map_err(|e| e.to_string())?;
-            page.execute(FocusParams::builder().backend_node_id(backend).build())
+            Self::focus_backend(&page, backend)
                 .await
-                .map_err(|e| format!("focus: {e}"))?;
+                .map_err(|e| ref_gone(&key, e))?;
         }
 
         page.execute(InsertTextParams::new(text))
@@ -900,7 +950,6 @@ impl ConnectedSession {
                 .build()
                 .map_err(|e| e.to_string())?;
             page.execute(up).await.map_err(|e| e.to_string())?;
-            self.refs.clear();
         }
 
         Ok(format!(
@@ -972,8 +1021,10 @@ impl ConnectedSession {
                     .map_err(|e| format!("new tab: {e}"))?;
                 self.dialog_tasks
                     .push(self.dialog_listener_for(&page).await?);
-                self.capture_tasks
-                    .extend(Self::attach_page_capture(&page, self.capture.clone()).await?);
+                self.capture_tasks.extend(
+                    Self::attach_page_capture(&page, self.capture.clone(), self.docs.clone())
+                        .await?,
+                );
                 self.pages.push(page);
                 self.active = self.pages.len() - 1;
                 self.refs.clear();
@@ -1023,7 +1074,8 @@ impl ConnectedSession {
         }
     }
 
-    fn lookup_ref(&self, ref_id: &str) -> Result<(String, RefEntry), String> {
+    fn lookup_ref(&mut self, ref_id: &str) -> Result<(String, RefEntry), String> {
+        self.drop_stale_refs();
         let key = snapshot::parse_ref(ref_id).ok_or_else(|| "missing ref".to_string())?;
         let entry = self.refs.get(&key).cloned().ok_or_else(|| {
             format!(
@@ -1121,7 +1173,8 @@ impl ConnectedSession {
                 Ok::<_, String>(())
             }
         })
-        .await?;
+        .await
+        .map_err(|e| ref_gone(&key, e))?;
         Ok(format!("hovered @{key} ({})", entry.role))
     }
 
@@ -1132,7 +1185,9 @@ impl ConnectedSession {
             let (k, entry) = self.lookup_ref(raw)?;
             let backend = snapshot::backend_id(&entry)
                 .ok_or_else(|| format!("ref `{k}` has no backend DOM node"))?;
-            Self::focus_backend(&page, backend).await?;
+            Self::focus_backend(&page, backend)
+                .await
+                .map_err(|e| ref_gone(&k, e))?;
         }
         let (modifiers, key_name) = parse_key_chord(key)?;
         let down = key_event(&key_name, modifiers, KeyPhase::Down).map_err(|e| {
@@ -1159,7 +1214,9 @@ impl ConnectedSession {
         let backend = snapshot::backend_id(&entry)
             .ok_or_else(|| format!("ref `{key}` has no backend DOM node"))?;
         let page = self.active_page()?.clone();
-        Self::focus_backend(&page, backend).await?;
+        Self::focus_backend(&page, backend)
+            .await
+            .map_err(|e| ref_gone(&key, e))?;
         let js = r#"function(value, label) {
   const el = this;
   const opts = el.options ? Array.from(el.options) : [];
@@ -1206,7 +1263,6 @@ impl ConnectedSession {
             .and_then(|v| v.get("value"))
             .and_then(|x| x.as_str())
             .unwrap_or("");
-        self.refs.clear();
         Ok(format!("selected `{selected}` on @{key}"))
     }
 
@@ -1234,14 +1290,17 @@ impl ConnectedSession {
             let (key, entry) = self.lookup_ref(ref_id)?;
             let backend = snapshot::backend_id(&entry)
                 .ok_or_else(|| format!("ref `{key}` has no backend DOM node"))?;
-            Self::focus_backend(&page, backend).await?;
+            Self::focus_backend(&page, backend)
+                .await
+                .map_err(|e| ref_gone(&key, e))?;
             let out = Self::call_js_on_backend(
                 &page,
                 backend,
                 js,
                 vec![serde_json::Value::String(value.clone())],
             )
-            .await?;
+            .await
+            .map_err(|e| ref_gone(&key, e))?;
             let ok = out
                 .as_ref()
                 .and_then(|v| v.get("ok"))
@@ -1257,7 +1316,6 @@ impl ConnectedSession {
             }
             filled.push(format!("@{key}"));
         }
-        self.refs.clear();
         Ok(format!(
             "filled {} field(s): {}",
             filled.len(),
@@ -1419,7 +1477,7 @@ impl ConnectedSession {
     }
 
     async fn resolve_point(
-        &self,
+        &mut self,
         page: &Page,
         ref_id: Option<&str>,
         x: Option<f64>,
@@ -1433,7 +1491,9 @@ impl ConnectedSession {
         let (key, entry) = self.lookup_ref(raw)?;
         let backend = snapshot::backend_id(&entry)
             .ok_or_else(|| format!("ref `{key}` has no backend DOM node"))?;
-        let point = Self::point_for_backend(page, backend).await?;
+        let point = Self::point_for_backend(page, backend)
+            .await
+            .map_err(|e| ref_gone(&key, e))?;
         Ok((point, format!("@{key}")))
     }
 
@@ -1504,8 +1564,6 @@ impl ConnectedSession {
         page.execute(release)
             .await
             .map_err(|e| format!("drag release: {e}"))?;
-
-        self.refs.clear();
         Ok(format!("dragged from {start_label} to {end_label}"))
     }
 
@@ -1581,8 +1639,7 @@ impl ConnectedSession {
             .map_err(|e| e.to_string())?;
         page.execute(params)
             .await
-            .map_err(|e| format!("setFileInputFiles: {e}"))?;
-        self.refs.clear();
+            .map_err(|e| ref_gone(&key, format!("setFileInputFiles: {e}")))?;
         Ok(format!(
             "uploaded {} file(s) to @{key}: {}",
             abs.len(),
@@ -1788,6 +1845,153 @@ impl ConnectedSession {
     }
 }
 
+/// 跳到 `url`，到 DOMContentLoaded 就算到了；之后最多再等 [`LOAD_GRACE`] 让 `load` 收尾。
+///
+/// 不经 chromiumoxide 发 `Page.navigate`：它每页只有一个「进行中的跳转」，新的跳转排在上一次
+/// 后面，要等上一次 `load` 完（或者等满它自己的 30 秒请求超时，错误页就是这样）才发出去——
+/// 上一页一张慢图就能把下一次跳转拖住好几秒。这里另开一条到这一页的 CDP 连接发命令
+/// （[`navigate_direct`]）：它在跳转提交时就回话，带着 `loaderId` / `errorText`；之后按
+/// chromiumoxide 收到的 lifecycle 事件认这一次跳转的文档。
+async fn goto_ready(page: &Page, browser_ws: &str, url: &str) -> Result<(), String> {
+    let main = page
+        .execute(GetFrameTreeParams::default())
+        .await
+        .map_err(|e| format!("getFrameTree: {e}"))?
+        .result
+        .frame_tree
+        .frame
+        .id;
+    let listen = |e: chromiumoxide::error::CdpError| format!("listen: {e}");
+    let mut lifecycle = page
+        .event_listener::<EventLifecycleEvent>()
+        .await
+        .map_err(listen)?;
+    let mut navigated = page
+        .event_listener::<EventFrameNavigated>()
+        .await
+        .map_err(listen)?;
+    let page_ws = page_ws_url(browser_ws, page.target_id().inner())
+        .ok_or_else(|| format!("unexpected CDP address {browser_ws}"))?;
+    let sent = navigate_direct(&page_ws, url).await?;
+    if let Some(e) = sent.error_text {
+        return Err(e);
+    }
+    // 没有 loaderId：页内跳转（只改了锚点），没有新文档要等。
+    let Some(mut want) = sent.loader_id else {
+        return Ok(());
+    };
+    // 等这份文档的 DOMContentLoaded。中途被重定向成别的文档（`location.replace`、meta
+    // refresh）就改等最新提交的那份。
+    loop {
+        tokio::select! {
+            Some(ev) = navigated.next() => {
+                if ev.frame.id == main {
+                    want = ev.frame.loader_id.inner().to_string();
+                }
+            }
+            Some(ev) = lifecycle.next() => {
+                if ev.frame_id == main && ev.name == "DOMContentLoaded" && ev.loader_id.inner() == &want {
+                    break;
+                }
+            }
+            else => return Err("CDP event stream closed".into()),
+        }
+    }
+    let grace = tokio::time::sleep(LOAD_GRACE);
+    tokio::pin!(grace);
+    loop {
+        tokio::select! {
+            Some(ev) = lifecycle.next() => {
+                if ev.frame_id == main && ev.name == "load" && ev.loader_id.inner() == &want {
+                    return Ok(());
+                }
+            }
+            _ = &mut grace => return Ok(()),
+        }
+    }
+}
+
+/// `ws://host:port/devtools/browser/<id>` → 某一页的 `ws://host:port/devtools/page/<target>`。
+pub fn page_ws_url(browser_ws: &str, target: &str) -> Option<String> {
+    let (base, _) = browser_ws.split_once("/devtools/browser/")?;
+    Some(format!("{base}/devtools/page/{target}"))
+}
+
+struct Navigated {
+    loader_id: Option<String>,
+    error_text: Option<String>,
+}
+
+/// 在一条单独的 CDP 连接上发 `Page.navigate`，等它回话（跳转提交、或者失败）就断开。
+/// 断开不会取消跳转（跳转是浏览器侧的状态）。
+async fn navigate_direct(page_ws: &str, url: &str) -> Result<Navigated, String> {
+    use async_tungstenite::tungstenite::Message;
+    let (mut ws, _) = async_tungstenite::tokio::connect_async(page_ws)
+        .await
+        .map_err(|e| format!("connect {page_ws}: {e}"))?;
+    let msg = serde_json::json!({
+        "id": 1,
+        "method": "Page.navigate",
+        // typed：和在地址栏里输入一样（不带当前页的 Referer）。
+        "params": { "url": url, "transitionType": "typed" },
+    });
+    ws.send(Message::Text(msg.to_string().into()))
+        .await
+        .map_err(|e| format!("Page.navigate: {e}"))?;
+    while let Some(frame) = ws.next().await {
+        let frame = frame.map_err(|e| format!("Page.navigate: {e}"))?;
+        let Message::Text(text) = frame else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        if v.get("id").and_then(|i| i.as_u64()) != Some(1) {
+            continue;
+        }
+        let _ = ws.close(None).await;
+        if let Some(err) = v.get("error") {
+            return Err(err
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("Page.navigate failed")
+                .to_string());
+        }
+        let field = |k: &str| {
+            v.pointer(&format!("/result/{k}"))
+                .and_then(|x| x.as_str())
+                .filter(|x| !x.is_empty())
+                .map(str::to_string)
+        };
+        return Ok(Navigated {
+            loader_id: field("loaderId"),
+            error_text: field("errorText"),
+        });
+    }
+    Err("the CDP connection closed before Page.navigate answered".into())
+}
+
+/// 快照之后页面变了、ref 指的节点已经不在了：CDP 只说「找不到节点」，换成一句能照着做的话。
+/// refs 不再每做一个动作就全部作废（以前点一下、填一下之后整份快照都失效，模型只能再拍一次），
+/// 只有节点真的没了才走到这里。
+fn ref_gone(key: &str, e: String) -> String {
+    let lower = e.to_ascii_lowercase();
+    let gone = [
+        "no node with given id",
+        "could not find node",
+        "node is detached",
+        "does not belong to the document",
+        "no node found",
+    ]
+    .iter()
+    .any(|m| lower.contains(m));
+    if gone {
+        format!("ref @{key} is no longer on the page (it changed since the snapshot) — take a new browser_snapshot. ({e})")
+    } else {
+        e
+    }
+}
+
 fn flatten_frame_tree(
     tree: &FrameTree,
     out: &mut Vec<chromiumoxide::cdp::browser_protocol::page::Frame>,
@@ -1953,6 +2157,15 @@ fn normalize_modifier(p: &str) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn page_ws_url_points_at_the_target() {
+        assert_eq!(
+            page_ws_url("ws://127.0.0.1:9222/devtools/browser/abc-1", "T1").as_deref(),
+            Some("ws://127.0.0.1:9222/devtools/page/T1")
+        );
+        assert!(page_ws_url("ws://127.0.0.1:9222/other", "T1").is_none());
+    }
 
     #[test]
     fn desktop_user_agent_reports_major_version_only() {

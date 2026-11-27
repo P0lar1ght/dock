@@ -35,6 +35,20 @@
 - 失败回 `isError: true`；Dock 客户端据此标 `ToolResult.is_error`，不靠猜文本。
 - `browser_screenshot` 存到 `$DOCK_HOME/browser/screenshots/`，同时回 MCP `image` 内容。
 
+## 跳转（`browser_open` / `browser_navigate`）
+
+- 到 DOMContentLoaded 就返回，`load` 最多再等 1 秒（`LOAD_GRACE`）。
+  - 图片、广告、统计脚本常把 `load` 拖上好几秒，页面早就能读能点。本地测：一张 4 秒的图，以前等 4 秒，现在 1 秒。
+- 跳转命令不经 chromiumoxide 发：它每页只有一个「进行中的跳转」，新跳转要排在上一次的 `load` 后面。
+  - 另开一条到这一页的 CDP 连接发 `Page.navigate`（`session.rs` 的 `navigate_direct`，`async-tungstenite`，和 chromiumoxide 同一个版本）。
+  - 它在跳转提交时就回话：带 `errorText`（`net::ERR_*`）就当场报错；没有 `loaderId` 是页内锚点跳转，马上返回。
+  - 之后按 chromiumoxide 收到的 lifecycle 事件认**这一次**的文档（主框架 + 新的 loaderId）；中途重定向就改等最新提交的那份。
+  - 以前：连不上的地址等满 chromiumoxide 的 30 秒请求超时报 `Request timed out`；紧接着的跳转被上一页的慢图拖住。
+- 返回的网址读页里的 `location.href`（锚点跳转后 chromiumoxide 记的网址跟不上）。
+- 本会话第一次开页：先开空白页、挂好对话框和 console / network 监听，再走同一条跳转路。
+  - 第一页加载时弹的框会让调用当场返回（以前等到 45 秒超时），第一页的日志和请求也收得到。
+  - 拉起 / 连上 Chromium 加开页这一段也在 90 秒上限里。
+
 ## JS 对话框与卡住的页
 
 - 点击 / 按键 / 跑脚本弹出 `alert` / `confirm` / `prompt` / `beforeunload` 时，CDP 命令要等对话框关掉才返回。
@@ -54,9 +68,13 @@ Codex 那套是闭源插件，这里用开源的 playwright-core 自己实现。
 - 脚本里有：
   - `page`：本会话活动标签页的 Playwright Page。`context` / `browser` 也在。
   - `state`：本会话跨调用保留的对象（局部变量不保留）。
-  - `log(...)`：收进输出。`snapshot(selector)`：ARIA 快照文本。`screenshot(opts)`：存 PNG，最后一张随结果回传。
+  - `log(...)`：收进输出。`screenshot(opts)`：存 PNG，最后一张随结果回传。
+  - `snapshot(selector = 'body', page?)`：ARIA 快照文本。看整页时带上 iframe 里面（`locator.ariaSnapshot()` 不进 iframe，只给一行 `- iframe`）：
+    每个 iframe 一段 `- frame "<网址>" name=…:`，最多 10 个、每个最多等 2 秒。
+  - `settle({ quietMs = 500, timeoutMs = 5000, page })`：等页面安静下来——脚本开始后发出的请求都回来了（推送流、媒体不算），
+    DOM 内容（增删节点、改文字）`quietMs` 没变。到点照常返回 `{ settled: false, pendingRequests }`，不抛错。用来代替固定 sleep。
   - `onDialog('accept' | 'dismiss' | { accept, text } | fn)`：在会弹框的动作**之前**声明，脚本里就地处理、记进 log，一次调用跑完。
-  - `tabs`：`list()` / `get(i)` / `new(url)` / `select(页或序号)`。`tabs.new` 开的页由 Rust 侧登记进本会话（`ConnectedSession::adopt`），
+  - `tabs`：`list()` / `get(i)` / `new(url)` / `select(页或序号)` / `close(页或序号)`（本会话最后一页不关，那是 `browser_close`）。`tabs.new` 开的页由 Rust 侧登记进本会话（`ConnectedSession::adopt`），
     `select` 指定跑完后的活动页；跑完再 `sync_targets` 收下点链接弹出的页、重写名册，GUI 画面跟着走。直接 `context.newPage()` 开的页不收（分不清是哪个会话的）。
   - `readPages(urls, { selector, mode, maxChars, concurrency, timeoutMs })`：参考 Codex 的 `tabs.content`。
     临时标签页里同时打开几个网址（默认并发 4、每页 20 秒）、读出 `selector` 区域的文字或 ARIA 快照（每页截到 4000 字）、关掉；
@@ -64,6 +82,12 @@ Codex 那套是闭源插件，这里用开源的 playwright-core 自己实现。
     - 总截止时间：默认脚本时限减 3 秒（`deadlineMs` 可再收紧）；没轮到的标 `skipped: deadline reached`，已读的照常返回，不拖到执行器超时重启。
     - `urls` 可以是单个字符串；`mode` 只认 `text` / `snapshot`，写错报错；按字符截断。
   - `docs()`：用法指南（`src/js/guide.md`，启动时和执行器写在同一目录）。工具描述里只放最关键的几条规则。
+- 默认超时（参考 Codex 的浏览器插件：日常动作不手写超时，慢的那一步再给）：
+  - 动作 / 等待 10 秒（Playwright 默认 30 秒：定位不到时每次白等 30 秒），跳转 30 秒。写了 `timeout` 照写的来。
+  - `page.goto` 没写 `waitUntil` 时到 DOMContentLoaded 就返回，`load` 最多再等 1 秒（和 `browser_navigate` 一致）；写了照写的来。
+- 结果末尾一行 `page: <网址> (<标题>)`：跑完时活动页在哪（确认跳转不用再截图）。页卡住时标题最多等 1 秒。
+- 定位超时、而且根本没找到元素（call log 里没有 `resolved to`）：报错后附上当时整页的 ARIA 快照（截到 3000 字），省一次「先看一眼」。
+- 脚本里开了又关掉的页：执行器只报还开着的新页，Rust 侧收页时先问 Chrome 还在不在（以前白等 3 秒）。
 - 指南参考 Codex 浏览器插件文档的主题（API 用法、截图、确认、安全），内容按实测问题自己写：
   先看（`snapshot()`）再动、语义定位、等条件不等时长、读要读的元素而不是 `body.innerText` + `indexOf`、
   一个脚本做完一段流程、付款 / 发送 / 删除先问、登录和验证码请用户在浏览器面板里接手。
@@ -84,6 +108,9 @@ Codex 那套是闭源插件，这里用开源的 playwright-core 自己实现。
 - 执行器起不来时，报错里带它 stderr 的最后几行；`npm install` 带 `--ignore-scripts`。
 - 权限：和 `browser_evaluate`、bash 同级（询问 + 计划模式里挡）。
 - 测试：`cargo test -p cordis-browser --test real_chrome -- --ignored browser_js`（要 Chrome、Node、npm）。
+- 本机实测能用的（2026-11，Chrome + playwright-core 1.64，`connectOverCDP`）：下载（`waitForEvent('download')` + `saveAs`）、
+  `setInputFiles` 与 `filechooser`、`ControlOrMeta+A` 这类快捷键、跨域 iframe（`frameLocator`）、剪贴板（先 `grantPermissions`）、
+  `page.pdf()`（无头）、`page.route` 拦截、`waitForResponse`。
 
 ## 请用户接手：`handoff_to_user`
 
@@ -178,6 +205,9 @@ Codex 那套是闭源插件，这里用开源的 playwright-core 自己实现。
 
 - CDP 由 chromiumoxide 驱动；无 Node / Playwright。
 - 快照是精简 a11y 树，refs `@eN` 给 click / type / hover / select / fill。
+  - refs 留到页面真的变了（跳转、换标签页、新快照）才作废；节点真没了才报错，说清要重拍。
+  - 跳转包括点击 / 输入带走的：这一页主框架换了文档（`Page.frameNavigated`，按页记），下一次用 ref 前就清掉，不拿旧文档的节点号去点新文档。同文档内的跳转（SPA 路由、锚点）和别的标签页刷新不算。
+  - 以前点击 / 选择 / 填表 / 拖拽 / 上传之后整份快照就作废，接着用同一份快照的下一个 ref 报 `unknown ref (have 0 refs)`。
 - 同域 iframe：`frame` / `frame_selector`（CSS 选 iframe）。
   - 跨域或找不到直接报错，不静默落回主文档。
   - framed snapshot 的 refs 只对该 frame 有效。

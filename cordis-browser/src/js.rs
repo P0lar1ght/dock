@@ -297,6 +297,22 @@ pub fn render_reply(reply: &Value) -> (bool, String, Option<PathBuf>) {
             .and_then(Value::as_str)
             .unwrap_or("script failed");
         parts.push(format!("Error: {err}"));
+        // 定位超时、没找到元素：当时页面上有什么（省一次「先看一眼」）。
+        if let Some(tree) = reply.get("pageNow").and_then(Value::as_str) {
+            parts.push(format!("page now (ARIA snapshot):\n{tree}"));
+        }
+    }
+    // 跑完时活动页在哪：确认跳转结果不用再截图。
+    if let Some(url) = reply.pointer("/page/url").and_then(Value::as_str) {
+        let title = reply
+            .pointer("/page/title")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        parts.push(if title.is_empty() {
+            format!("page: {url}")
+        } else {
+            format!("page: {url} ({title})")
+        });
     }
     let image = reply
         .get("images")
@@ -352,5 +368,30 @@ mod tests {
         let (_, text, _) =
             render_reply(&json!({"ok": true, "result": "1", "hints": ["sleep less"]}));
         assert!(text.ends_with("hint: sleep less"), "{text}");
+    }
+
+    #[test]
+    fn replies_carry_where_the_tab_ended_up() {
+        let (_, text, _) = render_reply(&json!({
+            "ok": true, "result": "done",
+            "page": { "url": "https://a.example/cart", "title": "Cart" }
+        }));
+        assert!(
+            text.contains("page: https://a.example/cart (Cart)"),
+            "{text}"
+        );
+
+        let (ok, text, _) = render_reply(&json!({
+            "ok": false,
+            "error": "locator.click: Timeout 10000ms exceeded.",
+            "pageNow": "- button \"Buy\"",
+            "page": { "url": "https://a.example/", "title": "" }
+        }));
+        assert!(!ok);
+        assert!(
+            text.contains("page now (ARIA snapshot):\n- button \"Buy\""),
+            "{text}"
+        );
+        assert!(text.contains("page: https://a.example/"), "{text}");
     }
 }
