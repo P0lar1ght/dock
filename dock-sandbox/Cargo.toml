@@ -7,7 +7,11 @@ description = "Dock 沙箱：按命令的系统沙箱（Seatbelt / Landlock + se
 license = "Apache-2.0"
 
 [dependencies]
+base64 = "0.22"
+# 审计界面看响应正文：按 Content-Encoding 解开 gzip / deflate / br（都是 Cargo.lock 里已有的）。
+brotli-decompressor = "5"
 bytes = "1"
+flate2 = "1"
 http = "1"
 http-body = "1"
 http-body-util = "0.1"

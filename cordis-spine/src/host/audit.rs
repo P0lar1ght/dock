@@ -46,7 +46,7 @@ const PASSTHROUGH: &str = "passthrough.json";
 /// 一页正在进行的审计。
 pub struct Active {
     pub dir: PathBuf,
-    log: Arc<AuditLog>,
+    pub(crate) log: Arc<AuditLog>,
 }
 
 /// 出口代理和 Dock 根证书（第一次有命令要用时才起）。
@@ -694,6 +694,126 @@ fn on_execute(result: &ToolResult) {
             "images": result.images.len(),
         }),
     );
+}
+
+/// dock.1 `sandbox/status`：这一页沙箱的现状，给界面画。会验一遍哈希链和正文块（读整份日志），
+/// 不要每秒调；随时间变的看 [`sandbox_trace`]。
+pub fn sandbox_status(page: &Context) -> Value {
+    let cfg = load_sandbox_config();
+    let audit = page.get::<Audit>(AUDIT);
+    let active = audit.as_ref().and_then(|a| a.active(page));
+    let (records, intact) = match &active {
+        Some(a) => (
+            dock_sandbox::audit::store::read(&a.dir).len(),
+            dock_sandbox::audit::store::verify(&a.dir)
+                .iter()
+                .all(|v| v.intact()),
+        ),
+        None => (0, true),
+    };
+    let rules: Vec<Value> = audit
+        .as_ref()
+        .map(|a| a.rules_for(page))
+        .unwrap_or_default()
+        .iter()
+        .map(|r| {
+            json!({
+                "host": r.host,
+                "command": r.command,
+                "action": match r.action {
+                    Action::Allow => "allow",
+                    Action::Ask => "ask",
+                    Action::Deny => "deny",
+                },
+            })
+        })
+        .collect();
+    let passthrough: Vec<Value> = audit
+        .as_ref()
+        .map(|a| a.passthrough())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(host, saved)| json!({ "host": host, "saved": saved }))
+        .collect();
+    let egress = match audit.as_ref().and_then(|a| a.egress.get()) {
+        Some(Ok(_)) => "running",
+        Some(Err(_)) => "unavailable",
+        None => "idle",
+    };
+    let backend = match dock_sandbox::availability() {
+        dock_sandbox::Availability::Ready { backend, .. } => Some(backend.name()),
+        dock_sandbox::Availability::Unavailable { .. } => None,
+    };
+    json!({
+        "enabled": crate::host::sandbox::enabled(page),
+        "workspace": crate::session::cwd::session_space(page),
+        "cwd": crate::session::cwd::session_cwd(page),
+        "auditing": active.is_some(),
+        "dir": active.as_ref().map(|a| a.dir.display().to_string()),
+        "records": records,
+        "intact": intact,
+        "decrypt": cfg.decrypt,
+        "egress": egress,
+        "confine": cfg.confine,
+        "network": match cfg.network {
+            cordis_base::config::SandboxNetwork::Allow => "allow",
+            cordis_base::config::SandboxNetwork::Proxy => "proxy",
+            cordis_base::config::SandboxNetwork::Off => "off",
+        },
+        "backend": backend,
+        "rules": rules,
+        "passthrough": passthrough,
+    })
+}
+
+/// dock.1 `sandbox/trace`：这一页的行为链路图（会话 → 工具 → 程序 → 主机，带次数、流量、出错）、
+/// 概况和最近 `limit` 条时间线。沙箱没开（没在记）时 `auditing: false`、图和时间线是空的。
+pub fn sandbox_trace(page: &Context, limit: usize) -> Value {
+    let active = page.get::<Audit>(AUDIT).and_then(|a| a.active(page));
+    let Some(active) = active else {
+        return json!({
+            "auditing": false,
+            "graph": { "nodes": [], "edges": [] },
+            "totals": Value::Null,
+            "timeline": [],
+        });
+    };
+    let events = dock_sandbox::audit::store::read(&active.dir);
+    let summary = dock_sandbox::audit::graph::Summary::build(&events);
+    json!({
+        "auditing": true,
+        "records": events.len(),
+        "graph": summary.graph(),
+        "totals": {
+            "toolCalls": summary.tool_calls,
+            "commands": summary.commands,
+            "requests": summary.requests,
+            "decrypted": summary.decrypted,
+            "bytes": summary.bytes,
+            "errors": summary.errors,
+        },
+        "timeline": dock_sandbox::audit::graph::timeline(&events, limit),
+    })
+}
+
+/// dock.1 `sandbox/http`：这一页最近 `limit` 次出网（HTTP 历史），每条带 `id`（按它取完整的包）。
+pub fn sandbox_http(page: &Context, limit: usize) -> Value {
+    let Some(active) = page.get::<Audit>(AUDIT).and_then(|a| a.active(page)) else {
+        return json!({ "auditing": false, "requests": [] });
+    };
+    let events = dock_sandbox::audit::store::read(&active.dir);
+    json!({
+        "auditing": true,
+        "records": events.len(),
+        "requests": dock_sandbox::audit::graph::requests(&events, limit),
+    })
+}
+
+/// dock.1 `sandbox/flow`：一次出网的请求包 / 响应包（首行、头、正文；压缩的解开）。
+/// 沙箱没开、没有这条是 `None`。
+pub fn sandbox_flow(page: &Context, id: &str) -> Option<Value> {
+    let active = page.get::<Audit>(AUDIT).and_then(|a| a.active(page))?;
+    dock_sandbox::audit::packet::flow_detail(&active.dir, id)
 }
 
 static SEQ: AtomicU64 = AtomicU64::new(0);

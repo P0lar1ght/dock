@@ -11,7 +11,8 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
-use serde_json::Value;
+use serde::Serialize;
+use serde_json::{json, Value};
 
 use crate::audit::store::{self, Verified};
 
@@ -174,6 +175,248 @@ impl Summary {
         }
         out
     }
+}
+
+/// 给界面画的链路图：节点和边，都带次数、出错数、流量。节点分四层（`kind`）：`session` →
+/// `tool` → `program`（命令里的程序）→ `host`（目的主机）；`source` 是认不出是谁发的出网，
+/// `others` 是并起来的「其他 N 个主机」。和 [`Summary::mermaid`] 是同一张图。
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub struct Graph {
+    pub nodes: Vec<Node>,
+    pub edges: Vec<Edge>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct Node {
+    pub id: String,
+    pub kind: &'static str,
+    pub label: String,
+    pub n: u64,
+    pub errors: u64,
+    pub bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct Edge {
+    pub from: String,
+    pub to: String,
+    pub n: u64,
+    pub errors: u64,
+    pub bytes: u64,
+}
+
+impl Graph {
+    fn node(&mut self, id: &str, kind: &'static str, label: &str) -> usize {
+        if let Some(i) = self.nodes.iter().position(|n| n.id == id) {
+            return i;
+        }
+        self.nodes.push(Node {
+            id: id.to_string(),
+            kind,
+            label: label.to_string(),
+            n: 0,
+            errors: 0,
+            bytes: 0,
+        });
+        self.nodes.len() - 1
+    }
+
+    fn edge(&mut self, from: &str, to: &str, c: &Count) {
+        self.edges.push(Edge {
+            from: from.to_string(),
+            to: to.to_string(),
+            n: c.n,
+            errors: c.errors,
+            bytes: c.bytes,
+        });
+    }
+}
+
+impl Summary {
+    /// 结构化的链路图（界面自己排版）。节点的 `n` / `bytes` 是进它的边加起来的。
+    pub fn graph(&self) -> Graph {
+        let mut g = Graph::default();
+        g.node("S", "session", "会话");
+        for (tool, c) in &self.tools {
+            let id = format!("tool:{tool}");
+            g.node(&id, "tool", tool);
+            g.edge("S", &id, c);
+        }
+        for ((tool, program), c) in &self.programs {
+            let tid = format!("tool:{tool}");
+            if !g.nodes.iter().any(|n| n.id == tid) {
+                g.node(&tid, "tool", tool);
+                g.edge("S", &tid, &Count::default());
+            }
+            let pid = format!("prog:{tool}/{program}");
+            g.node(&pid, "program", program);
+            g.edge(&tid, &pid, c);
+        }
+        for (source, hosts) in &self.hosts {
+            let sid = match source.as_str() {
+                "浏览器" => "tool:浏览器".to_string(),
+                "其他" => "src:其他".to_string(),
+                other => format!("prog:{other}"),
+            };
+            if !g.nodes.iter().any(|n| n.id == sid) {
+                let kind = if source == "其他" { "source" } else { "tool" };
+                g.node(&sid, kind, source);
+                g.edge("S", &sid, &Count::default());
+            }
+            let mut ranked: Vec<(&String, &Count)> = hosts.iter().collect();
+            ranked.sort_by(|a, b| b.1.bytes.cmp(&a.1.bytes).then(b.1.n.cmp(&a.1.n)));
+            let (shown, rest) = ranked.split_at(ranked.len().min(HOSTS_PER_SOURCE));
+            for (host, c) in shown {
+                let hid = format!("host:{host}");
+                g.node(&hid, "host", host);
+                g.edge(&sid, &hid, c);
+            }
+            if !rest.is_empty() {
+                let oid = format!("others:{source}");
+                g.node(&oid, "others", &format!("其他 {} 个主机", rest.len()));
+                let c = Count {
+                    n: rest.iter().map(|(_, c)| c.n).sum(),
+                    errors: rest.iter().map(|(_, c)| c.errors).sum(),
+                    bytes: rest.iter().map(|(_, c)| c.bytes).sum(),
+                };
+                g.edge(&sid, &oid, &c);
+            }
+        }
+        // 节点上的数：进它的边加起来；会话是出它的边加起来。
+        for i in 0..g.nodes.len() {
+            let id = g.nodes[i].id.clone();
+            let incoming: Vec<&Edge> = if id == "S" {
+                g.edges.iter().filter(|e| e.from == id).collect()
+            } else {
+                g.edges.iter().filter(|e| e.to == id).collect()
+            };
+            let (n, errors, bytes) = incoming.iter().fold((0, 0, 0), |(n, er, b), e| {
+                (n + e.n, er + e.errors, b + e.bytes)
+            });
+            let node = &mut g.nodes[i];
+            node.n = n;
+            node.errors = errors;
+            node.bytes = bytes;
+        }
+        g
+    }
+}
+
+/// 时间线里的一行（界面直接画）：`ts`、`kind`（`tool` / `result` / `command` / `command_end` /
+/// `net` / `audit`）、`title`、`detail`、`error`（出错了说什么，没出错是 `null`），以及把几行串起来
+/// 的 `call`（工具调用 id）/ `job`（命令）/ `tag`（出网是哪条命令或哪个标签页发的）。认不出的记录不出。
+pub fn timeline_entry(e: &Value) -> Option<Value> {
+    let clip = |s: &str, n: usize| -> String {
+        let one: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
+        if one.chars().count() > n {
+            format!("{}…", one.chars().take(n).collect::<String>())
+        } else {
+            one
+        }
+    };
+    let text = |k: &str| e[k].as_str().unwrap_or("");
+    let ts = e["ts"].as_u64().unwrap_or(0);
+    let entry = match e["kind"].as_str()? {
+        "tool_call" => json!({
+            "kind": "tool",
+            "title": text("tool"),
+            "detail": clip(text("args"), 240),
+            "error": e["denied"].as_str().map(|d| format!("被拦下：{d}")),
+            "call": e["call_id"],
+        }),
+        "tool_result" => json!({
+            "kind": "result",
+            "title": text("tool"),
+            "detail": clip(text("result_head"), 240),
+            "error": (e["is_error"].as_bool() == Some(true)).then_some("出错"),
+            "call": e["call_id"],
+        }),
+        "command" => json!({
+            "kind": "command",
+            "tool": e["tool"],
+            "title": text("program"),
+            "detail": clip(text("command"), 300),
+            "error": null,
+            "call": e["call_id"],
+            "job": e["job"],
+        }),
+        "command_end" => {
+            let exit = e["exit"].as_i64();
+            json!({
+                "kind": "command_end",
+                "title": match exit { Some(c) => format!("退出 {c}"), None => "结束".into() },
+                "detail": format!("{} ms", e["ms"].as_u64().unwrap_or(0)),
+                "error": exit.filter(|c| *c != 0).map(|c| format!("退出码 {c}")),
+                "job": e["job"],
+            })
+        }
+        "net" => {
+            let method = e["method"].as_str().unwrap_or("CONNECT");
+            let host = text("host");
+            let status = e["status"].as_u64();
+            let bytes = e["bytes_up"].as_u64().unwrap_or(0) + e["bytes_down"].as_u64().unwrap_or(0);
+            let mut detail = format!(
+                "{}{}",
+                text("path"),
+                status.map(|s| format!(" · {s}")).unwrap_or_default()
+            );
+            detail.push_str(&format!(" · {}", human_bytes(bytes)));
+            if e["decrypted"].as_bool() != Some(true) {
+                detail.push_str(" · 未解密");
+            }
+            let error = e["error"]
+                .as_str()
+                .map(str::to_string)
+                .or_else(|| status.filter(|s| *s >= 400).map(|s| format!("HTTP {s}")));
+            json!({
+                "kind": "net",
+                "title": format!("{method} {host}"),
+                "detail": clip(detail.trim_start_matches(" · "), 300),
+                "error": error,
+                "tag": e["tag"],
+                "host": host,
+                "bytes": bytes,
+                "decrypted": e["decrypted"],
+                "method": e["method"],
+                "scheme": e["scheme"],
+                "port": e["port"],
+                "path": e["path"],
+                "status": e["status"],
+                "ms": e["duration_ms"],
+                "note": e["note"],
+            })
+        }
+        "audit" => json!({
+            "kind": "audit",
+            "title": text("event"),
+            "detail": clip(e["host"].as_str().or(e["command"].as_str()).unwrap_or(""), 200),
+            "error": e["error"],
+        }),
+        _ => return None,
+    };
+    let mut entry = entry;
+    entry["ts"] = json!(ts);
+    // 按它取完整的请求 / 响应包（`packet::flow_detail`）。
+    entry["id"] = json!(crate::audit::packet::record_id(e));
+    Some(entry)
+}
+
+/// 最近 `limit` 次出网（按时间），HTTP 历史那一页用。
+pub fn requests(events: &[Value], limit: usize) -> Vec<Value> {
+    let rows: Vec<Value> = events
+        .iter()
+        .filter(|e| e["kind"] == "net")
+        .filter_map(timeline_entry)
+        .collect();
+    let skip = rows.len().saturating_sub(limit);
+    rows.into_iter().skip(skip).collect()
+}
+
+/// 最近 `limit` 条时间线（按时间）。
+pub fn timeline(events: &[Value], limit: usize) -> Vec<Value> {
+    let rows: Vec<Value> = events.iter().filter_map(timeline_entry).collect();
+    let skip = rows.len().saturating_sub(limit);
+    rows.into_iter().skip(skip).collect()
 }
 
 impl Summary {
@@ -638,6 +881,66 @@ mod tests {
         assert!(mermaid_to_svg::render_mermaid_to_svg(&m, None)
             .unwrap()
             .contains("<svg"));
+    }
+
+    /// 界面用的结构化图和 Mermaid 是同一张：四层、边上的次数和流量、出错数都对得上。
+    #[test]
+    fn the_structured_graph_matches_the_mermaid_one() {
+        let g = Summary::build(&sample()).graph();
+        let node = |id: &str| {
+            g.nodes
+                .iter()
+                .find(|n| n.id == id)
+                .unwrap_or_else(|| panic!("{id}: {g:?}"))
+        };
+        let edge = |a: &str, b: &str| {
+            g.edges
+                .iter()
+                .find(|e| e.from == a && e.to == b)
+                .unwrap_or_else(|| panic!("{a}->{b}: {g:?}"))
+        };
+        assert_eq!(node("S").kind, "session");
+        assert_eq!(node("tool:bash").kind, "tool");
+        assert_eq!(node("prog:bash/cargo").kind, "program");
+        assert_eq!(node("host:index.crates.io").kind, "host");
+        assert_eq!(edge("S", "tool:bash").n, 1);
+        assert_eq!(edge("tool:bash", "prog:bash/cargo").n, 1);
+        let crates = edge("prog:bash/cargo", "host:index.crates.io");
+        assert_eq!((crates.n, crates.bytes), (1, 2058));
+        assert_eq!(node("tool:browser_js").errors, 1);
+        assert_eq!(edge("tool:浏览器", "host:www.apple.com").bytes, 4096);
+        assert_eq!(node("prog:bash/cargo").n, 1);
+        // 每条边两头都是图里的节点。
+        for e in &g.edges {
+            assert!(g.nodes.iter().any(|n| n.id == e.from) && g.nodes.iter().any(|n| n.id == e.to));
+        }
+    }
+
+    /// 时间线：每种记录一行，串起来的 id（call / job / tag）留着，出错的写明原因。
+    #[test]
+    fn the_timeline_normalizes_each_record() {
+        let rows = timeline(&sample(), 100);
+        assert_eq!(rows.len(), 9);
+        assert_eq!(rows[0]["kind"], "tool");
+        assert_eq!(rows[0]["title"], "bash");
+        assert_eq!(rows[0]["call"], "c1");
+        assert_eq!(rows[1]["kind"], "command");
+        assert_eq!(rows[1]["job"], "job-1");
+        assert_eq!(rows[2]["kind"], "net");
+        assert_eq!(rows[2]["title"], "GET index.crates.io");
+        assert_eq!(rows[2]["tag"], "job-1");
+        assert!(rows[2]["error"].is_null());
+        assert!(
+            rows[3]["detail"].as_str().unwrap().contains("未解密"),
+            "{}",
+            rows[3]
+        );
+        assert_eq!(rows[4]["title"], "退出 0");
+        assert_eq!(rows[8]["error"], "出错");
+        // 只要最近的几条。
+        let tail = timeline(&sample(), 2);
+        assert_eq!(tail.len(), 2);
+        assert_eq!(tail[1]["ts"], 9);
     }
 
     #[test]

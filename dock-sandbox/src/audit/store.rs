@@ -263,8 +263,10 @@ pub fn verify(dir: &Path) -> Vec<Verified> {
                     else {
                         continue;
                     };
-                    let ok = std::fs::read(bodies.join(sha))
-                        .is_ok_and(|bytes| hex(&Sha256::digest(&bytes)) == sha);
+                    // 不是正文块的名字（日志被改过）：算对不上，也不拿它去读别处的文件。
+                    let ok = crate::audit::packet::is_sha256(sha)
+                        && std::fs::read(bodies.join(sha))
+                            .is_ok_and(|bytes| hex(&Sha256::digest(&bytes)) == sha);
                     if !ok && !bad_bodies.iter().any(|b| b == sha) {
                         bad_bodies.push(sha.to_string());
                     }

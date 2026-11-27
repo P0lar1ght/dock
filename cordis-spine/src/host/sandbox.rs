@@ -773,6 +773,117 @@ action = "deny"
         assert!(nav.denial().is_none());
     }
 
+    /// dock.1 `sandbox/status` / `sandbox/trace`：状态里有开关、工作区、规则；记下的工具调用出现在
+    /// 时间线和链路图里；关掉沙箱就不在记了。
+    #[tokio::test]
+    async fn status_and_trace_describe_the_page() {
+        let (_env, ctx) = policy_page(RULES).await;
+        let status = crate::host::audit::sandbox_status(&ctx);
+        assert_eq!(status["enabled"], true);
+        assert_eq!(status["auditing"], true);
+        assert_eq!(status["workspace"]["mode"], "in_place");
+        assert_eq!(status["rules"].as_array().unwrap().len(), 3, "{status}");
+        assert_eq!(status["rules"][0]["action"], "ask");
+
+        let audit = ctx.get::<Audit>(AUDIT).unwrap();
+        let active = audit.active(&ctx).expect("沙箱开着就在记");
+        active.log.record(
+            "tool_call",
+            serde_json::json!({ "tool": "bash", "call_id": "c1", "args": "ls -la" }),
+        );
+        // 写盘在单独的线程上：等它写到。
+        let mut trace = Value::Null;
+        for _ in 0..100 {
+            trace = crate::host::audit::sandbox_trace(&ctx, 50);
+            if trace["timeline"]
+                .as_array()
+                .is_some_and(|t| t.iter().any(|r| r["kind"] == "tool"))
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(trace["auditing"], true);
+        let tool = trace["timeline"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["kind"] == "tool")
+            .cloned()
+            .unwrap_or_else(|| panic!("{trace}"));
+        assert_eq!(
+            (tool["title"].clone(), tool["call"].clone()),
+            ("bash".into(), "c1".into())
+        );
+        assert!(
+            trace["graph"]["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|n| n["id"] == "tool:bash"),
+            "{trace}"
+        );
+        assert_eq!(trace["totals"]["toolCalls"], 1);
+
+        // HTTP 历史：一次出网列出来，按 id 取回请求包 / 响应包。
+        use dock_sandbox::audit::record::{Captured, Flow, Message};
+        active.log.flow(Flow {
+            tag: "job-1".into(),
+            kind: "http",
+            scheme: "https",
+            host: "api.example.com".into(),
+            port: 443,
+            method: Some("GET".into()),
+            path: Some("/v1/items".into()),
+            status: Some(200),
+            request: Some(Message {
+                headers: vec![("accept".into(), "application/json".into())],
+                body: Captured::default(),
+            }),
+            response: Some(Message {
+                headers: vec![("content-type".into(), "application/json".into())],
+                body: Captured {
+                    size: 11,
+                    truncated: false,
+                    sha256: None,
+                    sample: br#"{"ok":true}"#.to_vec(),
+                },
+            }),
+            bytes_up: 10,
+            bytes_down: 11,
+            started_ms: 1,
+            duration_ms: 5,
+            decrypted: true,
+            note: None,
+            error: None,
+        });
+        let mut http = Value::Null;
+        for _ in 0..100 {
+            http = crate::host::audit::sandbox_http(&ctx, 100);
+            if http["requests"].as_array().is_some_and(|r| !r.is_empty()) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let req = &http["requests"][0];
+        assert_eq!(
+            (req["method"].clone(), req["status"].clone()),
+            ("GET".into(), 200.into()),
+            "{http}"
+        );
+        let id = req["id"].as_str().expect("带 id");
+        let flow = crate::host::audit::sandbox_flow(&ctx, id).expect("按 id 取得回");
+        assert_eq!(flow["request"]["line"], "GET /v1/items HTTP/1.1");
+        assert_eq!(flow["response"]["line"], "HTTP/1.1 200 OK");
+        assert_eq!(flow["response"]["body"]["text"], r#"{"ok":true}"#);
+
+        sandbox_command(&ctx, "off");
+        assert_eq!(
+            crate::host::audit::sandbox_trace(&ctx, 50)["auditing"],
+            false
+        );
+    }
+
     /// 这次任务临时放行的排在配置规则前面；沙箱关了就作废。沙箱关着时策略不落。
     #[tokio::test]
     async fn task_grants_override_config_rules_until_the_sandbox_closes() {

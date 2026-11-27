@@ -72,6 +72,7 @@ pub use host::approval::{
     approval_judge, classify as classify_approval, smart_verdict, ApprovalJudge, Judge,
     JudgeRequest, Judged, Rule as ApprovalRule, Smart,
 };
+pub use host::audit::{sandbox_flow, sandbox_http, sandbox_status, sandbox_trace};
 pub use host::gateway_port::{
     CompanionStatus, GatewayPort, GatewayRef, PairingBinding, PairingError, PairingPrompt,
 };
