@@ -60,19 +60,22 @@
 - 下面这些原样转发，只记目的地和字节数，不让命令因为审计而失败：
   - 上游证书过不了系统校验（自签的开发服务器、客户端加了 `-k`）：交给客户端自己判断。
   - 客户端只说 h2（gRPC）：解密后只能讲 HTTP/1.1。
-  - 客户端拒绝了 Dock 根证书：那一次失败，主机记进 `$DOCK_HOME/audit/passthrough.json`，之后一直原样转发。
-    两种都认：握手里就拒绝的（macOS 的 curl），和握手做完才验证书、3 秒内一个字节不发就断开的（Linux 上 curl 8 + OpenSSL）。
+  - 客户端拒绝了 Dock 根证书：那一次失败，之后这个主机原样转发。两种都认：
+    - 握手里收到证书类的 alert（UnknownCA、BadCertificate 等，macOS 的 curl、rustls 客户端会发）：确定被拒，记进 `$DOCK_HOME/audit/passthrough.json`，30 天内都原样转发。
+    - 说不准的：握手里别的失败（断网、进程被杀、macOS 系统 TLS 不发 alert 直接断开），或握手做完 3 秒内一个字节不发就断开（Linux 上 curl 8 + OpenSSL 握手后才验证书）。只在这次运行里原样转发，不落盘，重启后再试着解密。
+    - `/sandbox passthrough` 列出名单（标出哪些只在这次运行里），`/sandbox passthrough clear [主机]` 从盘上和正在跑的代理里一起清掉。
   - 已知不读证书环境变量的：macOS 上的 Go、Java（看 CONNECT 的 User-Agent）。
   - 不是 TLS 的隧道（SSH over CONNECT 之类）。
 - 凭据类的头（`Authorization`、`Cookie`、`Set-Cookie`、`X-Api-Key`…）遮住，留长度和 sha256 前 12 位：
   能比对是不是同一个，看不到原文。`redact_secrets = false` 关掉。
+  **正文不遮**：只按 `body_cap_kb` 截断。登录接口回的 token、表单里提交的密码会原样留在 `bodies/` 里，导出报告前留意。
 - 本机实测（2026-11，macOS）：curl、git、python urllib、npm、Node 原生 fetch 都能解密；Go 原样转发。
 
 ## 存哪、怎么证明
 
 - `$DOCK_HOME/audit/<开始时刻>-<会话>/`：`events.jsonl`（Dock 写）、`browser.jsonl`（浏览器服务写）、`bodies/<sha256>`（正文块，同内容只存一份）。
-- 只追加。每行带上一行的 sha256（`prev`），改过或删过中间一行，之后的链就断了；`/audit` 状态里和导出的 `verify.txt` 都会说。
-- 写盘在后台：调用方只往有界队列（8192 条）里放，满了丢掉、计数，下一条记录里报 `dropped`。审计不拖慢 agent。
+- 只追加。每行带上一行的 sha256（`prev`），改过或删过中间一行，之后的链就断了；记录引用的正文块不见了、内容对不上哈希也算。`/sandbox` 状态里和导出的 `verify.txt` 都会说。
+- 写盘在单独的线程上：调用方只往有界队列（8192 条）里放，满了丢掉、计数，下一条记录里报 `dropped`。审计不拖慢 agent。关掉沙箱、退出时等这个线程把队列写完。
 - 正文最多记 `body_cap_kb`（默认 256KB），之后只计长度。浏览器只取页面文档、XHR、fetch 的正文，大于 4MB 的不取。
 
 ## 看和导出

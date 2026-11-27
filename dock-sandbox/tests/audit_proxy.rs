@@ -143,6 +143,7 @@ struct Rig {
     port: u16,
     flows: Arc<Mutex<Vec<Flow>>>,
     learned: Arc<Mutex<Vec<String>>>,
+    proxy: Arc<Proxy>,
     _listener: dock_sandbox::audit::proxy::Listener,
 }
 
@@ -172,6 +173,7 @@ async fn rig(extra_roots: Vec<Vec<u8>>) -> Rig {
         _dir: dir,
         flows,
         learned,
+        proxy,
         _listener: listener,
     }
 }
@@ -380,7 +382,9 @@ async fn a_client_that_rejects_dock_is_passed_through_afterwards() {
             .contains("之后这个主机原样转发"),
         "{rejected:?}"
     );
-    assert_eq!(rig.learned.lock().unwrap().as_slice(), ["localhost"]);
+    // 这个进程里马上直通。落不落盘看客户端怎么拒的（见下面两条）：macOS 的 curl 在握手里
+    // 发 UnknownCA（落盘），Linux 上 curl 8 + OpenSSL 握手后断开（只记内存）。
+    assert_eq!(rig.proxy.passthrough_hosts(), ["localhost"]);
     let (ok, out) = curl(rig.port, &["--cacert", &only_upstream, &url]).await;
     assert!(ok, "第二次原样转发：{out}");
     assert_eq!(out, "hello /again ");
@@ -433,7 +437,88 @@ async fn a_client_that_drops_right_after_the_handshake_is_passed_through_afterwa
         f.error.as_deref().unwrap_or("").contains("没发请求"),
         "{f:?}"
     );
-    assert_eq!(rig.learned.lock().unwrap().as_slice(), ["localhost"]);
+    // 说不准是不信证书还是连接被取消：这个进程里直通，不落盘（下次启动还会再试着解密）。
+    assert_eq!(rig.proxy.passthrough_hosts(), ["localhost"]);
+    assert!(rig.learned.lock().unwrap().is_empty(), "握手后断开不落盘");
+    rig.proxy.forget_passthrough(Some("LOCALHOST"));
+    assert!(rig.proxy.passthrough_hosts().is_empty(), "清掉之后又解密");
+}
+
+/// 握手里收到证书类的 alert（UnknownCA）：确定是不信 Dock 根证书，落盘，下次启动还认。
+/// 以前握手里的任何错误都落盘，断网、进程被杀也会永久关掉这个主机的解密。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_certificate_alert_is_remembered_but_a_broken_handshake_is_not() {
+    let pki = test_pki();
+    let upstream_ca = pki.ca_der.clone();
+    let server = serve(Some(pki.server)).await;
+    let rig = rig(vec![pki.ca_der]).await;
+    let connect = || async {
+        let mut tcp = tokio::net::TcpStream::connect(("127.0.0.1", rig.port))
+            .await
+            .unwrap();
+        tcp.write_all(
+            format!("CONNECT localhost:{server} HTTP/1.1\r\nHost: localhost:{server}\r\n\r\n")
+                .as_bytes(),
+        )
+        .await
+        .unwrap();
+        let mut head = Vec::new();
+        let mut byte = [0u8; 1];
+        while !head.ends_with(b"\r\n\r\n") {
+            assert_eq!(tcp.read(&mut byte).await.unwrap(), 1, "代理没回 CONNECT");
+            head.push(byte[0]);
+        }
+        tcp
+    };
+
+    // 握手到一半就断开（发了 ClientHello、没等回话）：不落盘。
+    let mut tcp = connect().await;
+    let hello = {
+        // 一个最小的 ClientHello 由客户端库生成：起一个握手、拿到第一段字节就停。
+        let (mut ours, theirs) = tokio::io::duplex(16 * 1024);
+        let connector = tokio_native_tls::TlsConnector::from(
+            native_tls::TlsConnector::builder().build().unwrap(),
+        );
+        let task = tokio::spawn(async move { connector.connect("localhost", theirs).await });
+        let mut buf = vec![0u8; 16 * 1024];
+        let n = ours.read(&mut buf).await.unwrap();
+        task.abort();
+        buf.truncate(n);
+        buf
+    };
+    tcp.write_all(&hello).await.unwrap();
+    drop(tcp);
+    let flows = wait_flows(&rig.flows, 1).await;
+    assert!(!flows.is_empty(), "要记一条出错记录");
+    assert!(
+        rig.learned.lock().unwrap().is_empty(),
+        "握手不完整不落盘：{flows:?}"
+    );
+    rig.proxy.forget_passthrough(None);
+
+    // 客户端只信上游的 CA、不信 Dock 根证书，验不过就在握手里发 alert（rustls 客户端会发；
+    // macOS 的系统 TLS、Linux 上的 curl 8 不发，直接断开——那种只记内存）：落盘。
+    let tcp = connect().await;
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(CertificateDer::from(upstream_ca)).unwrap();
+    let config = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
+    let name = rustls::pki_types::ServerName::try_from("localhost").unwrap();
+    assert!(connector.connect(name, tcp).await.is_err());
+    let flows = wait_flows(&rig.flows, 2).await;
+    assert_eq!(flows.len(), 2, "{flows:?}");
+    assert_eq!(
+        rig.learned.lock().unwrap().as_slice(),
+        ["localhost"],
+        "{:?}",
+        flows[1]
+    );
 }
 
 /// 沙箱策略的关卡：阻断的连接回 403、记一条，命令拿到的是明确的拒绝，别的照常走。

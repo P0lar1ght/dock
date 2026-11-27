@@ -153,6 +153,33 @@ impl Audit {
             .get_or_init(|| start_egress(self.routes.clone()).map(Arc::new))
             .clone()
     }
+
+    /// 直通名单（客户端不信 Dock 根证书、原样转发的主机）：`(主机, 落了盘)`。落盘的是确定被拒的，
+    /// [`PASSTHROUGH_TTL`] 内有效；没落盘的只在这个进程里（说不准是不信证书还是连接被取消）。
+    pub(crate) fn passthrough(&self) -> Vec<(String, bool)> {
+        let saved = load_passthrough(&dock_home().join("audit"));
+        let mut hosts: Vec<(String, bool)> = saved.iter().map(|h| (h.clone(), true)).collect();
+        if let Some(Ok(egress)) = self.egress.get() {
+            for host in egress.proxy.passthrough_hosts() {
+                if !saved.contains(&host) {
+                    hosts.push((host, false));
+                }
+            }
+        }
+        hosts.sort();
+        hosts
+    }
+
+    /// 从直通名单里拿掉 `host`（`None` = 全部），盘上和正在跑的出口代理一起：之后又解密。
+    /// 回拿掉了几个。
+    pub(crate) fn forget_passthrough(&self, host: Option<&str>) -> usize {
+        let before = self.passthrough();
+        forget_saved_passthrough(&dock_home().join("audit"), host);
+        if let Some(Ok(egress)) = self.egress.get() {
+            egress.proxy.forget_passthrough(host);
+        }
+        before.len() - self.passthrough().len()
+    }
 }
 
 fn to_rule(r: &SandboxRule) -> Rule {
@@ -392,21 +419,52 @@ fn shell_quote(v: &str) -> String {
     format!("'{}'", v.replace('\'', "'\\''"))
 }
 
-/// 之前学到的直通主机（客户端拒绝过 Dock 根证书）。
+/// 落了盘的直通记录多久有效：过期的不再认，下次又试着解密（客户端可能已经信了 Dock 根证书）。
+const PASSTHROUGH_TTL_MS: u64 = 30 * 24 * 60 * 60 * 1000;
+
+/// 之前学到的直通主机（客户端确定拒绝过 Dock 根证书），过期的不算。
 fn load_passthrough(root: &Path) -> Vec<String> {
+    let now = dock_sandbox::audit::record::now_ms();
+    let mut hosts: Vec<String> = read_passthrough(root)
+        .into_iter()
+        .filter(|(_, v)| {
+            let ts = v.get("ts").and_then(Value::as_u64).unwrap_or(0);
+            now.saturating_sub(ts) < PASSTHROUGH_TTL_MS
+        })
+        .map(|(host, _)| host)
+        .collect();
+    hosts.sort();
+    hosts
+}
+
+fn read_passthrough(root: &Path) -> serde_json::Map<String, Value> {
     std::fs::read_to_string(root.join(PASSTHROUGH))
         .ok()
         .and_then(|s| serde_json::from_str::<serde_json::Map<String, Value>>(&s).ok())
-        .map(|m| m.keys().cloned().collect())
         .unwrap_or_default()
+}
+
+fn forget_saved_passthrough(root: &Path, host: Option<&str>) {
+    let path = root.join(PASSTHROUGH);
+    if !path.exists() {
+        return;
+    }
+    let mut map = read_passthrough(root);
+    match host {
+        Some(h) => {
+            map.remove(&h.to_ascii_lowercase());
+        }
+        None => map.clear(),
+    }
+    let _ = std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&map).unwrap_or_default(),
+    );
 }
 
 fn save_passthrough(root: &Path, host: &str, why: &str) {
     let path = root.join(PASSTHROUGH);
-    let mut map = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str::<serde_json::Map<String, Value>>(&s).ok())
-        .unwrap_or_default();
+    let mut map = read_passthrough(root);
     map.insert(
         host.to_ascii_lowercase(),
         json!({ "reason": why, "ts": dock_sandbox::audit::record::now_ms() }),
@@ -672,7 +730,7 @@ pub(crate) fn status_lines(audit: &Audit, page: &Context) -> Vec<String> {
             let events = dock_sandbox::audit::store::read(&active.dir);
             let intact = dock_sandbox::audit::store::verify(&active.dir)
                 .iter()
-                .all(|v| v.broken_at.is_none());
+                .all(|v| v.intact());
             out.push(format!(
                 "审计：{}（{} 条，哈希链{}）",
                 active.dir.display(),
@@ -694,11 +752,21 @@ pub(crate) fn status_lines(audit: &Audit, page: &Context) -> Vec<String> {
         Some(Err(e)) => out.push(format!("出口代理：不可用（{e}）")),
         None => out.push("出口代理：还没有命令用过".into()),
     }
-    let passthrough = load_passthrough(&dock_home().join("audit"));
+    let passthrough = audit.passthrough();
     if !passthrough.is_empty() {
+        let list = passthrough
+            .iter()
+            .map(|(h, saved)| {
+                if *saved {
+                    h.clone()
+                } else {
+                    format!("{h}（本次）")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("、");
         out.push(format!(
-            "原样转发（客户端不信 Dock 根证书）的主机：{}",
-            passthrough.join("、")
+            "原样转发（客户端不信 Dock 根证书）的主机：{list}；/sandbox passthrough clear 清掉"
         ));
     }
     out
@@ -735,6 +803,33 @@ pub fn audit() -> Plugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 落盘的直通记录 30 天后不再认；`clear` 能清掉一个或全部。
+    #[test]
+    fn saved_passthrough_expires_and_can_be_cleared() {
+        let dir = tempfile::tempdir().unwrap();
+        save_passthrough(dir.path(), "Fresh.Example", "UnknownCA");
+        save_passthrough(dir.path(), "other.example", "UnknownCA");
+        let mut map = read_passthrough(dir.path());
+        map.insert(
+            "old.example".into(),
+            json!({ "reason": "UnknownCA", "ts": 1 }),
+        );
+        std::fs::write(
+            dir.path().join(PASSTHROUGH),
+            serde_json::to_string(&map).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            load_passthrough(dir.path()),
+            ["fresh.example", "other.example"],
+            "过期的不认"
+        );
+        forget_saved_passthrough(dir.path(), Some("FRESH.example"));
+        assert_eq!(load_passthrough(dir.path()), ["other.example"]);
+        forget_saved_passthrough(dir.path(), None);
+        assert!(load_passthrough(dir.path()).is_empty());
+    }
     use crate::tools::registry::Tools;
     use cordis_base::types::ToolCall;
 
@@ -832,7 +927,7 @@ mod tests {
         assert_eq!(kind("command_end")["exit"], 0);
         assert!(dock_sandbox::audit::store::verify(&active.dir)
             .iter()
-            .all(|v| v.broken_at.is_none()));
+            .all(|v| v.intact()));
         settings.set_sandbox(false);
         assert!(audit.close(&ctx).is_some());
         assert!(audit.active(&ctx).is_none());

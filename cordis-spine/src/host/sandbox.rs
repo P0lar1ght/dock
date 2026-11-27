@@ -272,13 +272,17 @@ fn url_host(tool: &str, args: &Value) -> Option<String> {
         }
         _ => return None,
     };
-    let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-    let authority = authority.rsplit('@').next().unwrap_or(authority);
-    let host = match authority.strip_prefix('[') {
-        Some(v6) => v6.split(']').next().unwrap_or(""),
-        None => authority.split(':').next().unwrap_or(""),
-    };
+    // 按 URL 规范解析：百分号编码（`foo.corp%2eexample`）、大小写、IDN 都规范成主机真正的名字，
+    // 规则才不会被换个写法绕开。没写协议的（`example.com/x`）按 http 补上。
+    let parsed = url::Url::parse(url)
+        .ok()
+        .filter(|u| u.host_str().is_some())
+        .or_else(|| url::Url::parse(&format!("http://{url}")).ok())?;
+    let host = parsed.host_str()?;
+    let host = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
     (!host.is_empty()).then(|| host.to_ascii_lowercase())
 }
 
@@ -444,6 +448,51 @@ fn persist(page: &Context) {
     }
 }
 
+/// `/sandbox passthrough [clear [主机]]`：看 / 清直通名单（客户端不信 Dock 根证书、原样转发的主机）。
+fn passthrough_command(audit: &Audit, rest: &str) -> SlashOutcome {
+    let (verb, host) = match rest.split_once(char::is_whitespace) {
+        Some((verb, host)) => (verb, Some(host.trim()).filter(|h| !h.is_empty())),
+        None => (rest, None),
+    };
+    match verb {
+        "" | "list" => {
+            let hosts = audit.passthrough();
+            if hosts.is_empty() {
+                return SlashOutcome::Applied("直通名单是空的：命令的 HTTPS 都在解密".into());
+            }
+            let lines: Vec<String> = hosts
+                .iter()
+                .map(|(h, saved)| {
+                    if *saved {
+                        format!("  {h}（确定被拒，30 天内都原样转发）")
+                    } else {
+                        format!("  {h}（这次运行里学到的，重启后再试着解密）")
+                    }
+                })
+                .collect();
+            SlashOutcome::notice(
+                "直通名单",
+                format!(
+                    "这些主机的 HTTPS 原样转发、不解密（客户端不信 Dock 根证书）：\n{}\n/sandbox passthrough clear [主机] 清掉",
+                    lines.join("\n")
+                ),
+            )
+        }
+        "clear" | "清" => {
+            let n = audit.forget_passthrough(host);
+            SlashOutcome::Applied(match host {
+                Some(h) if n > 0 => format!("{h} 从直通名单里拿掉了，之后又解密"),
+                Some(h) => format!("{h} 不在直通名单里"),
+                None => format!("直通名单清空了（{n} 个主机），之后又解密"),
+            })
+        }
+        other => SlashOutcome::notice(
+            "沙箱",
+            format!("不认识「{other}」：用 /sandbox passthrough [clear [主机]]"),
+        ),
+    }
+}
+
 /// 给人看的现状。
 fn describe(page: &Context) -> String {
     let cfg = cordis_base::config::load_sandbox_config();
@@ -538,6 +587,12 @@ fn sandbox_command(page: &Context, args: &str) -> SlashOutcome {
         "on" | "开" => turn(true),
         "off" | "关" => turn(false),
         "status" | "状态" => {}
+        "passthrough" | "直通" => {
+            let Some(audit) = audit else {
+                return SlashOutcome::notice("沙箱", "审计服务未挂载。");
+            };
+            return passthrough_command(&audit, rest);
+        }
         "worktree" | "工作树" => return SlashOutcome::Applied(enter_worktree(page)),
         "inplace" | "原地" => return SlashOutcome::Applied(leave_worktree(page)),
         "graph" | "图" => {
@@ -576,7 +631,7 @@ fn sandbox_command(page: &Context, args: &str) -> SlashOutcome {
         other => {
             return SlashOutcome::notice(
                 "沙箱",
-                format!("不认识「{other}」：用 /sandbox [on|off|status|graph|export|allow|allow-cmd|worktree|inplace]，不带参数是切换。"),
+                format!("不认识「{other}」：用 /sandbox [on|off|status|graph|export|allow|allow-cmd|passthrough|worktree|inplace]，不带参数是切换。"),
             )
         }
     }
@@ -605,6 +660,11 @@ pub fn sandbox() -> Plugin {
             .hint("sandbox export", "导出审计报告（HTML + 原始记录）", false)
             .hint("sandbox allow", "这次任务里放行一个域名（通配）", true)
             .hint("sandbox allow-cmd", "这次任务里放行一类命令（通配）", true)
+            .hint(
+                "sandbox passthrough",
+                "看 / 清直通名单（不解密的主机）",
+                true,
+            )
             .hint(
                 "sandbox worktree",
                 "这一页换进项目的一棵 git 工作树（改动不碰原项目）",
@@ -778,6 +838,34 @@ action = "deny"
         assert_eq!(expand_home("/abs", Some(home)), Some(PathBuf::from("/abs")));
         assert_eq!(expand_home("relative", Some(home)), None);
         assert_eq!(expand_home("~/x", None), None);
+    }
+
+    /// 回归：网址按 URL 规范解析。以前手工切字符串、不解百分号编码，`foo.corp%2eexample`
+    /// 绕得开 `*.corp.example` 的 deny。
+    #[test]
+    fn url_hosts_are_normalized_before_the_rules_see_them() {
+        let host = |u: &str| url_host("web_fetch", &serde_json::json!({ "url": u }));
+        assert_eq!(
+            host("https://foo.corp%2eexample/x").as_deref(),
+            Some("foo.corp.example")
+        );
+        assert_eq!(
+            host("HTTPS://User:pw@API.Example.COM:8443/p?q#f").as_deref(),
+            Some("api.example.com")
+        );
+        assert_eq!(host("http://[::1]:3000/").as_deref(), Some("::1"));
+        assert_eq!(host("example.org/path").as_deref(), Some("example.org"));
+        assert_eq!(host("").as_deref(), None);
+        let rules = vec![Rule {
+            host: Some("*.corp.example".into()),
+            command: None,
+            action: Action::Deny,
+        }];
+        let h = host("https://foo.corp%2eexample/").unwrap();
+        assert!(
+            rules::for_host(&rules, &h).is_some(),
+            "编码过的主机名也要命中 deny"
+        );
     }
 
     #[test]

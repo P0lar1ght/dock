@@ -877,6 +877,7 @@ pub fn sandbox_args() -> Vec<ArgItem> {
         ArgItem::new("export", "导出审计报告（HTML + 原始记录）"),
         ArgItem::new("allow", "这次任务里放行一个域名（通配）"),
         ArgItem::new("allow-cmd", "这次任务里放行一类命令（通配）"),
+        ArgItem::new("passthrough", "看 / 清直通名单（不解密的主机）"),
         ArgItem::new("worktree", "换进项目的一棵 git 工作树（改动不碰原项目）"),
         ArgItem::new("inplace", "回到原项目（工作树留着）"),
     ]

@@ -469,13 +469,24 @@ pub fn report_html(
     };
     let chain: String = verified
         .iter()
-        .map(|v| match v.broken_at {
-            None => format!("<li>{}：{} 条，哈希链完好</li>", esc(&v.file), v.records),
-            Some(at) => format!(
-                "<li class=bad>{}：{} 条，<b>第 {at} 条起哈希链对不上（被改过或删过）</b></li>",
-                esc(&v.file),
-                v.records
-            ),
+        .map(|v| {
+            let chain = match v.broken_at {
+                None => format!("<li>{}：{} 条，哈希链完好</li>", esc(&v.file), v.records),
+                Some(at) => format!(
+                    "<li class=bad>{}：{} 条，<b>第 {at} 条起哈希链对不上（被改过或删过）</b></li>",
+                    esc(&v.file),
+                    v.records
+                ),
+            };
+            if v.bad_bodies.is_empty() {
+                chain
+            } else {
+                format!(
+                    "{chain}<li class=bad>{}：<b>{} 个正文块不见了或被改过</b></li>",
+                    esc(&v.file),
+                    v.bad_bodies.len()
+                )
+            }
         })
         .collect();
     let opaque: String = events
@@ -573,9 +584,17 @@ pub fn export(dir: &Path, title: &str) -> Result<PathBuf, String> {
     }
     let verify_txt: String = verified
         .iter()
-        .map(|v| match v.broken_at {
-            None => format!("{}\t{} records\tok\n", v.file, v.records),
-            Some(at) => format!("{}\t{} records\tBROKEN at {at}\n", v.file, v.records),
+        .map(|v| {
+            let chain = match v.broken_at {
+                None => format!("{}\t{} records\tok\n", v.file, v.records),
+                Some(at) => format!("{}\t{} records\tBROKEN at {at}\n", v.file, v.records),
+            };
+            let bodies: String = v
+                .bad_bodies
+                .iter()
+                .map(|sha| format!("{}\tbody {sha}\tMISSING OR ALTERED\n", v.file))
+                .collect();
+            format!("{chain}{bodies}")
         })
         .collect();
     std::fs::write(out.join("verify.txt"), verify_txt).map_err(|e| e.to_string())?;

@@ -425,8 +425,11 @@ impl Proxy {
         let mut tls = match acceptor.accept(Rewind::new(prefix, client)).await {
             Ok(tls) => tls,
             Err(e) => {
+                // 明确的证书拒绝（UnknownCA 之类的 alert）才落盘；别的握手失败（断网、进程被杀、
+                // 握手不完整）说不准，只在这个进程里原样转发。
+                let sure = rejects_certificate(&e);
                 let why = format!("客户端拒绝了 Dock 根证书（{e}），之后这个主机原样转发");
-                return self.learn_rejection(&tag, &name, port, why);
+                return self.learn_rejection(&tag, &name, port, why, sure);
             }
         };
         // 有的客户端握手做完才自己验证书（curl 8 + OpenSSL，Linux 上的常态）：验不过就一个
@@ -434,9 +437,10 @@ impl Proxy {
         // 不然这种客户端每次都失败。一直不说话的（连接池预热）不算，照常等。
         let mut first = vec![0u8; 4096];
         let first = match tokio::time::timeout(FIRST_REQUEST_WAIT, tls.read(&mut first)).await {
+            // 握手后断开分不清是不信证书还是连接被取消：只在这个进程里原样转发，不落盘。
             Ok(Ok(0)) | Ok(Err(_)) => {
                 let why = "客户端握手后没发请求就断开了（多半是握手后才验证书、不信 Dock 根证书），之后这个主机原样转发".to_string();
-                return self.learn_rejection(&tag, &name, port, why);
+                return self.learn_rejection(&tag, &name, port, why, false);
             }
             Ok(Ok(n)) => {
                 first.truncate(n);
@@ -676,17 +680,37 @@ impl Proxy {
         (self.sink)(flow);
     }
 
-    /// 客户端不信 Dock 根证书：这个主机之后原样转发（记进直通名单、交给 `learn` 存盘），
-    /// 这一次记一条出错。
-    fn learn_rejection(&self, tag: &str, name: &str, port: u16, why: String) {
+    /// 客户端不信 Dock 根证书：这个主机之后原样转发（这个进程里马上生效），这一次记一条出错。
+    /// `persist` = 确定是证书被拒，交给 `learn` 存盘、下次启动还认；说不准的只记在内存里。
+    fn learn_rejection(&self, tag: &str, name: &str, port: u16, why: String, persist: bool) {
         self.passthrough
             .lock()
             .unwrap()
             .insert(name.to_ascii_lowercase());
-        if let Some(learn) = &self.learn {
-            learn(name, &why);
+        if persist {
+            if let Some(learn) = &self.learn {
+                learn(name, &why);
+            }
         }
         self.emit_error(tag, "https", name, port, why);
+    }
+
+    /// 直通名单里的主机（这个进程里学到的 + 启动时载入的）。
+    pub fn passthrough_hosts(&self) -> Vec<String> {
+        let mut hosts: Vec<String> = self.passthrough.lock().unwrap().iter().cloned().collect();
+        hosts.sort();
+        hosts
+    }
+
+    /// 从直通名单里拿掉 `host`（`None` = 全部）：之后又解密。
+    pub fn forget_passthrough(&self, host: Option<&str>) {
+        let mut set = self.passthrough.lock().unwrap();
+        match host {
+            Some(h) => {
+                set.remove(&h.to_ascii_lowercase());
+            }
+            None => set.clear(),
+        }
     }
 
     fn emit_error(&self, tag: &str, scheme: &'static str, host: &str, port: u16, error: String) {
@@ -749,6 +773,26 @@ struct Hello {
 }
 
 /// 读到完整的 ClientHello（或者确定不是 TLS）为止。返回读到的字节（转发时要补给对端）。
+/// 握手失败是不是客户端明确拒绝了证书（收到证书类的 alert）。
+fn rejects_certificate(e: &io::Error) -> bool {
+    use rustls::AlertDescription as A;
+    let Some(rustls::Error::AlertReceived(alert)) = e
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<rustls::Error>())
+    else {
+        return false;
+    };
+    matches!(
+        alert,
+        A::UnknownCA
+            | A::BadCertificate
+            | A::CertificateUnknown
+            | A::UnsupportedCertificate
+            | A::CertificateExpired
+            | A::CertificateRevoked
+    )
+}
+
 async fn peek_hello<S: AsyncRead + Unpin>(io: &mut S) -> (Vec<u8>, Option<Hello>) {
     let mut buf = Vec::with_capacity(2048);
     let mut chunk = [0u8; 4096];

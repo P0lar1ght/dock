@@ -9,11 +9,10 @@
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
-use tokio::sync::mpsc;
 
 use crate::audit::record::{now_ms, Captured, Flow};
 
@@ -26,11 +25,23 @@ enum Entry {
     Flow(Box<Flow>),
 }
 
-/// 一个写入方。drop 时把排着的写完。需要在 tokio 运行时里打开。
+/// 一个写入方。写盘在它自己的线程上（不占 tokio 的工作线程、不依赖运行时还在）；
+/// drop 时等这个线程把排着的写完再走，关掉沙箱、退出 Dock 都不丢最后几条。
 pub struct AuditLog {
-    tx: mpsc::Sender<Entry>,
+    tx: Option<mpsc::SyncSender<Entry>>,
+    writer: Option<std::thread::JoinHandle<()>>,
     dropped: Arc<AtomicU64>,
     dir: PathBuf,
+}
+
+impl Drop for AuditLog {
+    fn drop(&mut self) {
+        // 先放掉发送端，写入线程把队列里剩下的写完、收到断开就退出。
+        drop(self.tx.take());
+        if let Some(writer) = self.writer.take() {
+            let _ = writer.join();
+        }
+    }
 }
 
 impl AuditLog {
@@ -43,7 +54,7 @@ impl AuditLog {
             .create(true)
             .append(true)
             .open(&path)?;
-        let (tx, rx) = mpsc::channel(QUEUE);
+        let (tx, rx) = mpsc::sync_channel(QUEUE);
         let dropped = Arc::new(AtomicU64::new(0));
         let writer = Writer {
             out: std::io::BufWriter::new(out),
@@ -52,9 +63,12 @@ impl AuditLog {
             prev,
             dropped: dropped.clone(),
         };
-        tokio::spawn(writer.run(rx));
+        let writer = std::thread::Builder::new()
+            .name("dock-audit-writer".into())
+            .spawn(move || writer.run(rx))?;
         Ok(Self {
-            tx,
+            tx: Some(tx),
+            writer: Some(writer),
             dropped,
             dir: dir.to_path_buf(),
         })
@@ -84,7 +98,11 @@ impl AuditLog {
     }
 
     fn send(&self, entry: Entry) {
-        if self.tx.try_send(entry).is_err() {
+        let sent = self
+            .tx
+            .as_ref()
+            .is_some_and(|tx| tx.try_send(entry).is_ok());
+        if !sent {
             self.dropped.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -99,8 +117,8 @@ struct Writer {
 }
 
 impl Writer {
-    async fn run(mut self, mut rx: mpsc::Receiver<Entry>) {
-        while let Some(entry) = rx.recv().await {
+    fn run(mut self, rx: mpsc::Receiver<Entry>) {
+        while let Ok(entry) = rx.recv() {
             self.write(entry);
             while let Ok(more) = rx.try_recv() {
                 self.write(more);
@@ -203,35 +221,60 @@ pub fn read(dir: &Path) -> Vec<Value> {
     out
 }
 
-/// 校验结果：每个文件多少条、链断在哪（`None` = 完好）。
+/// 校验结果：每个文件多少条、链断在哪（`None` = 完好）、哪些正文块不见了或被改过。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Verified {
     pub file: String,
     pub records: usize,
     pub broken_at: Option<usize>,
+    /// 记录里引用、但 `bodies/` 里没有或内容对不上哈希的正文块（sha256）。
+    pub bad_bodies: Vec<String>,
 }
 
-/// 逐个文件验哈希链。
+impl Verified {
+    /// 哈希链完好，引用的正文块也都在、都对得上。
+    pub fn intact(&self) -> bool {
+        self.broken_at.is_none() && self.bad_bodies.is_empty()
+    }
+}
+
+/// 逐个文件验哈希链，并核对记录引用的正文块（`bodies/<sha256>` 在不在、内容对不对）。
 pub fn verify(dir: &Path) -> Vec<Verified> {
+    let bodies = dir.join(BODIES);
     logs(dir)
         .into_iter()
         .map(|(file, lines)| {
             let mut prev = String::new();
             let mut broken_at = None;
+            let mut bad_bodies = Vec::new();
             for (i, line) in lines.iter().enumerate() {
-                let claimed = serde_json::from_str::<Value>(line)
-                    .ok()
+                let parsed = serde_json::from_str::<Value>(line).ok();
+                let claimed = parsed
+                    .as_ref()
                     .and_then(|v| v["prev"].as_str().map(str::to_string));
-                if claimed.as_deref() != Some(prev.as_str()) {
+                if broken_at.is_none() && claimed.as_deref() != Some(prev.as_str()) {
                     broken_at = Some(i + 1);
-                    break;
                 }
                 prev = hex(&Sha256::digest(line.as_bytes()));
+                for side in ["request", "response"] {
+                    let Some(sha) = parsed
+                        .as_ref()
+                        .and_then(|v| v[side]["body"]["sha256"].as_str())
+                    else {
+                        continue;
+                    };
+                    let ok = std::fs::read(bodies.join(sha))
+                        .is_ok_and(|bytes| hex(&Sha256::digest(&bytes)) == sha);
+                    if !ok && !bad_bodies.iter().any(|b| b == sha) {
+                        bad_bodies.push(sha.to_string());
+                    }
+                }
             }
             Verified {
                 file,
                 records: lines.len(),
                 broken_at,
+                bad_bodies,
             }
         })
         .collect()
@@ -295,11 +338,6 @@ mod tests {
         }
     }
 
-    async fn settle(log: AuditLog) {
-        drop(log);
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-
     #[tokio::test]
     async fn records_chain_resume_and_detect_tampering() {
         let dir = tempfile::tempdir().unwrap();
@@ -307,11 +345,13 @@ mod tests {
         log.record("tool_call", json!({"name": "bash"}));
         log.flow(flow(b"<html>hi</html>"));
         log.flow(flow(b"<html>hi</html>"));
-        settle(log).await;
+        // 关掉就写完了，不用等：drop 等写入线程把队列写完（以前是 tokio 任务，关掉之后
+        // 还要等一会儿，进程一退就丢最后几条）。
+        drop(log);
         // 重开接着写：序号和链接得上。
         let log = AuditLog::open(dir.path(), "events.jsonl").unwrap();
         log.record("tool_result", json!({"name": "bash"}));
-        settle(log).await;
+        drop(log);
 
         let events = read(dir.path());
         assert_eq!(events.len(), 4);
@@ -326,7 +366,18 @@ mod tests {
             1,
             "同样的正文只存一份"
         );
-        assert_eq!(verify(dir.path())[0].broken_at, None);
+        assert!(verify(dir.path())[0].intact());
+
+        // 正文块被改过、被删了：校验要报出来（以前只验 jsonl 的链）。
+        let body = dir.path().join(BODIES).join(sha);
+        std::fs::write(&body, b"<html>tampered</html>").unwrap();
+        let v = &verify(dir.path())[0];
+        assert_eq!(v.bad_bodies, [sha.to_string()]);
+        assert!(!v.intact());
+        std::fs::remove_file(&body).unwrap();
+        assert_eq!(verify(dir.path())[0].bad_bodies.len(), 1);
+        std::fs::write(&body, b"<html>hi</html>").unwrap();
+        assert!(verify(dir.path())[0].intact());
 
         // 改中间一行：从下一行起链断了。
         let path = dir.path().join("events.jsonl");
