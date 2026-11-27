@@ -134,7 +134,7 @@ impl Policy {
         for root in &project_roots {
             protect_project(root, &mut protected);
         }
-        protect_dock_home(&host.dock_home, &mut protected);
+        protect_dock_home(&host.dock_home, &workspace, &mut protected);
         if let Some(home) = home {
             protected.extend(paths::HOME_PROTECTED_FILES.iter().map(|r| home.join(r)));
             protected.extend(paths::HOME_PROTECTED_DIRS.iter().map(|r| home.join(r)));
@@ -185,6 +185,32 @@ impl Policy {
             proxy_only: settings.proxy_only,
             keep_env: settings.keep_env.clone(),
         }
+    }
+
+    /// 按工作区定策略：可写根是工作区的根（不是 cwd）。工作树还要能写原仓库的 git 目录
+    /// （在工作树里提交写的是那里的 objects / refs），它的 hooks、config 照样只读。
+    pub fn for_space(
+        access: Access,
+        space: &crate::space::Space,
+        settings: &Settings,
+        host: &Host,
+    ) -> Self {
+        let mut policy = Self::build(access, &space.root, settings, host);
+        if let (Some(git_dir), Access::WorkspaceWrite) = (space.git_dir(), access) {
+            let git_dir = real_path(git_dir);
+            let mut protected: Vec<PathBuf> = paths::GIT_PROTECTED
+                .iter()
+                .map(|n| git_dir.join(n))
+                .collect();
+            protect_submodules(&git_dir.join("modules"), 0, &mut protected);
+            policy.write_roots.push(git_dir);
+            policy.write_roots = dedup(std::mem::take(&mut policy.write_roots));
+            policy
+                .protected
+                .extend(protected.iter().map(|p| real_path(p)));
+            policy.protected = dedup(std::mem::take(&mut policy.protected));
+        }
+        policy
     }
 
     pub fn access(&self) -> Access {
@@ -297,13 +323,21 @@ fn protect_submodules(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
 
 /// `$DOCK_HOME` 里除了 `scratch` 都护住：配置、插件、技能、会话。
 /// 只有它落在某个可写根里（在 `~` 里开 Dock）时才真起作用。
-fn protect_dock_home(dock_home: &Path, out: &mut Vec<PathBuf>) {
+///
+/// 工作区本身是 `$DOCK_HOME/worktrees/` 里的一棵工作树时，`worktrees` 不护（护住它就写不了
+/// 工作区）；别的工作树仍然不在可写根里。
+fn protect_dock_home(dock_home: &Path, workspace: &Path, out: &mut Vec<PathBuf>) {
     out.push(dock_home.join("config.toml"));
     if let Ok(entries) = std::fs::read_dir(dock_home) {
         for entry in entries.flatten() {
-            if entry.file_name() != paths::DOCK_SCRATCH {
-                out.push(entry.path());
+            let name = entry.file_name();
+            if name == paths::DOCK_SCRATCH {
+                continue;
             }
+            if name == crate::space::STORE_DIR && within(workspace, &real_path(&entry.path())) {
+                continue;
+            }
+            out.push(entry.path());
         }
     }
 }
@@ -344,6 +378,49 @@ mod tests {
             home,
             host,
         }
+    }
+
+    /// 工作树工作区：写得了工作树和原仓库的 objects，写不了原仓库的 hooks / config、
+    /// 原项目本身、`$DOCK_HOME` 里别的工作树。
+    #[test]
+    fn a_worktree_space_writes_its_tree_and_the_shared_git_dir_only() {
+        let f = fixture();
+        let trees = f.host.dock_home.join(crate::space::STORE_DIR);
+        let tree = trees.join("t1/ws");
+        let other = trees.join("t2/ws");
+        std::fs::create_dir_all(&tree).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(tree.join(".git"), "gitdir: elsewhere\n").unwrap();
+        let space = crate::space::Space {
+            root: tree.clone(),
+            home: f.ws.clone(),
+            mode: crate::space::Mode::Worktree {
+                branch: "dock/t1".into(),
+                git_dir: f.ws.join(".git"),
+            },
+        };
+        let p = Policy::for_space(
+            Access::WorkspaceWrite,
+            &space,
+            &Settings::default(),
+            &f.host,
+        );
+        assert_eq!(p.workspace(), tree.as_path());
+        assert!(p.allows_write(&tree.join("src/main.rs")));
+        assert!(!p.allows_write(&tree.join(".git")), "工作树的指针文件只读");
+        assert!(p.allows_write(&f.ws.join(".git/objects/ab/cdef")));
+        assert!(!p.allows_write(&f.ws.join(".git/hooks/pre-commit")));
+        assert!(!p.allows_write(&f.ws.join(".git/config")));
+        assert!(
+            !p.allows_write(&f.ws.join("src/main.rs")),
+            "原项目不在可写根里"
+        );
+        assert!(!p.allows_write(&other.join("a")), "别的工作树不能写");
+        assert!(!p.allows_write(&f.host.dock_home.join("config.toml")));
+
+        // 只读档不加原仓库的 git 目录。
+        let ro = Policy::for_space(Access::ReadOnly, &space, &Settings::default(), &f.host);
+        assert!(!ro.allows_write(&f.ws.join(".git/objects/ab/cdef")));
     }
 
     #[test]

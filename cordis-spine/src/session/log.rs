@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime};
 
 use cordis::{plugin, Context, Inject, Plugin};
+use dock_sandbox::space::Space;
 
 use crate::host::permissions::RunApproval;
 use crate::host::settings::AppSettings;
@@ -88,6 +89,16 @@ pub struct ArchivedSession {
     pub preset_id: Option<String>,
     /// 落盘时这一页选的模型与推理强度。`None` = 老会话，或那一页没有 `settings`。
     pub sampling: Option<Sampling>,
+    /// 会话在哪干活（`meta.json` 的 `sandbox` / `workdir`）。`None` = 就在归档目录里，
+    /// 也是老会话的样子。
+    pub place: Option<Place>,
+}
+
+/// 会话的位置：沙箱工作区，和工作区里的当前目录。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Place {
+    pub space: Space,
+    pub cwd: PathBuf,
 }
 
 /// 一个会话选的模型 + 推理强度（`meta.json` 的 `model` / `effort`）。
@@ -210,6 +221,9 @@ pub struct Sessions {
     /// 现状；钉住之后，工具、系统提示、子进程都按它走，进程 cwd 再变也不影响。
     /// 读取走 [`crate::session::cwd::session_cwd`]，不要直接读这个字段。
     workspace_cwd: Arc<Mutex<Option<PathBuf>>>,
+    /// 这一页的沙箱工作区（cwd 在它里面移动）。`None` = 原地、跟着 cwd 走（子代理、
+    /// 测试里的裸会话）；挂盘（[`Self::attach_disk`]）、`/cd`、开页时定下来。
+    space: Arc<Mutex<Option<Space>>>,
     live_id: Arc<Mutex<String>>,
     /// Preset id stamped into `meta.json` on save / archive. Updated by the TUI.
     live_preset_id: Arc<Mutex<Option<String>>>,
@@ -441,6 +455,7 @@ impl Sessions {
             child_dir: Arc::new(Mutex::new(None)),
             plan_cwd: Arc::new(Mutex::new(None)),
             workspace_cwd: Arc::new(Mutex::new(None)),
+            space: Arc::new(Mutex::new(None)),
             live_id: Arc::new(Mutex::new(String::new())),
             live_preset_id: Arc::new(Mutex::new(None)),
             compact_prefix: Arc::new(Mutex::new(None)),
@@ -477,6 +492,73 @@ impl Sessions {
         self.workspace_cwd.lock().unwrap().clone()
     }
 
+    /// 这一页的沙箱工作区。没定过就是 cwd 上的原地工作区。
+    pub fn space(&self) -> Space {
+        self.space
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_else(|| Space::in_place(self.own_cwd()))
+    }
+
+    /// 定过的工作区；`None` = 原地、跟着 cwd 走。子代理、新开的页从这里继承。
+    pub fn pinned_space(&self) -> Option<Space> {
+        self.space.lock().unwrap().clone()
+    }
+
+    /// 把这一页放进工作区 `space`。cwd 由调用方另外钉。
+    pub fn pin_space(&self, space: Space) {
+        *self.space.lock().unwrap() = Some(space);
+    }
+
+    /// 这一页的会话归档在哪个项目名下（`$DOCK_HOME/sessions/<它>/`）。不落盘是 `None`。
+    pub fn disk_home(&self) -> Option<PathBuf> {
+        self.disk_cwd.lock().unwrap().clone()
+    }
+
+    /// 落盘要另记的位置：工作区不是归档目录上的原地工作区，或 cwd 不在工作区根上。
+    /// 都是默认的就不记，`meta.json` 和以前一样。
+    fn place_snapshot(&self) -> Option<Place> {
+        let space = self.space();
+        let cwd = self.own_cwd();
+        let home = self.disk_home();
+        if space.is_in_place() && home.as_deref() == Some(space.home.as_path()) && cwd == space.root
+        {
+            return None;
+        }
+        Some(Place { space, cwd })
+    }
+
+    /// 恢复会话时回到它记的位置；没记（老会话、默认位置）就回归档目录。工作区已经不在了
+    /// （工作树删了）也回归档目录。只对落盘的会话做。
+    fn apply_place(&self, place: Option<&Place>) {
+        let Some(home) = self.disk_home() else {
+            return;
+        };
+        let (space, cwd) = match place {
+            Some(p) if p.space.root.is_dir() => {
+                let cwd = if p.cwd.is_dir() {
+                    p.cwd.clone()
+                } else {
+                    p.space.root.clone()
+                };
+                (p.space.clone(), cwd)
+            }
+            _ => (Space::in_place(home.clone()), home),
+        };
+        let moved_home = self.space().home != space.home;
+        self.pin_space(space.clone());
+        self.pin_workspace_cwd(cwd);
+        if moved_home {
+            if let Some(presets) = self
+                .ctx
+                .get::<crate::agent::presets::AgentPresets>(crate::names::AGENT_PRESETS)
+            {
+                presets.set_workspace_root(&space.home);
+            }
+        }
+    }
+
     /// Stamp the active agent preset into subsequent `meta.json` writes.
     pub fn set_preset_id(&self, id: Option<String>) {
         *self.live_preset_id.lock().unwrap() = id.filter(|s| !s.trim().is_empty());
@@ -501,6 +583,11 @@ impl Sessions {
             "none".into()
         };
         Some(Sampling { model, effort })
+    }
+
+    /// 工作区 / 当前目录刚换过：马上写进 `meta.json`（见 [`Self::persist_sampling`]）。
+    pub fn persist_place(&self) {
+        self.persist_live();
     }
 
     /// 模型 / 推理强度刚改过：马上写进 `meta.json`，不等下一条事件。切完就关掉
@@ -569,11 +656,14 @@ impl Sessions {
         if !self.emit {
             return;
         }
-        let cwd = self.own_cwd();
-        let loaded = crate::session::persist::load_cwd(&cwd);
+        // 按工作区的项目目录归档：工作区里 `/cd` 到哪都还是同一个项目，工作树也归原项目。
+        let space = self.space();
+        let home = space.home.clone();
+        self.pin_space(space);
+        let loaded = crate::session::persist::load_cwd(&home);
         *self.archive.lock().unwrap() = loaded;
         *self.live_id.lock().unwrap() = crate::session::persist::new_id();
-        *self.disk_cwd.lock().unwrap() = Some(cwd);
+        *self.disk_cwd.lock().unwrap() = Some(home);
     }
 
     /// Restore the newest on-disk session for this cwd (Grok `--resume`).
@@ -613,7 +703,7 @@ impl Sessions {
     /// This skips the archive step and refuses a log that already has events,
     /// so opening history on a page cannot wipe the thread it is adopting.
     pub fn adopt_archived(&self, id: &str) -> bool {
-        let cwd = self.own_cwd();
+        let cwd = self.space().home;
         if !self.emit || !Self::can_adopt_archived(id, &cwd) {
             return false;
         }
@@ -2029,6 +2119,7 @@ impl Sessions {
             compact_from,
             preset_id: self.live_preset_id.lock().unwrap().clone(),
             sampling: self.sampling_snapshot(),
+            place: self.place_snapshot(),
         };
         self.write_archived(&item);
         self.archive.lock().unwrap().insert(0, item.clone());
@@ -2080,6 +2171,7 @@ impl Sessions {
         if let Some(sampling) = &item.sampling {
             self.apply_sampling(sampling);
         }
+        self.apply_place(item.place.as_ref());
         self.bump_events_rev();
         *self.ledger.lock().unwrap() = UsageLedger::default();
         if let Some(event) = last {
@@ -2287,6 +2379,7 @@ impl Sessions {
             compact_from,
             preset_id: self.live_preset_id.lock().unwrap().clone(),
             sampling: self.sampling_snapshot(),
+            place: self.place_snapshot(),
         };
         let _ = crate::session::persist::save(&item, &cwd);
     }

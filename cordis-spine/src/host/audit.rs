@@ -215,6 +215,7 @@ fn start(page: &str, sessions: &Sessions) -> Result<Active, String> {
             "page": page,
             "session": session,
             "cwd": sessions.workspace_cwd().map(|p| p.display().to_string()),
+            "workspace": sessions.space(),
             "decrypt": cfg.decrypt,
             "dock": env!("CARGO_PKG_VERSION"),
         }),

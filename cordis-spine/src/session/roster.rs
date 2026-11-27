@@ -144,6 +144,7 @@ mod tests {
             compact_from: 0,
             preset_id: None,
             sampling: None,
+            place: None,
         }
     }
 

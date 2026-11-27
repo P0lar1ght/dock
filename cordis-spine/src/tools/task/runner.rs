@@ -207,12 +207,15 @@ async fn run_dock_child(
     if let Some(page) = parent.get::<Sessions>(SESSIONS).and_then(|s| s.ui_page()) {
         sessions.pin_page_home(page);
     }
-    // 子代理在父会话的工作目录里干活；父会话没钉就一起跟随进程 cwd。
-    if let Some(cwd) = parent
-        .get::<Sessions>(SESSIONS)
-        .and_then(|s| s.workspace_cwd())
-    {
-        sessions.pin_workspace_cwd(cwd);
+    // 子代理在父会话的工作区和工作目录里干活（限制模式的可写根也是父会话的工作区）；
+    // 父会话没钉就一起跟随进程 cwd。
+    if let Some(parent) = parent.get::<Sessions>(SESSIONS) {
+        if let Some(space) = parent.pinned_space() {
+            sessions.pin_space(space);
+        }
+        if let Some(cwd) = parent.workspace_cwd() {
+            sessions.pin_workspace_cwd(cwd);
+        }
     }
     if !resume.is_empty() {
         // 复活接着聊：带上原来的时刻，回看历史时不会全变成「现在」。

@@ -872,11 +872,13 @@ pub fn sandbox_args() -> Vec<ArgItem> {
     vec![
         ArgItem::new("on", "开这一页的沙箱（审计 + 策略）"),
         ArgItem::new("off", "关掉这一页的沙箱"),
-        ArgItem::new("status", "只看现状：审计、策略、限制"),
+        ArgItem::new("status", "只看现状：工作区、审计、策略、限制"),
         ArgItem::new("graph", "这一页的行为链路图"),
         ArgItem::new("export", "导出审计报告（HTML + 原始记录）"),
         ArgItem::new("allow", "这次任务里放行一个域名（通配）"),
         ArgItem::new("allow-cmd", "这次任务里放行一类命令（通配）"),
+        ArgItem::new("worktree", "换进项目的一棵 git 工作树（改动不碰原项目）"),
+        ArgItem::new("inplace", "回到原项目（工作树留着）"),
     ]
 }
 

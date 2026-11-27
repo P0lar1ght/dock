@@ -209,10 +209,10 @@ MCP 服务器向用户要信息（表单 / URL）。网关把提问投影成 `el
 
 | 方法 | 作用 |
 |---|---|
-| `thread/list { scope: "all" }` | 开着的页 + 所有目录的落盘会话（跨目录名册，不走 2 秒备忘），每项带 `cwd` / `open` / `presetId`（开着的页是它当前的预设，落盘的是 `meta.json` 记的，老会话为 `null`），第 1 页另带 `alias: "live"`；子代理计数见下 |
+| `thread/list { scope: "all" }` | 开着的页 + 所有目录的落盘会话（跨目录名册，不走 2 秒备忘），每项带 `cwd` / `open` / `presetId`（开着的页是它当前的预设，落盘的是 `meta.json` 记的，老会话为 `null`）；开着的页另带 `sandbox`（这一页的工作区：`root`、`home`、`mode` = `in_place` / `worktree`，工作树还有 `branch` / `git_dir`；`cwd` 是工作区里的当前目录），第 1 页另带 `alias: "live"`；子代理计数见下 |
 | `thread/search { query, cwd?, limit? }` | 按标题和用户消息搜所有目录的落盘会话，回 `hits[]`：`threadId` / `title` / `cwd` / `snippet`（命中处前后一小段纯文本，只命中标题时为 `null`）/ `updatedAt`。空格分开的词都要命中；含中日韩文的查询按子串匹配，其余走 FTS 前缀匹配。还没落盘的内容搜不到 |
 | `workspace/list { scope: "all" }` | 有会话的所有目录（`id` = 路径，`hasOpenThreads`） |
-| `thread/start { cwd, title?, presetId? }` | 在 `cwd` 另开一页（不动第 1 页），回它的会话 id；预设在创建时定下：`presetId` 只切这一页并记进会话，不改全局默认；预设不存在就报 `invalid_params`、不开页；不带 `cwd` 是老语义 |
+| `thread/start { cwd, title?, presetId? }` | 在 `cwd` 另开一页（不动第 1 页；`cwd` 是选定的项目目录，这一页的原地工作区就在它上面），回它的会话 id；预设在创建时定下：`presetId` 只切这一页并记进会话，不改全局默认；预设不存在就报 `invalid_params`、不开页；不带 `cwd` 是老语义 |
 | `thread/open { threadId }` | 把落盘会话开成一页（在它自己的 cwd 下），预设、模型、推理强度切回会话记的那一份（`meta.json`；不改全局默认，模型已不在目录里就不切）；已开着就回那一页。`thread/model/set` / `thread/reasoning/set` 切完立刻写回 `meta.json` |
 | `thread/close { threadId }` | 关页，会话留在磁盘上；第 1 页关不掉 |
 | 推送 `thread/closed { threadId }` | **连接级**：某一页关掉了，不管是谁关的（`thread/close`、终端 `/tab close`、定时任务驱动收闲页）。网关同时丢掉那一页的投影；界面把它当关着的，再发消息前先 `thread/open`。监听 `tabs/page-closed`（`PageClosed { identity, session }`） |

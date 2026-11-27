@@ -7,8 +7,8 @@ use cordis_spine::LogEvent;
 use serde_json::{json, Value};
 
 use cordis_spine::{
-    apply_restored_preset, session_cwd, AgentPresets, ApplyRestoredPreset, ArchivedSession, Roster,
-    RosterEntry, Sessions, AGENT_PRESETS, ROSTER, SESSIONS,
+    apply_restored_preset, session_cwd, session_space, AgentPresets, ApplyRestoredPreset,
+    ArchivedSession, Roster, RosterEntry, Sessions, AGENT_PRESETS, ROSTER, SESSIONS,
 };
 use cordis_spine::{
     Goal, SessionRef, Slash, Subagents, Tabs, GOAL, SESSION_PORT, SLASH, SUBAGENTS, TABS,
@@ -79,6 +79,7 @@ fn list_all(gateway: &GatewayHandle) -> Result<Value, RpcError> {
         let mut item = live_summary(&sessions, protocol::DEFAULT_WORKSPACE_ID);
         item["id"] = json!(id);
         item["cwd"] = json!(session_cwd(&page.ctx).display().to_string());
+        item["sandbox"] = json!(session_space(&page.ctx));
         item["open"] = json!(true);
         item["presetId"] = page_preset(&page);
         if page.is_root() {
@@ -756,6 +757,7 @@ pub(crate) fn open_summary(page: &Page) -> Result<Value, RpcError> {
     let mut item = live_summary(&sessions, protocol::DEFAULT_WORKSPACE_ID);
     item["id"] = json!(page.thread_id());
     item["cwd"] = json!(session_cwd(&page.ctx).display().to_string());
+    item["sandbox"] = json!(session_space(&page.ctx));
     item["open"] = json!(true);
     item["presetId"] = page_preset(page);
     Ok(item)

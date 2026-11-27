@@ -38,7 +38,7 @@ use std::time::{Duration, Instant};
 
 use cordis::{plugin, Context, Disposable, Inject, Plugin};
 use cordis_spine::{
-    expired_task_notice, format_fire_note, missed_task_notice, run_check, session_cwd, Cron,
+    expired_task_notice, format_fire_note, missed_task_notice, run_check, session_home, Cron,
     CronApproval, CronCheck, CronFire, CronJob, CronSchedule, CronTarget, FileWatches, FireNote,
     FireReason, FireReport, LlmOutput, LogEvent, PermissionMode, RunApproval, RunOutcome,
     SessionRef, Sessions, Tabs, CHECK_TIMEOUT, CRON, SCHEDULE_CHANGED, SESSIONS, SESSION_PORT,
@@ -392,13 +392,13 @@ fn run_in_progress(ctx: &Context, job: &CronJob) -> bool {
     page.is_some_and(|page| page_busy(&page))
 }
 
-/// 任务的工作目录：记在任务上的，没有就用这一页的。
+/// 任务的项目目录：记在任务上的，没有就用这一页归档的项目（不是它的 cwd）。
 fn job_cwd(ctx: &Context, job: &CronJob) -> PathBuf {
     job.owner
         .as_ref()
         .map(|o| o.cwd.clone())
         .filter(|cwd| !cwd.as_os_str().is_empty())
-        .unwrap_or_else(|| session_cwd(ctx))
+        .unwrap_or_else(|| session_home(ctx))
 }
 
 /// 正在写 `session` 的那一页。

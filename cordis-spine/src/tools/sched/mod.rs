@@ -129,9 +129,10 @@ fn caller_owner(ctx: &Context) -> Option<CronOwner> {
         .find(|s| !s.live_session_id().is_empty())?;
     Some(CronOwner {
         session: sessions.live_session_id(),
+        // 到点要按它找回这份会话：是归档的项目目录，不是 cwd（工作区里 `/cd` 过的页也找得到）。
         cwd: sessions
-            .workspace_cwd()
-            .unwrap_or_else(|| crate::session::cwd::session_cwd(&exec)),
+            .disk_home()
+            .unwrap_or_else(|| crate::session::cwd::session_home(&exec)),
     })
 }
 

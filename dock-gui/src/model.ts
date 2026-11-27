@@ -8,7 +8,10 @@ export interface SessionSummary {
   /** agent 预设的显示名，会话头的 chip 显示它（如「编码」）。创建时定下，不中途换。 */
   preset: string;
   presetId: string | null;
+  /** 这一页的当前目录（工作树里的页是工作树里的路径）：相对路径按它解析。 */
   cwd: string;
+  /** 会话归在哪个项目下（工作区的项目目录）：侧栏按它分组。工作树里的页也归原项目。 */
+  home: string;
   /** 在 Dock 里开着（占一页，能直接发消息）。 */
   open: boolean;
   updatedAt: number;

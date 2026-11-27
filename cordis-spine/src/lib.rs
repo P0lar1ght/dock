@@ -146,10 +146,13 @@ pub use session::commands::session_commands;
 pub use session::compaction::{
     CompactPhase, CompactProgress, CompactStatus, CompactTrigger, PageCompaction,
 };
-pub use session::cwd::{change_dir, current_cwd, session_cwd, ChangedDir};
+pub use session::cwd::{
+    change_dir, current_cwd, enter_workspace, session_cwd, session_home, session_space,
+    switch_space, ChangedDir,
+};
 pub use session::log::{
     sessions, ArchivedSession, ChildLogEvent, LlmFinished, PageLogEvent, PageToolInput,
-    PageTurnEnd, Sampling, Sessions, Steer, TokenUsage, TurnEndStatus, ROOT_IDENTITY,
+    PageTurnEnd, Place, Sampling, Sessions, Steer, TokenUsage, TurnEndStatus, ROOT_IDENTITY,
 };
 pub use session::persist::{
     count_subagents, first_user_title, load_subagent, load_subagents, sessions_cwd_dir,

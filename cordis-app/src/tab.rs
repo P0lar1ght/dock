@@ -165,12 +165,13 @@ fn aside_presets() -> Plugin {
 fn tab_sessions(index: usize, kind: TabKind) -> Plugin {
     plugin("tab.sessions", Inject::new(), move |ctx, _: &()| {
         let sessions = Sessions::tab(ctx.clone(), index);
-        // 新页在开它的那一页的目录里起步（那一页 `/cd` 过就跟过去）。没钉的页跟随
-        // 进程 cwd，新页也不钉，保持原样。
-        if let Some(cwd) = source_page(ctx, index)
-            .and_then(|page| page.get::<Sessions>(SESSIONS))
-            .and_then(|s| s.workspace_cwd())
-        {
+        // 新页在开它的那一页的工作区和目录里起步（那一页 `/cd` 过就跟过去），会话也归档在
+        // 同一个项目下。没钉的页跟随进程 cwd，新页也不钉，保持原样。
+        let source = source_page(ctx, index).and_then(|page| page.get::<Sessions>(SESSIONS));
+        if let Some(space) = source.as_ref().and_then(|s| s.pinned_space()) {
+            sessions.pin_space(space);
+        }
+        if let Some(cwd) = source.as_ref().and_then(|s| s.workspace_cwd()) {
             sessions.pin_plan_cwd(&cwd);
             sessions.pin_workspace_cwd(cwd);
         }

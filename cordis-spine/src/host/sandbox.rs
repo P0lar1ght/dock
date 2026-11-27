@@ -85,10 +85,11 @@ fn expand_home(raw: &str, home: Option<&Path>) -> Option<PathBuf> {
     path.is_absolute().then_some(path)
 }
 
-/// 这一页此刻的策略（工作区 = 这一页的会话 cwd）。
+/// 这一页此刻的策略：可写根是这一页的沙箱工作区（不是 cwd，工作区里 `/cd` 到子目录照样
+/// 写得了整个项目）；工作树还能写原仓库的 git 目录。
 pub fn policy(page: &Context, access: Access) -> Policy {
-    let workspace = crate::session::cwd::session_cwd(page);
-    Policy::build(access, &workspace, &settings(), &host())
+    let space = crate::session::cwd::session_space(page);
+    Policy::for_space(access, &space, &settings(), &host())
 }
 
 fn host() -> Host {
@@ -315,11 +316,140 @@ fn on_policy(pre: &mut PreExecute) {
     }
 }
 
+/// 这一页的工作区，给人看。
+fn workspace_lines(page: &Context) -> Vec<String> {
+    let space = crate::session::cwd::session_space(page);
+    let cwd = crate::session::cwd::session_cwd(page);
+    let mut out = vec![format!(
+        "工作区：{}（{}）",
+        space.root.display(),
+        space.describe_mode()
+    )];
+    if space.root != space.home {
+        out.push(format!(
+            "  项目：{}（会话归在它名下）",
+            space.home.display()
+        ));
+    }
+    if cwd != space.root {
+        out.push(format!("  当前目录：{}", cwd.display()));
+    }
+    if let Some(branch) = space.branch() {
+        out.push(format!(
+            "  合回去：在项目里 git merge {branch}；不要了：/sandbox inplace 之后 git worktree remove {}",
+            space.root.display()
+        ));
+    }
+    out
+}
+
+/// 这一页正在跑一轮（或有排队的）：这时换工作区，跑到一半的命令和接下来的调用就不在同一个地方了。
+fn page_busy(page: &Context) -> bool {
+    page.get::<crate::host::session_port::SessionRef>(crate::names::SESSION_PORT)
+        .is_some_and(|port| port.working() || port.has_queued())
+}
+
+/// 换了工作区：给模型留一句（下一轮看得到），免得它照着之前的路径改回原项目。
+fn tell_model(page: &Context, text: String) {
+    if let Some(sessions) = page.get::<crate::session::log::Sessions>(crate::names::SESSIONS) {
+        sessions.append(cordis_base::types::LogEvent::SystemReminder(text));
+    }
+}
+
+/// `/sandbox worktree`：从项目仓库建一棵工作树，这一页换进去。
+fn enter_worktree(page: &Context) -> String {
+    let space = crate::session::cwd::session_space(page);
+    if let Some(branch) = space.branch() {
+        return format!(
+            "这一页已经在工作树里：{}（分支 {branch}）",
+            space.root.display()
+        );
+    }
+    if page_busy(page) {
+        return "这一页正在跑，等这一轮结束再换工作区".into();
+    }
+    let id: String = crate::session::persist::new_id()
+        .chars()
+        .rev()
+        .take(8)
+        .collect();
+    let store = cordis_base::config::dock_home().join(dock_sandbox::space::STORE_DIR);
+    let tree = match dock_sandbox::space::create_worktree(&space.home, &store, &id) {
+        Ok(tree) => tree,
+        Err(e) => return e,
+    };
+    let branch = tree.branch().unwrap_or_default().to_string();
+    let (root, home) = (tree.root.clone(), tree.home.clone());
+    let cwd = match crate::session::cwd::switch_space(page, tree) {
+        Ok(cwd) => cwd,
+        Err(e) => return e,
+    };
+    tell_model(
+        page,
+        format!(
+            "[沙箱] 这一页的工作区换成了工作树 {}（分支 {branch}，从 HEAD 检出）。之后在这里读写、跑命令；\
+             原项目 {} 里的文件不要再改。之前提到的 {} 下的路径，对应到 {} 下的同一位置。当前目录：{}",
+            root.display(),
+            home.display(),
+            home.display(),
+            root.display(),
+            cwd.display()
+        ),
+    );
+    persist(page);
+    format!(
+        "这一页换进了工作树 {}（分支 {branch}，从 HEAD 检出，没提交的改动不带过去）。改动不碰 {}；\
+         /sandbox inplace 回原项目。",
+        root.display(),
+        home.display()
+    )
+}
+
+/// `/sandbox inplace`：回到原项目（工作树留着）。
+fn leave_worktree(page: &Context) -> String {
+    let space = crate::session::cwd::session_space(page);
+    let Some(branch) = space.branch().map(str::to_string) else {
+        return format!("这一页已经在原地工作区：{}", space.root.display());
+    };
+    if page_busy(page) {
+        return "这一页正在跑，等这一轮结束再换工作区".into();
+    }
+    let home = space.home.clone();
+    if let Err(e) =
+        crate::session::cwd::switch_space(page, dock_sandbox::space::Space::in_place(&home))
+    {
+        return e;
+    }
+    tell_model(
+        page,
+        format!(
+            "[沙箱] 这一页回到了原项目 {}（原地）。工作树 {} 里的改动没有合进来（分支 {branch}）。",
+            home.display(),
+            space.root.display()
+        ),
+    );
+    persist(page);
+    format!(
+        "回到原项目 {}。工作树 {} 和分支 {branch} 留着：合回去 git merge {branch}，不要了 git worktree remove {}",
+        home.display(),
+        space.root.display(),
+        space.root.display()
+    )
+}
+
+/// 位置变了马上写进 `meta.json`：换完就关掉的会话，下次打开还在换过的地方。
+fn persist(page: &Context) {
+    if let Some(sessions) = page.get::<crate::session::log::Sessions>(crate::names::SESSIONS) {
+        sessions.persist_place();
+    }
+}
+
 /// 给人看的现状。
 fn describe(page: &Context) -> String {
     let cfg = cordis_base::config::load_sandbox_config();
     let on = enabled(page);
     let mut out = vec![format!("这一页的沙箱：{}", if on { "开" } else { "关" })];
+    out.extend(workspace_lines(page));
     if let Some(audit) = page.get::<Audit>(AUDIT) {
         out.extend(crate::host::audit::status_lines(&audit, page));
         let rules = audit.rules_for(page);
@@ -357,9 +487,7 @@ fn describe(page: &Context) -> String {
             out.push(format!("限制：本机不可用（{reason}），命令照常走权限确认"));
         }
         Availability::Ready { backend, limits } => {
-            let p = policy(page, Access::WorkspaceWrite);
             out.push(format!("限制：命令在系统沙箱里跑（{}）", backend.name()));
-            out.push(format!("  工作区：{}", p.workspace().display()));
             let net = match cfg.network {
                 SandboxNetwork::Allow => "能联网",
                 SandboxNetwork::Proxy if cfg!(target_os = "macos") => {
@@ -369,7 +497,7 @@ fn describe(page: &Context) -> String {
                 SandboxNetwork::Off => "不能联网",
             };
             out.push(format!("  网络：{net}"));
-            out.push("  可写：工作区、临时目录、$DOCK_HOME/scratch，以及依赖缓存和 [sandbox] writable_roots".into());
+            out.push("  可写：工作区（工作树还有原仓库的 .git）、临时目录、$DOCK_HOME/scratch，以及依赖缓存和 [sandbox] writable_roots".into());
             out.push(
                 "  不可读：~/.ssh、~/.aws、钥匙串、Dock 的密钥等（[sandbox] deny_read 可加）"
                     .into(),
@@ -410,6 +538,8 @@ fn sandbox_command(page: &Context, args: &str) -> SlashOutcome {
         "on" | "开" => turn(true),
         "off" | "关" => turn(false),
         "status" | "状态" => {}
+        "worktree" | "工作树" => return SlashOutcome::Applied(enter_worktree(page)),
+        "inplace" | "原地" => return SlashOutcome::Applied(leave_worktree(page)),
         "graph" | "图" => {
             return match audit.as_ref().and_then(|a| a.active(page)) {
                 Some(active) => SlashOutcome::notice("沙箱链路图", crate::host::audit::graph_text(&active)),
@@ -446,7 +576,7 @@ fn sandbox_command(page: &Context, args: &str) -> SlashOutcome {
         other => {
             return SlashOutcome::notice(
                 "沙箱",
-                format!("不认识「{other}」：用 /sandbox [on|off|status|graph|export|allow|allow-cmd]，不带参数是切换。"),
+                format!("不认识「{other}」：用 /sandbox [on|off|status|graph|export|allow|allow-cmd|worktree|inplace]，不带参数是切换。"),
             )
         }
     }
@@ -474,7 +604,13 @@ pub fn sandbox() -> Plugin {
             .hint("sandbox graph", "看这一页的行为链路图", false)
             .hint("sandbox export", "导出审计报告（HTML + 原始记录）", false)
             .hint("sandbox allow", "这次任务里放行一个域名（通配）", true)
-            .hint("sandbox allow-cmd", "这次任务里放行一类命令（通配）", true)],
+            .hint("sandbox allow-cmd", "这次任务里放行一类命令（通配）", true)
+            .hint(
+                "sandbox worktree",
+                "这一页换进项目的一棵 git 工作树（改动不碰原项目）",
+                false,
+            )
+            .hint("sandbox inplace", "这一页回到原项目（工作树留着）", false)],
         )?;
         let policy = ctx
             .clone()
@@ -705,6 +841,116 @@ action = "deny"
             outside,
             tools,
         }
+    }
+
+    /// 回归：限制模式的可写根是工作区，不是 cwd。以前工作区里 `/cd sub` 之后，写项目根下的
+    /// 文件就算「沙箱外」，要弹框；sub 里跑的命令也写不了项目的其它目录。
+    #[tokio::test]
+    async fn the_writable_root_is_the_workspace_not_the_cwd() {
+        let p = page();
+        std::fs::create_dir_all(p.ws.join("sub")).unwrap();
+        let sessions = p.ctx.get::<Sessions>(SESSIONS).unwrap();
+        sessions.pin_space(dock_sandbox::space::Space::in_place(&p.ws));
+        sessions.pin_workspace_cwd(p.ws.join("sub"));
+        let write = |path: PathBuf| serde_json::json!({ "target_file": path }).to_string();
+        assert_eq!(
+            gate(&p.ctx, "write_file", &write(p.ws.join("top.txt"))),
+            Gate::SkipPrompt
+        );
+        assert_eq!(
+            policy(&p.ctx, Access::WorkspaceWrite).workspace(),
+            p.ws.as_path()
+        );
+        assert_eq!(
+            gate(&p.ctx, "write_file", &write(p.outside.join("x.txt"))),
+            Gate::Default
+        );
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let ok = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@example.com")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@example.com")
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "git {args:?}");
+    }
+
+    /// `/sandbox worktree`：这一页换进项目的一棵工作树，cwd 换到工作树里的同一位置，模型收到
+    /// 一句提醒；限制模式下写工作树不弹框、写原项目要问。`/sandbox inplace` 回原项目，工作树留着。
+    #[tokio::test]
+    async fn worktree_mode_moves_the_page_into_a_checkout_and_back() {
+        if std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let p = page();
+        std::fs::create_dir_all(p.ws.join("sub")).unwrap();
+        std::fs::write(p.ws.join("sub/a.txt"), "a").unwrap();
+        git(&p.ws, &["init", "--quiet"]);
+        git(&p.ws, &["add", "."]);
+        git(&p.ws, &["commit", "--quiet", "-m", "init"]);
+        let sessions = p.ctx.get::<Sessions>(SESSIONS).unwrap();
+        sessions.pin_space(dock_sandbox::space::Space::in_place(&p.ws));
+        sessions.pin_workspace_cwd(p.ws.join("sub"));
+
+        let out = sandbox_command(&p.ctx, "worktree");
+        assert!(
+            matches!(&out, SlashOutcome::Applied(t) if t.contains("换进了工作树")),
+            "{out:?}"
+        );
+        let space = crate::session::cwd::session_space(&p.ctx);
+        assert_eq!(space.home, p.ws);
+        assert!(space.branch().unwrap().starts_with("dock/"));
+        let store = cordis_base::config::dock_home()
+            .canonicalize()
+            .unwrap()
+            .join(dock_sandbox::space::STORE_DIR);
+        assert!(space.root.starts_with(&store), "{}", space.root.display());
+        assert_eq!(
+            crate::session::cwd::session_cwd(&p.ctx),
+            space.root.join("sub")
+        );
+        assert!(space.root.join("sub/a.txt").is_file());
+        assert!(
+            matches!(sessions.events().last(), Some(cordis_base::types::LogEvent::SystemReminder(t)) if t.contains("工作树")),
+            "模型要知道换了地方"
+        );
+        let write = |path: PathBuf| serde_json::json!({ "target_file": path }).to_string();
+        assert_eq!(
+            gate(&p.ctx, "write_file", &write(space.root.join("new.txt"))),
+            Gate::SkipPrompt
+        );
+        assert_eq!(
+            gate(&p.ctx, "write_file", &write(p.ws.join("new.txt"))),
+            Gate::Default,
+            "原项目不在工作树的可写根里"
+        );
+        assert!(
+            matches!(sandbox_command(&p.ctx, "worktree"), SlashOutcome::Applied(t) if t.contains("已经在工作树里"))
+        );
+
+        let out = sandbox_command(&p.ctx, "inplace");
+        assert!(
+            matches!(&out, SlashOutcome::Applied(t) if t.contains("回到原项目")),
+            "{out:?}"
+        );
+        assert_eq!(
+            crate::session::cwd::session_space(&p.ctx),
+            dock_sandbox::space::Space::in_place(&p.ws)
+        );
+        assert_eq!(crate::session::cwd::session_cwd(&p.ctx), p.ws.join("sub"));
+        assert!(space.root.is_dir(), "工作树留着");
     }
 
     fn call(name: &str, args: serde_json::Value) -> ToolCall {

@@ -11,7 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use crate::session::log::{ArchivedSession, Sampling};
+use crate::session::log::{ArchivedSession, Place, Sampling};
 use cordis_base::config::dock_home;
 use cordis_base::types::{LlmOutput, LogEvent, ThinkingBlock, ToolCall, TurnEndStatus};
 
@@ -39,9 +39,26 @@ struct MetaFile {
     /// 推理强度，`"none"` = 思考关着。只和 `model` 一起有意义。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     effort: Option<String>,
+    /// 会话的沙箱工作区（根、选定的项目目录、原地 / 工作树）。就在 `cwd` 原地时不写，
+    /// 老会话也没有。注意 `cwd` 仍是归档目录（名册按它分组），不是当前目录。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sandbox: Option<dock_sandbox::space::Space>,
+    /// 工作区里的当前目录。和 `sandbox` 一起写；只有 `workdir` 没有 `sandbox` 是老写法，不认。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    workdir: Option<String>,
 }
 
 impl MetaFile {
+    fn place(&self) -> Option<Place> {
+        let space = self.sandbox.clone()?;
+        let cwd = self
+            .workdir
+            .as_deref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| space.root.clone());
+        Some(Place { space, cwd })
+    }
+
     fn sampling(&self) -> Option<Sampling> {
         let model = self.model.clone().filter(|m| !m.trim().is_empty())?;
         Some(Sampling {
@@ -182,6 +199,11 @@ pub fn save(item: &ArchivedSession, cwd: &Path) -> std::io::Result<()> {
         preset_id: item.preset_id.clone(),
         model: item.sampling.as_ref().map(|s| s.model.clone()),
         effort: item.sampling.as_ref().map(|s| s.effort.clone()),
+        sandbox: item.place.as_ref().map(|p| p.space.clone()),
+        workdir: item
+            .place
+            .as_ref()
+            .map(|p| p.cwd.to_string_lossy().into_owned()),
     };
     atomic_write(
         &dir.join(META),
@@ -288,6 +310,7 @@ pub fn save_child(
         compact_from,
         preset_id: None,
         sampling: None,
+        place: None,
     };
     save_compact(dir, &item);
     Ok(())
@@ -360,6 +383,8 @@ pub fn save_title(id: &str, title: &str, cwd: &Path) -> std::io::Result<()> {
             preset_id: None,
             model: None,
             effort: None,
+            sandbox: None,
+            workdir: None,
         }),
         Err(_) => MetaFile {
             id: id.into(),
@@ -369,6 +394,8 @@ pub fn save_title(id: &str, title: &str, cwd: &Path) -> std::io::Result<()> {
             preset_id: None,
             model: None,
             effort: None,
+            sandbox: None,
+            workdir: None,
         },
     };
     meta.title = title.into();
@@ -613,6 +640,7 @@ fn load_one(dir: &Path) -> Option<(u64, ArchivedSession)> {
             compact_from,
             preset_id: meta.as_ref().and_then(|m| m.preset_id.clone()),
             sampling: meta.as_ref().and_then(MetaFile::sampling),
+            place: meta.as_ref().and_then(MetaFile::place),
         },
     ))
 }
@@ -1156,6 +1184,7 @@ mod tests {
             compact_from: 0,
             preset_id: Some("warden".into()),
             sampling: None,
+            place: None,
         };
         save(&item, cwd).unwrap();
         let loaded = load_cwd(cwd);
@@ -1204,6 +1233,7 @@ mod tests {
             compact_from: 0,
             preset_id: None,
             sampling: None,
+            place: None,
         };
         save(&item, cwd).unwrap();
         let loaded = load_cwd(cwd);
@@ -1234,6 +1264,7 @@ mod tests {
             compact_from: 0,
             preset_id: None,
             sampling: None,
+            place: None,
         };
         save(&item, cwd).unwrap();
         let loaded = load_cwd(cwd);
@@ -1332,6 +1363,7 @@ mod tests {
             compact_from: 0,
             preset_id: None,
             sampling: None,
+            place: None,
         };
         save(&item, cwd).unwrap();
         assert_eq!(load_cwd(cwd)[0].events, item.events);
@@ -1367,6 +1399,7 @@ mod tests {
             compact_from: 0,
             preset_id: None,
             sampling: None,
+            place: None,
         };
         save(&item, cwd).unwrap();
         let loaded = load_cwd(cwd);
@@ -1405,6 +1438,7 @@ mod tests {
             compact_from: 0,
             preset_id: None,
             sampling: None,
+            place: None,
         };
         save(&item, cwd).unwrap();
         let loaded = load_cwd(cwd);
@@ -1440,6 +1474,7 @@ mod tests {
             compact_from: 0,
             preset_id: None,
             sampling: None,
+            place: None,
         };
         save(&item, cwd).unwrap();
 
@@ -1512,6 +1547,7 @@ mod tests {
             compact_from: 0,
             preset_id: None,
             sampling: None,
+            place: None,
         };
         save(&item, cwd).unwrap();
         // image_paths should land under DOCK_HOME/tool-images/
@@ -1563,6 +1599,67 @@ mod tests {
 
         sessions.append(LogEvent::User("hi".into()));
         assert_eq!(saved(), 1, "有了用户消息就该落盘");
+    }
+
+    /// 会话的工作区和当前目录跟着落盘、恢复：在工作树里聊过的会话，下次打开还在工作树里、
+    /// 还在原来那个子目录。就在归档目录原地的会话不写这两个字段，`meta.json` 和以前一样；
+    /// 工作树已经删了的，打开时回归档目录。
+    #[tokio::test]
+    async fn the_workspace_and_cwd_round_trip_through_meta() {
+        let _home = cordis_base::test_env::scoped().home();
+        let proj = tempfile::tempdir().unwrap();
+        let proj = proj.path().canonicalize().unwrap();
+        let tree = tempfile::tempdir().unwrap();
+        let tree = tree.path().canonicalize().unwrap();
+        std::fs::create_dir_all(tree.join("sub")).unwrap();
+        let meta_of = |sessions: &crate::session::log::Sessions| -> serde_json::Value {
+            let dir = sessions.existing_session_dir().unwrap();
+            serde_json::from_str(&fs::read_to_string(dir.join(META)).unwrap()).unwrap()
+        };
+
+        let sessions = crate::session::log::Sessions::new(cordis::Context::new());
+        sessions.pin_workspace_cwd(&proj);
+        sessions.attach_disk();
+        sessions.append(LogEvent::User("hi".into()));
+        let meta = meta_of(&sessions);
+        assert!(
+            meta.get("sandbox").is_none() && meta.get("workdir").is_none(),
+            "原地的会话不另记：{meta}"
+        );
+
+        let space = dock_sandbox::space::Space {
+            root: tree.clone(),
+            home: proj.clone(),
+            mode: dock_sandbox::space::Mode::Worktree {
+                branch: "dock/t".into(),
+                git_dir: proj.join(".git"),
+            },
+        };
+        sessions.pin_space(space.clone());
+        sessions.pin_workspace_cwd(tree.join("sub"));
+        sessions.persist_place();
+        let meta = meta_of(&sessions);
+        assert_eq!(meta["cwd"], proj.display().to_string(), "cwd 仍是归档目录");
+        assert_eq!(meta["sandbox"]["mode"], "worktree");
+        assert_eq!(meta["sandbox"]["branch"], "dock/t");
+        assert_eq!(meta["workdir"], tree.join("sub").display().to_string());
+        let id = sessions.live_session_id();
+
+        let open = |id: &str| {
+            let page = crate::session::log::Sessions::new(cordis::Context::new());
+            page.pin_workspace_cwd(&proj);
+            page.attach_disk();
+            assert!(page.adopt_archived(id), "按项目找得到这份会话");
+            page
+        };
+        let again = open(&id);
+        assert_eq!(again.space(), space);
+        assert_eq!(again.workspace_cwd(), Some(tree.join("sub")));
+
+        fs::remove_dir_all(&tree).unwrap();
+        let gone = open(&id);
+        assert_eq!(gone.space(), dock_sandbox::space::Space::in_place(&proj));
+        assert_eq!(gone.workspace_cwd(), Some(proj.clone()));
     }
 
     fn walk_files(dir: &Path) -> Vec<PathBuf> {

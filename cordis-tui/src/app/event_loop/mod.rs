@@ -441,7 +441,10 @@ pub async fn run(root: Context) -> Result<()> {
                                 Effect::ChangeDir(path) => match cordis_spine::change_dir(&ctx, &path) {
                                     Ok(changed) => {
                                         overlay.close();
-                                        let mut msg = format!("cwd {}", changed.cwd.display());
+                                        let mut msg = match &changed.workspace {
+                                            Some(_) => format!("工作区 {}", changed.cwd.display()),
+                                            None => format!("cwd {}", changed.cwd.display()),
+                                        };
                                         if let Some(note) = changed.note {
                                             msg = format!("{msg} · {note}");
                                         }

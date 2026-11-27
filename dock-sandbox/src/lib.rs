@@ -27,6 +27,7 @@ mod policy;
 pub mod rules;
 #[cfg(target_os = "macos")]
 mod seatbelt;
+pub mod space;
 mod tree;
 
 #[cfg(not(unix))]
