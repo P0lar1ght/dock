@@ -24,7 +24,8 @@ export function HttpHistory({ sessionId, active }: { sessionId: string; active: 
         .then((r) => {
           if (!live) return;
           setError(null);
-          if (rows && r.records === records.current) return;
+          // 只看记录数（ref）：闭包里的 rows 一直是第一次的值，拿它判断不会生效。
+          if (records.current !== undefined && r.records === records.current) return;
           records.current = r.records;
           setRows(r.requests);
         })

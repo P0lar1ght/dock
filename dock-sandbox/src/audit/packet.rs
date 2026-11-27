@@ -106,8 +106,10 @@ fn message(m: &Value, line: String, bodies: &Path) -> Value {
     };
     let body = &m["body"];
     let size = body["size"].as_u64().unwrap_or(0);
+    // 记录里的 sha256 只认 64 位十六进制：日志要是被改过，也不能拿它去读 `bodies/` 以外的文件。
     let captured = body["sha256"]
         .as_str()
+        .filter(|sha| is_sha256(sha))
         .and_then(|sha| std::fs::read(bodies.join(sha)).ok())
         .unwrap_or_default();
     // 记录的是开头一段（`body_cap_kb`）：截过的压缩数据解不全，能解多少给多少。
@@ -137,6 +139,13 @@ fn message(m: &Value, line: String, bodies: &Path) -> Value {
             "shown": bytes.len(),
         },
     })
+}
+
+/// 正文块的名字：64 位小写十六进制（[`crate::audit::store`] 写的就是这样）。
+pub fn is_sha256(s: &str) -> bool {
+    s.len() == 64
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 /// 按 `Content-Encoding` 解开。解不开（不认识的编码、数据截断了）就给原样的字节。
@@ -179,14 +188,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join(BODIES)).unwrap();
         let body = gzip(br#"{"ok":true}"#);
-        let sha = "abc123";
-        std::fs::write(dir.path().join(BODIES).join(sha), &body).unwrap();
-        std::fs::write(dir.path().join(BODIES).join("req1"), b"q=1").unwrap();
+        let sha = "a".repeat(64);
+        let req_sha = "b".repeat(64);
+        std::fs::write(dir.path().join(BODIES).join(&sha), &body).unwrap();
+        std::fs::write(dir.path().join(BODIES).join(&req_sha), b"q=1").unwrap();
+        // 日志外面的文件：被改过的记录拿 `../` 也读不到它。
+        std::fs::write(dir.path().join("secret.txt"), b"top secret").unwrap();
         let line = json!({
             "kind": "net", "seq": 7, "tag": "job-1", "scheme": "https", "host": "api.example.com", "port": 443,
             "method": "POST", "path": "/v1/x?y=1", "status": 201, "decrypted": true,
             "request": { "headers": [["content-type", "application/x-www-form-urlencoded"], ["authorization", "[redacted 12 sha256:abcd]"]],
-                         "body": { "size": 3, "truncated": false, "sha256": "req1" } },
+                         "body": { "size": 3, "truncated": false, "sha256": req_sha } },
             "response": { "headers": [["content-type", "application/json"], ["content-encoding", "gzip"]],
                           "body": { "size": body.len(), "truncated": false, "sha256": sha } },
         });
@@ -209,6 +221,15 @@ mod tests {
             flow_detail(dir.path(), "../x.jsonl:7").is_none(),
             "不出审计目录"
         );
+
+        // 回归：sha256 字段被改成路径时不跟着读（以前直接 bodies.join(sha)）。
+        let evil = json!({
+            "kind": "net", "seq": 9, "host": "x", "method": "GET", "path": "/", "status": 200, "decrypted": true,
+            "request": { "headers": [], "body": { "size": 10, "truncated": false, "sha256": "../secret.txt" } },
+        });
+        std::fs::write(dir.path().join("events.jsonl"), format!("{line}\n{evil}\n")).unwrap();
+        let d = flow_detail(dir.path(), "events.jsonl:9").expect("记录本身还在");
+        assert_eq!(d["request"]["body"]["text"], "", "不读 bodies/ 以外的文件");
     }
 
     #[test]

@@ -28,6 +28,7 @@ import {
   type RowKind,
   type SandboxStatus,
   type SandboxTrace,
+  type TraceEdge,
   type TraceNode,
   type TraceRow,
 } from "./api";
@@ -105,9 +106,9 @@ export function TracePanel({ sessionId, onClose, lead, controls }: PanelProps) {
   const rows = trace?.timeline ?? [];
   const selectedNode = nodes.find((n) => n.id === selected);
   const shown = useMemo(() => {
-    const keep = relatedTo(rows, selectedNode, nodes);
+    const keep = relatedTo(rows, selectedNode, edges);
     return rows.filter(keep).reverse();
-  }, [rows, selectedNode, nodes]);
+  }, [rows, selectedNode, edges]);
 
   return (
     <aside className="glass-pane enter-fade relative flex min-h-0 min-w-0 flex-1 flex-col bg-[#fafafa]">
@@ -357,31 +358,44 @@ function Row({ row }: { row: TraceRow }) {
 }
 
 /** 选中图上一个节点时，时间线里和它有关的那几行：工具 → 它的调用、调用起的命令、命令的出网；
- *  程序 → 那些命令和它们的出网；主机 → 发往它的出网。 */
-function relatedTo(rows: TraceRow[], node: TraceNode | undefined, nodes: TraceNode[]): (r: TraceRow) => boolean {
+ *  程序 → 那些命令和它们的出网；主机 → 发往它的出网；「其他 N 个主机」→ 那个来源里没单独画出来的。 */
+function relatedTo(rows: TraceRow[], node: TraceNode | undefined, edges: TraceEdge[]): (r: TraceRow) => boolean {
   if (!node || node.kind === "session") return () => true;
-  const jobsOfCalls = (calls: Set<string>) =>
-    new Set(rows.filter((r) => r.kind === "command" && r.call && calls.has(r.call)).map((r) => r.job ?? ""));
+  const commands = rows.filter((r) => r.kind === "command");
+  const allJobs = new Set(commands.map((r) => r.job ?? ""));
+  /** 某个来源（`浏览器` / `其他` / `<工具>/<程序>`）发的出网。 */
+  const fromSource = (source: string): ((r: TraceRow) => boolean) => {
+    if (source === "浏览器") return (r) => (r.tag ?? "").startsWith("browser");
+    if (source === "其他") return (r) => !(r.tag ?? "").startsWith("browser") && !allJobs.has(r.tag ?? "");
+    const jobs = new Set(commands.filter((r) => `${r.tool ?? ""}/${r.title}` === source).map((r) => r.job ?? ""));
+    return (r) => jobs.has(r.tag ?? "");
+  };
   const byJobs = (jobs: Set<string>) => (r: TraceRow) =>
     ((r.kind === "command" || r.kind === "command_end") && !!r.job && jobs.has(r.job)) || (r.kind === "net" && !!r.tag && jobs.has(r.tag));
   if (node.kind === "tool") {
     if (node.id === "tool:浏览器") return (r) => r.kind === "net" && (r.tag ?? "").startsWith("browser");
     const name = node.id.slice("tool:".length);
     const calls = new Set(rows.filter((r) => (r.kind === "tool" || r.kind === "result") && r.title === name).map((r) => r.call ?? ""));
-    const jobs = jobsOfCalls(calls);
+    const jobs = new Set(commands.filter((r) => r.call && calls.has(r.call)).map((r) => r.job ?? ""));
     const viaJobs = byJobs(jobs);
     return (r) => ((r.kind === "tool" || r.kind === "result") && r.title === name) || viaJobs(r);
   }
   if (node.kind === "program") {
-    const jobs = new Set(rows.filter((r) => r.kind === "command" && r.title === node.label).map((r) => r.job ?? ""));
+    // `prog:<工具>/<程序>`：同一个程序在 bash 和 monitor 下各算各的。
+    const source = node.id.slice("prog:".length);
+    const jobs = new Set(commands.filter((r) => `${r.tool ?? ""}/${r.title}` === source).map((r) => r.job ?? ""));
     return byJobs(jobs);
   }
   if (node.kind === "host") return (r) => r.kind === "net" && r.host === node.label;
   if (node.kind === "others") {
-    const named = new Set(nodes.filter((n) => n.kind === "host").map((n) => n.label));
-    return (r) => r.kind === "net" && !named.has(r.host ?? "");
+    // 只看这个来源里折叠掉的主机：别的来源画出来 / 折叠掉的都不算。
+    const source = node.id.slice("others:".length);
+    const sourceNode = source === "浏览器" ? "tool:浏览器" : source === "其他" ? "src:其他" : `prog:${source}`;
+    const drawn = new Set(edges.filter((e) => e.from === sourceNode && e.to.startsWith("host:")).map((e) => e.to.slice("host:".length)));
+    const sent = fromSource(source);
+    return (r) => r.kind === "net" && sent(r) && !drawn.has(r.host ?? "");
   }
-  // 认不出是谁发的出网。
-  const jobs = new Set(rows.filter((r) => r.kind === "command").map((r) => r.job ?? ""));
-  return (r) => r.kind === "net" && !(r.tag ?? "").startsWith("browser") && !jobs.has(r.tag ?? "");
+  // 认不出是谁发的出网（`src:其他`）。
+  const other = fromSource("其他");
+  return (r) => r.kind === "net" && other(r);
 }

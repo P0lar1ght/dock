@@ -71,6 +71,8 @@ export interface TraceRow {
   call?: string | null;
   /** 命令的 job（command / command_end 有）。 */
   job?: string | null;
+  /** 起这条命令的工具（command 有：bash / monitor）。 */
+  tool?: string | null;
   /** 出网是哪条命令（job）或哪个标签页（`browser:<id>`）发的。 */
   tag?: string | null;
   host?: string;

@@ -7,7 +7,10 @@
 //!
 //! - `sandbox/http { threadId, limit? }` → `{ auditing, records, requests }`：最近的出网（HTTP 历史）。
 //! - `sandbox/flow { threadId, id }` → 一次出网的请求包 / 响应包（首行、头、正文，压缩的解开）。
-//!   正文没遮凭据（头遮了），只给受信连接。
+//!   正文没遮凭据（头遮了）。
+//!
+//! 四个方法都只给受信连接：命令全文、网址（query 里可能带 token）、请求包都是审计数据，
+//! 配对的网页不该看到。
 //!
 //! 开关、导出、临时放行、换工作区都走斜杠（`slash/execute` 的 `/sandbox …`），这里不另开方法。
 
@@ -33,22 +36,33 @@ pub fn gateway_sandbox() -> Plugin {
                 vec![
                     (
                         protocol::SANDBOX_STATUS,
-                        MethodPolicy::detached(),
+                        MethodPolicy {
+                            detached: true,
+                            trusted_only: true,
+                            ..MethodPolicy::default()
+                        },
                         method(|gw, params| async move { status(&gw, params) }),
                     ),
                     (
                         protocol::SANDBOX_TRACE,
-                        MethodPolicy::detached(),
+                        MethodPolicy {
+                            detached: true,
+                            trusted_only: true,
+                            ..MethodPolicy::default()
+                        },
                         method(|gw, params| async move { trace(&gw, params) }),
                     ),
                     (
                         protocol::SANDBOX_HTTP,
-                        MethodPolicy::detached(),
+                        MethodPolicy {
+                            detached: true,
+                            trusted_only: true,
+                            ..MethodPolicy::default()
+                        },
                         method(|gw, params| async move { http(&gw, params) }),
                     ),
                     (
                         protocol::SANDBOX_FLOW,
-                        // 正文原样（只截断、不遮凭据）：只给受信连接。
                         MethodPolicy {
                             detached: true,
                             trusted_only: true,

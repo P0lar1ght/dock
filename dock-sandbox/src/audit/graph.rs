@@ -333,6 +333,7 @@ pub fn timeline_entry(e: &Value) -> Option<Value> {
         }),
         "command" => json!({
             "kind": "command",
+            "tool": e["tool"],
             "title": text("program"),
             "detail": clip(text("command"), 300),
             "error": null,
