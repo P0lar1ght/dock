@@ -214,6 +214,7 @@ Codex 那套是闭源插件，这里用开源的 playwright-core 自己实现。
 - CDP 由 chromiumoxide 驱动；无 Node / Playwright。
 - 快照是精简 a11y 树，refs `@eN` 给 click / type / hover / select / fill。
   - refs 留到页面真的变了（跳转、换标签页、新快照）才作废；节点真没了才报错，说清要重拍。
+  - 跳转包括点击 / 输入带走的：这一页主框架换了文档（`Page.frameNavigated`，按页记），下一次用 ref 前就清掉，不拿旧文档的节点号去点新文档。同文档内的跳转（SPA 路由、锚点）和别的标签页刷新不算。
   - 以前点击 / 选择 / 填表 / 拖拽 / 上传之后整份快照就作废，接着用同一份快照的下一个 ref 报 `unknown ref (have 0 refs)`。
 - 同域 iframe：`frame` / `frame_selector`（CSS 选 iframe）。
   - 跨域或找不到直接报错，不静默落回主文档。

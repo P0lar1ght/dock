@@ -1521,6 +1521,24 @@ async fn browser_js_is_fast_and_sees_frames() {
         out.text
     );
     assert!(out.text.contains("button \"Inside\""), "{}", out.text);
+    // srcdoc 的 iframe（网址是 about:srcdoc）也进快照。以前按网址把 about:* 的 iframe 都去掉了。
+    let out = ok(
+        &hub,
+        "s",
+        "browser_js",
+        json!({"code": "await page.setContent('<h1>outer</h1><iframe srcdoc=\"<button>InSrcdoc</button>\"></iframe>'); await page.frames()[1]?.waitForLoadState(); return await snapshot();"}),
+    )
+    .await;
+    assert!(out.text.contains("button \"InSrcdoc\""), "{}", out.text);
+    // settle() 等完就把页面里的 MutationObserver 拆掉，不一直挂着。
+    let out = ok(
+        &hub,
+        "s",
+        "browser_js",
+        json!({"code": "await settle({ quietMs: 100 }); return String(await page.evaluate(() => window.__dockMutations));"}),
+    )
+    .await;
+    assert!(out.text.contains("undefined"), "{}", out.text);
 
     // tabs.close；脚本里开了又关的页不让调用干等（以前等满 3 秒）。
     let out = ok(
@@ -1635,6 +1653,62 @@ async fn refs_from_one_snapshot_survive_several_actions() {
     let gone = hub.call("s", "browser_click", &json!({"ref": go})).await;
     assert!(gone.is_error, "{}", gone.text);
     assert!(gone.text.contains("no longer on the page"), "{}", gone.text);
+    hub.shutdown().await;
+}
+
+/// 回归：点击把主框架带到了新文档，refs 也作废（同 browser_navigate），不拿旧文档的节点号
+/// 去点新文档。以前只有 browser_navigate / 后退 / 换标签才清，点击、输入带走的跳转要等下一次
+/// 操作失败才知道，新文档要是重用了那个节点号就点错了地方。
+#[tokio::test]
+#[ignore = "needs a real Chrome"]
+async fn a_click_that_navigates_invalidates_the_refs() {
+    let dock_home = tempfile::tempdir().unwrap();
+    let _env = cordis_base::test_env::scoped().set("DOCK_HOME", dock_home.path());
+    if !chrome_or_skip("refs after a navigating click") {
+        return;
+    }
+    let port = slow_site();
+    let base = format!("http://127.0.0.1:{port}");
+    let hub = BrowserHub::new();
+    ok(
+        &hub,
+        "s",
+        "browser_open",
+        json!({"url": format!("{base}/other")}),
+    )
+    .await;
+    ok(
+        &hub,
+        "s",
+        "browser_evaluate",
+        json!({"expression": "document.body.innerHTML = '<a href=\"/page\">Next</a><button>Stay</button>'; 1"}),
+    )
+    .await;
+    let snap = ok(&hub, "s", "browser_snapshot", json!({})).await;
+    let next = ref_of(&snap.text, "Next");
+    let stay = ref_of(&snap.text, "Stay");
+    ok(&hub, "s", "browser_click", json!({"ref": next})).await;
+    // 等到新文档。用 browser_evaluate 看，不用 browser_js：browser_js 跑完本来就清 refs，
+    // 拿它等就测不出点击带走页面这条路。
+    let mut arrived = false;
+    for _ in 0..100 {
+        let out = hub
+            .call(
+                "s",
+                "browser_evaluate",
+                &json!({"expression": "location.pathname"}),
+            )
+            .await;
+        if !out.is_error && out.text.contains("/page") {
+            arrived = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(arrived, "点击之后没跳到 /page");
+    let stale = hub.call("s", "browser_click", &json!({"ref": stay})).await;
+    assert!(stale.is_error, "{}", stale.text);
+    assert!(stale.text.contains("unknown ref"), "{}", stale.text);
     hub.shutdown().await;
 }
 

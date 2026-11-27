@@ -141,7 +141,9 @@ async function ariaTree(page, selector = "body", opts = {}) {
   if (selector !== "body") return main;
   const frames = page
     .frames()
-    .filter((f) => f !== page.mainFrame() && f.url() && f.url() !== "about:blank")
+    // `about:blank` / `about:srcdoc` 的 iframe 也看：srcdoc 里的表单、脚本填出来的编辑器都在这种
+    // iframe 里。跨域进不去的、里面是空的，下面跳过。
+    .filter((f) => f !== page.mainFrame())
     .slice(0, SNAPSHOT_FRAMES_MAX);
   const parts = [main];
   for (const f of frames) {
@@ -149,7 +151,7 @@ async function ariaTree(page, selector = "body", opts = {}) {
       .locator("body")
       .ariaSnapshot({ timeout: Math.min(opts.timeout ?? 2000, 2000) })
       .catch(() => null);
-    if (!tree) continue;
+    if (!tree || !tree.trim()) continue;
     const name = f.name() ? ` name=${JSON.stringify(f.name())}` : "";
     const body = tree
       .split("\n")
@@ -170,31 +172,53 @@ const LONG_LIVED = new Set(["eventsource", "websocket", "media"]);
  */
 async function settleOn(p, inflight, { quietMs = 500, timeoutMs = 5000 } = {}) {
   const start = Date.now();
-  const mutations = () =>
+  // 页面里挂一个计数的 MutationObserver。几个 settle 同时等同一页时共用一个（`users` 计数），
+  // 最后一个等完就拆掉，不在页面里一直挂着。
+  const mutations = (join) =>
     p
-      .evaluate(() => {
-        if (!window.__dockMutations) {
-          const box = { n: 0 };
-          new MutationObserver(() => box.n++).observe(document, { subtree: true, childList: true, characterData: true });
+      .evaluate((join) => {
+        let box = window.__dockMutations;
+        if (!box) {
+          box = { n: 0, users: 0 };
+          box.obs = new MutationObserver(() => box.n++);
+          box.obs.observe(document, { subtree: true, childList: true, characterData: true });
           window.__dockMutations = box;
         }
-        return window.__dockMutations.n;
-      })
+        // 跳转换了文档：新文档里的这一个也算这次 settle 的。
+        if (join || box.users === 0) box.users++;
+        return box.n;
+      }, join)
       // 正在跳转（执行上下文没了）：当成还在变。
       .catch(() => -1);
-  let last = await mutations();
+  const leave = () =>
+    p
+      .evaluate(() => {
+        const box = window.__dockMutations;
+        if (!box) return;
+        box.users--;
+        if (box.users <= 0) {
+          box.obs.disconnect();
+          delete window.__dockMutations;
+        }
+      })
+      .catch(() => {});
+  let last = await mutations(true);
   let quietSince = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    const n = await mutations();
-    if (n === -1 || n !== last || (inflight?.size ?? 0) > 0) {
-      last = n;
-      quietSince = Date.now();
-      continue;
+  try {
+    while (Date.now() - start < timeoutMs) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const n = await mutations(false);
+      if (n === -1 || n !== last || (inflight?.size ?? 0) > 0) {
+        last = n;
+        quietSince = Date.now();
+        continue;
+      }
+      if (Date.now() - quietSince >= quietMs) return { settled: true, ms: Date.now() - start };
     }
-    if (Date.now() - quietSince >= quietMs) return { settled: true, ms: Date.now() - start };
+    return { settled: false, ms: Date.now() - start, pendingRequests: inflight?.size ?? 0 };
+  } finally {
+    await leave();
   }
-  return { settled: false, ms: Date.now() - start, pendingRequests: inflight?.size ?? 0 };
 }
 
 /** 定位超时、而且根本没找到元素（call log 里没有 `resolved to`）：那时页面上有什么。 */
