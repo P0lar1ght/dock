@@ -80,6 +80,8 @@ interface WireThread {
   cwd?: string;
   open: boolean;
   presetId?: string | null;
+  /** 开着的页的沙箱工作区（`home` = 项目目录；工作树里 `cwd` 是工作树里的路径）。 */
+  sandbox?: { root?: string; home?: string; mode?: string; branch?: string };
   updatedAt?: number;
   subagentCount?: number;
   subagentsRunning?: number;
@@ -774,12 +776,14 @@ export class DockStore {
       .filter((t) => t.cwd && t.alias !== "live")
       .map((t) => ({
         id: t.id,
-        projectId: projectId(t.presetId ?? null, t.cwd!),
+        // 按项目分组：换进工作树（`/sandbox worktree`）的页 `cwd` 是工作树，项目还是原来那个。
+        projectId: projectId(t.presetId ?? null, t.sandbox?.home ?? t.cwd!),
         // 还没说过话的会话，网关给的是占位标题「当前会话」。
         title: t.title && t.title !== "当前会话" ? t.title : "新对话",
         preset: label(t.presetId),
         presetId: t.presetId ?? null,
         cwd: t.cwd!,
+        home: t.sandbox?.home ?? t.cwd!,
         open: t.open,
         // 开着的页 `updatedAt` 是 0（还没落盘）：当作最新，排在最上面。
         updatedAt: t.open && !t.updatedAt ? Number.MAX_SAFE_INTEGER : t.updatedAt ?? 0,
@@ -1784,7 +1788,7 @@ export function groupSessions(
     }
     let p = g.projects.find((x) => x.id === s.projectId);
     if (!p) {
-      p = { id: s.projectId, name: basename(s.cwd), path: s.cwd, sessions: [] };
+      p = { id: s.projectId, name: basename(s.home), path: s.home, sessions: [] };
       g.projects.push(p);
     }
     p.sessions.push(s);

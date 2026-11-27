@@ -7,7 +7,7 @@ use crate::tools::jobs::Jobs;
 use crate::tools::registry::{own_registered, tool_result, ToolBody, Tools};
 use cordis_base::types::{ToolCall, ToolResult, ToolSpec};
 
-const PARAMS: &str = r#"{"type":"object","properties":{"command":{"type":"string","description":"Shell command or script. Each stdout line is an event; exit ends the watch."},"description":{"type":"string","description":"Short human-readable description of what you are monitoring."},"timeout_ms":{"type":"integer","description":"Kill after this many ms. Ignored when persistent is true. Default 36000000 (10h)."},"persistent":{"type":"boolean","description":"Run until kill_task or session end."}},"required":["command","description"]}"#;
+const PARAMS: &str = r#"{"type":"object","properties":{"command":{"type":"string","description":"Shell command or script. Each stdout line is an event; exit ends the watch."},"description":{"type":"string","description":"Short human-readable description of what you are monitoring."},"timeout_ms":{"type":"integer","description":"Kill after this many ms. Ignored when persistent is true. Default 36000000 (10h)."},"persistent":{"type":"boolean","description":"Run until kill_task or session end."},"sandbox":{"type":"boolean","description":"Same as bash: only matters when the user has turned the sandbox on. Leave it unset; set false only to rerun a command the sandbox blocked, which asks the user first."}},"required":["command","description"]}"#;
 
 const DESC: &str = "Start a background monitor that streams events from a long-running script. Each stdout line is captured on the job; exit ends the watch, and you are notified when it does.\n\n**Output volume**: Print only DONE/FAILED/CANCELLED. Use grep --line-buffered in pipes.\n\nSet persistent: true for session-length watches. Stop with kill_task.";
 
@@ -71,12 +71,22 @@ fn start_monitor(ctx: &cordis::Context, call: ToolCall) -> ToolResult {
         return tool_result(call, "Error: jobs is not mounted");
     };
     // 显式给会话 cwd：不给的话子进程继承进程 cwd，多页时会跑错项目。
-    let id = jobs.start_ex_in(
-        command,
-        Some(description.to_string()),
-        true,
-        Some(crate::session::cwd::current_cwd()),
-    );
+    let cwd = Some(crate::session::cwd::current_cwd());
+    // 关卡判了「沙箱里跑」的（见 `host::sandbox`）：包不上就不跑。
+    let id = match crate::host::sandbox::granted_access() {
+        Some(access) => match crate::host::sandbox::prepare_command(access, command) {
+            Ok(run) => jobs.start_sandboxed(
+                command,
+                Some(description.to_string()),
+                true,
+                false,
+                cwd,
+                run,
+            ),
+            Err(e) => return tool_result(call, e),
+        },
+        None => jobs.start_ex_in(command, Some(description.to_string()), true, cwd),
+    };
     tool_result(
         call,
         format!(

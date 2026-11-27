@@ -1,0 +1,36 @@
+[package]
+name = "dock-sandbox"
+version.workspace = true
+edition = "2021"
+rust-version.workspace = true
+description = "Dock 沙箱：按命令的系统沙箱（Seatbelt / Landlock + seccomp）、审计（出口代理含 HTTPS 解密、只追加的审计日志、链路图）"
+license = "Apache-2.0"
+
+[dependencies]
+bytes = "1"
+http = "1"
+http-body = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["server", "client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+libc = "0.2"
+# 审计报告里的链路图离线渲染成 SVG（仓库自带，dock-render 也在用）。
+mermaid-to-svg = { path = "../dock-render/third_party/mermaid-to-svg" }
+native-tls = { version = "0.2", features = ["alpn"] }
+rcgen = { version = "0.14.10", default-features = false, features = ["ring", "pem", "crypto"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+time = { version = "0.3", features = ["local-offset"] }
+tokio = { version = "1", features = ["rt", "net", "io-util", "sync", "time", "macros", "fs"] }
+tokio-native-tls = "0.3"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = "0.4.7"
+seccompiler = "0.5.0"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process"] }

@@ -241,6 +241,53 @@ pub fn with_cwd(mut params: Value, cwd: Option<&str>) -> Value {
     params
 }
 
+/// 审计目录（内置浏览器把这个会话标签页的网络请求写进去，见 `cordis-browser`）。
+pub const META_AUDIT: &str = "dock/audit";
+
+pub fn with_audit(mut params: Value, dir: Option<&std::path::Path>) -> Value {
+    let Some(dir) = dir else {
+        return params;
+    };
+    if !params.is_object() {
+        params = json!({});
+    }
+    let meta = params
+        .as_object_mut()
+        .expect("just ensured object")
+        .entry("_meta")
+        .or_insert_with(|| json!({}));
+    if !meta.is_object() {
+        *meta = json!({});
+    }
+    meta[META_AUDIT] = json!(dir.display().to_string());
+    params
+}
+
+/// 沙箱的主机规则（内置浏览器拿去拦子请求）：`[{host, block}]`，按顺序。
+pub const META_POLICY: &str = "dock/policy";
+
+pub fn with_policy(mut params: Value, rules: &[(String, bool)]) -> Value {
+    if rules.is_empty() {
+        return params;
+    }
+    if !params.is_object() {
+        params = json!({});
+    }
+    let meta = params
+        .as_object_mut()
+        .expect("just ensured object")
+        .entry("_meta")
+        .or_insert_with(|| json!({}));
+    if !meta.is_object() {
+        *meta = json!({});
+    }
+    meta[META_POLICY] = json!(rules
+        .iter()
+        .map(|(host, block)| json!({ "host": host, "block": block }))
+        .collect::<Vec<_>>());
+    params
+}
+
 /// MRTR：把重试请求的 `params` 补上 `inputResponses` + `requestState`。
 ///
 /// 规范（2026-07-28 MRTR）：

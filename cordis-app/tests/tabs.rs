@@ -822,6 +822,34 @@ async fn resident_pages_persist_under_their_own_cwd() {
     assert!(!aside.on_disk(), "旁问页不落盘");
 }
 
+/// 回归：新页继承的是工作区，不只是 cwd。当前页在工作区里 `/cd` 到了子目录，新页也在子目录，
+/// 但会话归档在项目下、工作区还是整个项目——以前新页按子目录落盘，同一个项目的历史分成两处。
+#[tokio::test]
+async fn a_new_page_inherits_the_workspace_not_just_the_cwd() {
+    let root = boot().await;
+    let home = std::path::PathBuf::from(std::env::var("DOCK_HOME").unwrap());
+    std::fs::create_dir_all(home.join("project-d/sub")).unwrap();
+    let project = home.join("project-d").canonicalize().unwrap();
+    root.get::<Sessions>(SESSIONS)
+        .unwrap()
+        .pin_workspace_cwd(&project);
+    cordis_spine::change_dir(&root, std::path::Path::new("sub")).unwrap();
+
+    let tabs = root.get::<Tabs>(TABS).unwrap();
+    tabs.open().await.unwrap();
+    let page = tabs.active_ctx();
+    assert_eq!(cordis_spine::session_cwd(&page), project.join("sub"));
+    assert_eq!(cordis_spine::session_space(&page).root, project);
+    let sessions = page.get::<Sessions>(SESSIONS).unwrap();
+    sessions.append(LogEvent::User("在子目录里说的话".into()));
+    let id = sessions.live_session_id();
+    assert!(Sessions::can_adopt_archived(&id, &project), "归档在项目下");
+    assert!(
+        !Sessions::can_adopt_archived(&id, &project.join("sub")),
+        "不该按子目录另起一处"
+    );
+}
+
 /// 关掉一页：子代理信箱里按页记的唤醒一起丢掉（否则开开关关的分页让这张表只增不减）。
 /// 关页后再要那一页的唤醒，拿到的是新建的。
 #[tokio::test]

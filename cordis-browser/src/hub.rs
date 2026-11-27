@@ -77,6 +77,10 @@ pub struct BrowserHub {
     registry_dir: Option<std::path::PathBuf>,
     /// `browser_js` 的 Node 执行器，第一次用时才起。
     js: Mutex<Option<Arc<JsRunner>>>,
+    /// 开着审计的会话：审计目录和写进去的日志（`browser.jsonl`）。
+    audits: std::sync::Mutex<HashMap<String, (PathBuf, Arc<dock_sandbox::audit::store::AuditLog>)>>,
+    /// 沙箱的主机规则（按会话）。
+    blocked: std::sync::Mutex<HashMap<String, Vec<(String, bool)>>>,
 }
 
 impl BrowserHub {
@@ -359,6 +363,63 @@ impl BrowserHub {
         Ok(runner)
     }
 
+    /// Dock 每次调用都带上这个会话的审计目录（`None` = 没在审计）。变了才去动标签页组。
+    pub async fn set_audit(&self, session: &str, dir: Option<PathBuf>) {
+        let log = {
+            let mut audits = self.audits.lock().unwrap();
+            match (&dir, audits.get(session)) {
+                (Some(d), Some((current, _))) if current == d => return,
+                (None, None) => return,
+                _ => {}
+            }
+            match dir {
+                Some(dir) => {
+                    match dock_sandbox::audit::store::AuditLog::open(&dir, "browser.jsonl") {
+                        Ok(log) => {
+                            let log = Arc::new(log);
+                            audits.insert(session.to_string(), (dir, log.clone()));
+                            Some(log)
+                        }
+                        Err(_) => None,
+                    }
+                }
+                None => {
+                    audits.remove(session);
+                    None
+                }
+            }
+        };
+        if let Some(group) = self.group(session).await {
+            group.lock().await.set_audit(log);
+        }
+    }
+
+    /// 沙箱的主机规则（`(通配, 阻断?)`，按顺序）。变了才去动标签页组。
+    pub async fn set_blocked(&self, session: &str, rules: Vec<(String, bool)>) {
+        {
+            let mut blocked = self.blocked.lock().unwrap();
+            if blocked.get(session).map(Vec::as_slice).unwrap_or(&[]) == rules.as_slice() {
+                return;
+            }
+            if rules.is_empty() {
+                blocked.remove(session);
+            } else {
+                blocked.insert(session.to_string(), rules.clone());
+            }
+        }
+        if let Some(group) = self.group(session).await {
+            group.lock().await.set_blocked(rules).await;
+        }
+    }
+
+    fn audit_log(&self, session: &str) -> Option<Arc<dock_sandbox::audit::store::AuditLog>> {
+        self.audits
+            .lock()
+            .unwrap()
+            .get(session)
+            .map(|(_, log)| log.clone())
+    }
+
     async fn group(&self, session: &str) -> Option<Group> {
         self.groups.lock().await.get(session).cloned()
     }
@@ -468,6 +529,11 @@ impl BrowserHub {
             let chromium = chromium.as_ref().expect("just ensured");
             ConnectedSession::open(chromium).await?
         };
+        fresh.set_audit(self.audit_log(session));
+        let blocked = self.blocked.lock().unwrap().get(session).cloned();
+        if let Some(rules) = blocked {
+            fresh.set_blocked(rules).await;
+        }
         let (targets, active) = (fresh.target_ids(), fresh.active_target_id());
         let group = Arc::new(Mutex::new(fresh));
         // 两次并发 open 同一会话：后到的那组关掉，别留孤儿标签页。

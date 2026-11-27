@@ -114,14 +114,20 @@ fn budget_chars(window_tokens: u64) -> usize {
     ((window as f64) * 4.0 * BUDGET_PERCENT) as usize
 }
 
-/// User layer then project layer. Both optional. 项目层取当前会话的 cwd。
+/// User layer then project layer. Both optional. 项目层取当前会话的沙箱工作区根：工作区里
+/// `/cd` 到子目录，项目的 `AGENTS.md` 照样在；子目录自己也有一份时跟在后面。
 pub fn instruction_paths() -> Vec<(&'static str, PathBuf)> {
+    let root = crate::session::cwd::current_space().root;
     let cwd = crate::session::cwd::current_cwd();
-    vec![
+    let mut paths = vec![
         ("~/.dock/AGENTS.md", dock_home().join(INSTRUCTIONS_FILE)),
         ("~/.dock/USER.md（关于用户）", dock_home().join(USER_FILE)),
-        ("AGENTS.md", cwd.join(INSTRUCTIONS_FILE)),
-    ]
+        ("AGENTS.md", root.join(INSTRUCTIONS_FILE)),
+    ];
+    if cwd != root && cwd.starts_with(&root) {
+        paths.push(("AGENTS.md（当前目录）", cwd.join(INSTRUCTIONS_FILE)));
+    }
+    paths
 }
 
 fn window_tokens(exec: &Context) -> u64 {

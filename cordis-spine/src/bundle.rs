@@ -12,6 +12,7 @@ use crate::host::mcp_app_context::mcp_app_context;
 use crate::host::mcp_app_views::mcp_app_views;
 use crate::host::permissions::permissions;
 use crate::host::plugin_settings::plugin_settings;
+use crate::host::sandbox::sandbox;
 use crate::host::settings::settings;
 use crate::host::settings_commands::settings_commands;
 use crate::host::slash::slash;
@@ -136,12 +137,16 @@ pub async fn install_app(ctx: &Context) -> Result<()> {
     // 所以这里不必等功能服务先挂好。
     ctx.plugin(session_commands(), ())?.wait().await?;
     ctx.plugin(settings_commands(), ())?.wait().await?;
+    // 命令沙箱：按 `[sandbox] enabled` 给第 1 页播种开关，挂 `/sandbox`。
+    ctx.plugin(sandbox(), ())?.wait().await?;
     ctx.plugin(skills(), ())?.wait().await?;
     ctx.plugin(project_instructions(), ())?.wait().await?;
     // 用户在文件面板里改的文件：下一步提醒 agent（网关写盘后记一条）。
     ctx.plugin(user_edits(), ())?.wait().await?;
     // 每轮改了哪些文件（编辑工具前存原文）：对话流里的改动卡、审查、撤销。
     ctx.plugin(turn_changes(), ())?.wait().await?;
+    // 审计（默认关）：开了的页记工具调用、命令和出网，命令的出网走出口代理。
+    ctx.plugin(crate::host::audit::audit(), ())?.wait().await?;
     // MCP App 界面交来的状态（网关 `mcp/app/context`）：下一步提醒 agent。
     ctx.plugin(mcp_app_context(), ())?.wait().await?;
     // MCP App 界面自己的工具（网关 `mcp/app/view/expose`）：界面开着时经 use_tool 交给模型。

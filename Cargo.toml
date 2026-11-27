@@ -10,6 +10,7 @@ members = [
     "cordis-browser",
     "cordis-apps",
     "dock-memory",
+    "dock-sandbox",
     "dock-render/markdown",
     "dock-render/mermaid",
     "dock-render/third_party/ordered_hashmap",

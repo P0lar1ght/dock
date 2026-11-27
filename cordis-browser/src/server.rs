@@ -22,6 +22,10 @@ pub const SERVER_NAME: &str = "browser";
 
 /// 会话身份在 `_meta` 里的键。Dock 客户端写，其它客户端不写就归默认组。
 pub const META_SESSION: &str = "dock/sessionId";
+/// 这个会话开着审计时 Dock 带上的审计目录：标签页的网络请求写进去（`browser.jsonl`）。
+pub const META_AUDIT: &str = "dock/audit";
+/// 沙箱的主机规则：`[{host, block}]`，按顺序翻成 `Network.setBlockedURLs`，拦这个会话标签页的请求。
+pub const META_POLICY: &str = "dock/policy";
 const DEFAULT_SESSION: &str = "default";
 
 /// 新的在前。与 Dock 客户端的 `SPOKEN` 对齐。
@@ -157,6 +161,23 @@ fn spawn_call(
         .cloned()
         .unwrap_or_else(|| json!({}));
     let session = session_of(&params);
+    let audit = params
+        .pointer("/_meta")
+        .and_then(|m| m.get(META_AUDIT))
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+        .map(std::path::PathBuf::from);
+    let blocked: Vec<(String, bool)> = params
+        .pointer("/_meta")
+        .and_then(|m| m.get(META_POLICY))
+        .and_then(Value::as_array)
+        .map(|rules| {
+            rules
+                .iter()
+                .filter_map(|r| Some((r["host"].as_str()?.to_string(), r["block"].as_bool()?)))
+                .collect()
+        })
+        .unwrap_or_default();
     let key = id.to_string();
     let hub = hub.clone();
     let tx = tx.clone();
@@ -165,6 +186,8 @@ fn spawn_call(
     // 先占位再起任务：任务跑得比插入快时，它的 remove 不会落空、留下一个死句柄。
     let mut map = inflight.lock().unwrap();
     let task = tokio::spawn(async move {
+        hub.set_audit(&session, audit).await;
+        hub.set_blocked(&session, blocked).await;
         let out = hub.call(&session, &name, &args).await;
         let _ = tx.send(result(id, call_result(out)));
         done.lock().unwrap().remove(&done_key);

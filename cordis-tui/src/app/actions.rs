@@ -510,6 +510,7 @@ pub fn effect_for_slash(cmd: SlashCmd, args: &str) -> Effect {
         SlashCmd::Cd => Effect::ChangeDir(PathBuf::from(if args.is_empty() { "." } else { args })),
         SlashCmd::Timestamps => run("timestamps", ""),
         SlashCmd::Thinking => run("think", ""),
+        SlashCmd::Sandbox => run("sandbox", args),
         SlashCmd::Effort => {
             if args.is_empty() {
                 Effect::ArgPicker {

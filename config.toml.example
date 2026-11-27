@@ -230,3 +230,27 @@ prompt_cache = true
 # base = "https://api.openai.com/v1"
 # dimensions = 1024
 # api_key = ""   # or DOCK_MEMORY_EMBEDDING_API_KEY / OPENAI_API_KEY
+
+
+# 沙箱（默认关）= 审计 + 策略 + 可选的限制，不减少 agent 能做的事。见 docs/SANDBOX.md。
+# 只认这份用户级配置（$DOCK_HOME/config.toml）；项目 .dock/config.toml 里写了也不算。
+# 规则和限制每次现读；审计那三项改了要重启。/sandbox 按页开关。
+# [sandbox]
+# enabled = false          # 新开的页默认开不开（开 = 审计 + 策略，见 docs/SANDBOX.md）
+# decrypt = true           # 审计：命令的 HTTPS 在出口代理处解密（docs/AUDIT.md）
+# body_cap_kb = 256        # 审计：正文最多记多少 KB
+# redact_secrets = true    # 审计：遮住 Authorization / Cookie 这类凭据头
+# confine = false          # 限制：命令进系统沙箱（只写工作区、读不到密钥），这时沙箱里的命令不弹框
+# network = "allow"        # 限制开着时命令的网络："allow" | "proxy"（只能经审计代理）| "off"
+# build_caches = true      # ~/.cargo/registry、~/.npm、~/.cache 等依赖缓存可不可写
+# writable_roots = []      # 额外可写：绝对路径或 ~/ 开头，如 ["~/build"]
+# deny_read = []           # 额外读不到：如 ["~/.npmrc", "~/work/secrets"]
+# keep_env = []            # 默认会去掉的环境变量里要留下的，如 ["OPENAI_API_KEY"]
+#
+# 策略：按顺序第一条命中的算，都不中就放行。host = 出网目的地（* 通配），command = 命令。
+# [[sandbox.rules]]
+# host = "*.corp.example"
+# action = "deny"          # allow | ask | deny
+# [[sandbox.rules]]
+# command = "git push*"
+# action = "ask"

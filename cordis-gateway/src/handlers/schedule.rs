@@ -26,9 +26,9 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 use cordis_spine::{
-    parse_at, parse_interval, session_cwd, AgentPresets, Cron, CronApproval, CronError, CronExpiry,
-    CronJob, CronOwner, CronPatch, CronSchedule, CronTarget, FireReason, NewCronTask, WatchWhen,
-    AGENT_PRESETS, CRON, DEFAULT_CHECK_EVERY, DEFAULT_FILES_DEBOUNCE, SCHEDULE_CHANGED,
+    parse_at, parse_interval, session_home, AgentPresets, Cron, CronApproval, CronError,
+    CronExpiry, CronJob, CronOwner, CronPatch, CronSchedule, CronTarget, FireReason, NewCronTask,
+    WatchWhen, AGENT_PRESETS, CRON, DEFAULT_CHECK_EVERY, DEFAULT_FILES_DEBOUNCE, SCHEDULE_CHANGED,
 };
 
 use cordis::{plugin, Inject, Plugin};
@@ -231,7 +231,8 @@ fn owner_of(
         return Ok((
             CronOwner {
                 session,
-                cwd: session_cwd(&page.ctx),
+                // 到点按它找回会话：归档的项目目录，不是 cwd。
+                cwd: session_home(&page.ctx),
             },
             preset,
         ));

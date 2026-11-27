@@ -9,7 +9,7 @@ use crate::tools::fs_common::{bool_field, int_field, parse_args, resolve, str_fi
 use crate::tools::jobs::Jobs;
 use cordis_base::types::ToolSpec;
 
-const BASH_PARAMS: &str = r#"{"type":"object","properties":{"command":{"type":"string","description":"The bash command to run."},"description":{"type":"string","description":"Clear, concise description of what this command does in active voice, 5-10 words (shown to the user in the permission prompt and the UI). Examples: \"git status\" -> \"Show working tree status\"; \"npm install\" -> \"Install package dependencies\"."},"workdir":{"type":"string","description":"Working directory for this command. Defaults to the session cwd; if you pass a relative workdir it resolves against the session cwd. Prefer this over a leading cd. Relative paths inside command then resolve against workdir: with workdir \"sub\", write \"src/file.txt\", not \"sub/src/file.txt\"."},"timeout_ms":{"type":"integer","description":"Foreground wait in ms. Default and cap 300000 (5 min)."},"is_background":{"type":"boolean","description":"Return a job id immediately instead of waiting (dev servers, long builds). You are notified when it exits, so do not poll it."}},"required":["command"]}"#;
+const BASH_PARAMS: &str = r#"{"type":"object","properties":{"command":{"type":"string","description":"The bash command to run."},"description":{"type":"string","description":"Clear, concise description of what this command does in active voice, 5-10 words (shown to the user in the permission prompt and the UI). Examples: \"git status\" -> \"Show working tree status\"; \"npm install\" -> \"Install package dependencies\"."},"workdir":{"type":"string","description":"Working directory for this command. Defaults to the session cwd; if you pass a relative workdir it resolves against the session cwd. Prefer this over a leading cd. Relative paths inside command then resolve against workdir: with workdir \"sub\", write \"src/file.txt\", not \"sub/src/file.txt\"."},"timeout_ms":{"type":"integer","description":"Foreground wait in ms. Default and cap 300000 (5 min)."},"is_background":{"type":"boolean","description":"Return a job id immediately instead of waiting (dev servers, long builds). You are notified when it exits, so do not poll it."},"sandbox":{"type":"boolean","description":"Only matters when the user has turned the sandbox on: commands then run sandboxed without a permission prompt. Leave it unset. Set false only to rerun a command the result says the sandbox blocked; that asks the user first."}},"required":["command"]}"#;
 
 const BASH_DESC: &str = "Run a bash command in the workspace and return its output.\n\
 - Do not use bash for file work: `cat`/`head`/`sed -n` → read_file, `grep`/`rg` → grep, `find` → glob, `ls` → list_dir, `sed -i` → search_replace. The dedicated tools are cheaper, are not gated behind a permission prompt, keep working in plan mode, and report what they truncated. Shell `grep` also reads everything on disk including build output (`target/`), so a repo-wide search the grep tool finishes in tens of milliseconds can take bash minutes.\n\
@@ -105,9 +105,21 @@ pub(crate) async fn run_with_yield(
     let background = bool_field(&v, "is_background")
         || bool_field(&v, "background")
         || int_field(&v, "block_until_ms") == Some(0);
+    // 关卡判了「沙箱里跑」的命令（见 `host::sandbox`）：先包好，包不上就不跑——绝不退回
+    // 沙箱外，它是没经过用户确认就放行的。
+    let mut sandbox = match crate::host::sandbox::granted_access() {
+        Some(access) => match crate::host::sandbox::prepare_command(access, &command) {
+            Ok(run) => Some(run),
+            Err(e) => return e,
+        },
+        None => None,
+    };
     if background {
         if let Some(jobs) = jobs {
-            let id = jobs.start_ex_in(command, description, false, workdir);
+            let id = match sandbox.take() {
+                Some(run) => jobs.start_sandboxed(command, description, false, false, workdir, run),
+                None => jobs.start_ex_in(command, description, false, workdir),
+            };
             // Grok `format_default_prompt` backgrounded + `background_retrieval_hint`.
             return format!(
                 "[Command moved to background]\n\n\
@@ -133,7 +145,10 @@ pub(crate) async fn run_with_yield(
             &local
         }
     };
-    let id = jobs.start_foreground_ex(&command, description, workdir);
+    let id = match sandbox.take() {
+        Some(run) => jobs.start_sandboxed(&command, description, false, true, workdir, run),
+        None => jobs.start_foreground_ex(&command, description, workdir),
+    };
     let budget = call_budget(&v);
     let start = std::time::Instant::now();
     let mut yield_seen: Option<std::time::Instant> = None;

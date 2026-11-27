@@ -342,8 +342,8 @@ impl Tabs {
             return Err(format!("最多 {MAX_TABS} 页"));
         }
         // 先确认磁盘上有这份会话，再挂页。挂完才发现没有，会白白占掉一个页号。
-        // 新页继承当前页的 cwd（`tab.sessions`），所以按当前页的 cwd 查。
-        let cwd = crate::session_cwd(&self.active_ctx());
+        // 新页继承当前页的工作区（`tab.sessions`），所以按当前页归档的项目查。
+        let cwd = crate::session_home(&self.active_ctx());
         if !Sessions::can_adopt_archived(session_id, &cwd) {
             return Err("这个会话开不了页（只认当前工作目录下的历史）".into());
         }
@@ -496,8 +496,9 @@ impl Tabs {
             .mount_page(TabKind::Normal, None, self.active_ctx())
             .await?;
         let opened = (|| {
-            // 建页时继承的是当前页的 cwd；改钉到 `cwd`，再按新目录重新挂盘。
-            crate::change_dir(&child, cwd)?;
+            // 建页时继承的是当前页的工作区；换到 `cwd` 上的原地工作区（选定的项目目录），
+            // 再按它重新挂盘。
+            crate::enter_workspace(&child, cwd)?;
             let sessions = child
                 .get::<Sessions>(SESSIONS)
                 .ok_or_else(|| "新页没有会话".to_string())?;

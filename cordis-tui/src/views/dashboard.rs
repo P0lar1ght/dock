@@ -211,7 +211,8 @@ fn collect_rows(ctx: &Context) -> Vec<DashRow> {
     // 磁盘会话。已经开着的那一个不重复列——它在上面已经是一行 Tab 了。
     if let Some(roster) = ctx.get::<Roster>(ROSTER) {
         let open = open_session_ids(ctx);
-        let here = cordis_spine::session_cwd(ctx);
+        // 「这里」= 这一页归档的项目，不是 cwd：工作区里 `/cd` 过照样开得了这个项目的历史。
+        let here = cordis_spine::session_home(ctx);
         rows.extend(
             roster
                 .list()

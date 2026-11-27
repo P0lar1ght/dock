@@ -36,6 +36,7 @@ cordis-tui/              全屏终端 UI 插件：theme、scrollback、prompt、
 cordis-gateway/          回环 HTTP/WS 插件：配对、dock.1 JSON-RPC 投影、slash list|execute
 cordis-app/              二进制入口：一个 Context，install_app + agent-loop + gateway + tui
 dock-memory/             crate `dock-memory`：跨会话 topics/observations + FTS（默认关）
+dock-sandbox/            crate `dock-sandbox`：按命令的系统沙箱（Seatbelt / Landlock + seccomp）；不含插件，见 docs/SANDBOX.md
 dock-render/markdown/    crate `cordis-markdown`
 dock-render/mermaid/     crate `xai-grok-mermaid`
 embed-sdk/               宿主页 JS SDK（`dist/dock-embed.js`，协议 dock.1）
@@ -75,7 +76,7 @@ config.toml.example      用户 / 项目模型目录样例
 | TUI | `theme` `tui.scrollback` `tui.prompt` `tui.statusBar` `tui.welcome` `tui.shortcuts` `tui.pairing`；`tui` 只跑事件循环，视图件由组合根挂（`cordis_tui::views()`） | 同名 |
 | 回环网关 | `gateway`；功能插件 `gateway.settings` `gateway.presets` `gateway.fs` `gateway.canvas` `gateway.mcpApps` `gateway.vcs` `gateway.schedule` `gateway.surfaces` `gateway.status` `gateway.toolViews` `gateway.pluginSettings` `gateway.memory`（`cordis_gateway::features()`，往 `"gateway.methods"` 登记 dock.1 方法） | `"gateway"`（`GatewayRef`）、`"gateway.methods"`，事件 `gateway/pairing` |
 
-`settings` 持有模式、模型、权限开关；TUI 只把按键映射成 Action，再 live-lookup `settings`。计划是独立模式，不是第三种权限。会话落盘在 `$DOCK_HOME/sessions/<cwd-key>/<id>/`（`meta.json` + `chat_history.jsonl`），不是项目 `.dock/`。子代理的对话落在父会话目录下 `subagents/<agent-id>/`（`chat_history.jsonl` + `subagent.json`），不是会话，不进名册和搜索。`meta.json` 记着这个会话的预设、模型、推理强度；恢复（`/resume`、`--resume`、开页）时 `Sessions::restore` live-lookup 这一页的 `settings` 把模型和强度切回去，模型已不在目录里就留着当前的。
+`settings` 持有模式、模型、权限开关；TUI 只把按键映射成 Action，再 live-lookup `settings`。计划是独立模式，不是第三种权限。会话落盘在 `$DOCK_HOME/sessions/<cwd-key>/<id>/`（`meta.json` + `chat_history.jsonl`），不是项目 `.dock/`。`<cwd-key>` 是会话**工作区的项目目录**（`Sessions::disk_home`），不是当前 cwd：cwd 只是工作区（`dock_sandbox::space::Space`，原地或工作树）里的当前目录，见 `docs/SANDBOX.md`「隔离：工作区」。子代理的对话落在父会话目录下 `subagents/<agent-id>/`（`chat_history.jsonl` + `subagent.json`），不是会话，不进名册和搜索。`meta.json` 记着这个会话的预设、模型、推理强度；恢复（`/resume`、`--resume`、开页）时 `Sessions::restore` live-lookup 这一页的 `settings` 把模型和强度切回去，模型已不在目录里就留着当前的。
 
 新东西往 `cordis-base` 还是 `cordis-spine` 放，判据是**有没有插件**：base 不 `provide` 任何 named service、不认识 ctx 键（所以 `names` 不在那儿）、也不依赖内核 crate `cordis`；它只有 wire 类型、`config.toml` 解析和纯引擎（ripgrep、cua 发现）。反过来，`settings` / `permissions` / `slash` / `cron` 虽然也不成环，但它们 provide 服务，留在 spine。这条线由编译器守着——base 反向依赖 spine 会直接编译失败，以前只能靠约定。
 
@@ -207,7 +208,7 @@ agent/pre-step               每轮开始，一次
 system-prompt/assemble       每轮一次
 agent/step-start             每个采样步之前，一次
 llm/stream                   枢纽：出工具调用 → tools/pre-execute（改写 / 改道 / 拒绝）
-                             → 计划门 / 权限门 → 工具体 → tools/execute → 回采样
+                             → 沙箱意见 → 计划门 / 权限门 → 工具体 → tools/execute → 回采样
                              出正文 → agent/turn-end
                              只有推理 → 落 <system-reminder> 重采；采样出错 → turn 结束
                              连续原样重复同一步 → 先提醒，还不改 → turn 结束
@@ -276,6 +277,8 @@ agent/turn-end               有人要续跑 → 落 <system-reminder> 回到采
 11. **workflow 只在收尾时叫醒主线程一次。** 子代理通往父信箱的两条路都按 owner 拦在 `ChildStore`：回合结束通知看 `SubagentRequest::surface_completion`（`runner.rs` 真的读它），子代理发给父级的 `send_message` 看 `owner.workflow_run_id()` 分流进 run 自己的队列。run 还在跑时推「某个孩子跑完了」，主线程就会在一份残缺的中间结果上烧一整轮，而一次 deep-research 有十来个孩子。过程上报折进 run 快照供 overlay 显示，并在 run 里按发生顺序攒着（上限 64 条），收尾时随 `ParentNotice::WorkflowDone` **整批**交付——行上的 `latest_report` 是覆盖写的，从它反推等于对主线程少说一半。
 12. **能力档位压在允许名单之上。** `agent::capability::CapabilityMode` 挂在**受限子会话**的 `"capability"`（主会话没有这一项 = 不设限），`Tools::outside_allowlist` 与 `specs_for_model_on` 两处都查，且查在 `bypasses_allowlist` **之前**——MCP 与动态包工具绕过预设允许名单是有意的，但绕不过「这次委派只准读」。分类按工具名、**默认关闭**：新工具忘了归类是在受限子代理里不可用，而不是带着写盘能力溜进只读会话。同一套做法给采样：`"model-override"` 只挂在受限子会话上，`llm` 采样器先查它再回落 `"settings"`。**两个名字都必须先 `isolate` 再 `provide`**——没隔离的名字 provide 进的是共用注册表，第二个同样收窄的孩子会撞「service 已注册」直接起不来，而那张 `Disposable` 被 `ChildStore` 攥到孩子被处置为止，期间**主会话**自己也查得到那份 read-only，工具表跟着被收窄。**不给子会话隔离一份 `AppSettings`**——那里面还有权限档位这类会话级状态，隔离一份等于让子代理带着一张过期的权限快照跑。唯一的例外是 `bash`：`read-only` 档也放进工具表，由执行时的只读场景把关（`tools::read_only`：只读命令直接跑，别的 `request_strict` 问用户），计划模式和 `read_only` 角色走同一道关。
 13. **cwd 跟会话走，不跟进程走。** 同一进程里的分页（将来 GUI 的多项目会话）可以在不同目录，所以工具、系统提示的辅助函数、子进程、TUI 视图不直接读 `std::env::current_dir()`：有 ctx 用 `cordis_spine::session_cwd(ctx)`，没有就用 `current_cwd()`（读 `exec_ctx()`——`LoopHandle` 把整轮、`Tools::execute_on` 把每次工具调用都挂在这页的 ctx 下）。来源是 `Sessions::workspace_cwd`：没钉 = 跟随进程 cwd，子代理起步时继承父会话钉住的值，新分页继承开它那页的。`/cd` 走 `cordis_spine::change_dir`，只钉这一页（连同这页预设的项目层），**不调 `set_current_dir`**，所以进程 cwd 从启动起就不再变。起子进程一律显式 `current_dir`（`bash` 不传 `workdir` 也给会话 cwd）；在后台任务里执行的（如 workflow 启动）要在工具调用时取好 cwd 随请求带过去，那里没有 exec ctx。`cordis-base` 不依赖 spine，需要 cwd 的函数由调用方传入（如 `grep::run(.., cwd)`）。LSP 按项目根各一份（`LspHub::for_root`）。**只认启动目录（进程 cwd）的项目级资源**：`.dock/config.toml`（模型目录、MCP、浏览器、web_fetch、memory 配置）、skills、动态插件——它们在启动时装进全局服务 / 斜杠表，按页拆要动一张 `"tools"` 表与前缀缓存；`/cd` 到带这些的目录时 flash 会说明。会话落盘（`attach_disk`）按会话自己的 cwd，分页各落各的项目。
+15. **沙箱放行的命令一定在沙箱里跑。** 这一页开了 `/sandbox` 且 `[sandbox] confine = true` 时（只开沙箱不开限制，关卡照旧：沙箱只做审计和策略，策略落在 `tools/pre-execute` 和出口代理上），注册表先问 `host::sandbox::gate`：判「沙箱里跑」的 `bash` / `monitor` 不再过只读关卡、计划门和权限门，档位（工作区可写 / 只读）经任务局部变量交给工具体（`with_access` / `granted_access`），工具体照它包命令（`dock_sandbox::prepare`），包不上就报错**不跑**。不让工具体自己再判一次：两次判断之间有人切了开关，就成了「没问、也没进沙箱」。出沙箱（`"sandbox": false`）走普通权限门。只管模型临时写的命令；MCP 服务器、LSP、浏览器、cua-driver 是用户配置的程序，不进沙箱。开关在这一页的 `AppSettings`（不隔离给子会话，子代理跟着页走）；`[sandbox]` 只认 `$DOCK_HOME/config.toml`，项目配置不能替用户关掉或放宽它。
+
 14. **skills 覆盖顺序。** `scan_all` 按 Builtin（`$DOCK_HOME/bundled/skills`，编译期嵌入、启动物化）→ Bundled（`{cwd}/skills`）→ User（`~/.dock/skills`）→ Agents（`{cwd}/.agents/skills`）→ Project（`{cwd}/.dock/skills`）合并，同名后者覆盖前者。
 
 ## 磁盘

@@ -26,6 +26,7 @@ cordis-gateway/  回环 HTTP/WS 插件：Origin 配对、dock.1 投影、slash l
 cordis-app/      二进制入口：install_app + agent-loop + gateway + tui；`dock mcp browser`
 cordis-browser/  浏览器 MCP 服务（chromiumoxide CDP，按会话分标签页）；不含插件
 cordis-apps/     内置 MCP Apps 服务（白板：`dock mcp whiteboard`，Excalidraw 界面在 web/ 构建进 assets/）；不含插件
+dock-sandbox/    沙箱引擎：系统沙箱（Seatbelt / Landlock + seccomp）、策略规则、审计（出口代理含 HTTPS 解密、哈希链日志、链路图）；不含插件，接进 Dock 的是 spine 的 `sandbox` / `audit` 插件，见 docs/SANDBOX.md
 dock-render/     markdown（`cordis-markdown`）、mermaid（`xai-grok-mermaid`）；third_party/ 为 Mermaid 布局栈
 embed-sdk/       宿主页 SDK（npm，`dist/dock-embed.js`，协议 dock.1）；见 embed-sdk/AGENTS.md
 dock-core/       dock.1 协议核心（TS）：类型化线程事件 + 线程状态 reducer，无 DOM；见 dock-core/README.md
@@ -47,14 +48,14 @@ cargo run -p cordis-app                      # 起 TUI
 cargo run -p cordis-app -- --resume          # 恢复本 cwd 最近一次会话（--resume <id> 指定）
 
 # 默认回归集合（改行为的常规验证）
-cargo test -p cordis-spine -p cordis-tui -p cordis-app -p cordis-gateway -p dock-memory -p cordis-browser -p cordis-apps
+cargo test -p cordis-spine -p cordis-tui -p cordis-app -p cordis-gateway -p dock-memory -p cordis-browser -p cordis-apps -p dock-sandbox
 cargo test -p cordis                         # 内核单独跑（包名是 cordis，目录是 cordis-rust）
 # 单文件 / 单测
 cargo test -p cordis-tui --test dispatch
 cargo test -p cordis-spine --test round -- install_app_registers
 cargo test -p cordis-spine --test dynamic -- <test_name>   # 动态插件相关
 
-cargo fmt --check -p cordis -p cordis-spine -p cordis-tui -p cordis-gateway -p cordis-app -p cordis-markdown -p xai-grok-mermaid -p dock-memory -p cordis-browser -p cordis-apps   # 格式门禁（CI 同款，第一方 crate）
+cargo fmt --check -p cordis -p cordis-spine -p cordis-tui -p cordis-gateway -p cordis-app -p cordis-markdown -p xai-grok-mermaid -p dock-memory -p cordis-browser -p cordis-apps -p dock-sandbox   # 格式门禁（CI 同款，第一方 crate）
 cargo clippy -p cordis-spine --all-targets --no-deps -- -D warnings   # lint（按改动的 crate 跑，CI 同款）
 ```
 

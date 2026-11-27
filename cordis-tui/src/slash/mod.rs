@@ -41,6 +41,7 @@ pub enum SlashCmd {
     Timestamps,
     Thinking,
     Effort,
+    Sandbox,
     Plan,
     ViewPlan,
     Goal,
@@ -78,6 +79,7 @@ pub enum ArgKind {
     Effort,
     LoopInterval,
     Lsp,
+    Sandbox,
 }
 
 pub struct SlashDef {
@@ -447,6 +449,16 @@ pub const CATALOG: &[SlashDef] = &[
         takes_args: true,
         args_required: true,
         arg_kind: Some(ArgKind::Effort),
+    },
+    SlashDef {
+        cmd: SlashCmd::Sandbox,
+        name: "sandbox",
+        aliases: &["audit"],
+        display: "/sandbox",
+        description: "沙箱：审计这一页的工具调用、命令和出网，按策略放行 / 询问 / 阻断",
+        takes_args: true,
+        args_required: false,
+        arg_kind: Some(ArgKind::Sandbox),
     },
     SlashDef {
         cmd: SlashCmd::Export,
@@ -856,6 +868,21 @@ pub fn lsp_args() -> Vec<ArgItem> {
     ]
 }
 
+pub fn sandbox_args() -> Vec<ArgItem> {
+    vec![
+        ArgItem::new("on", "开这一页的沙箱（审计 + 策略）"),
+        ArgItem::new("off", "关掉这一页的沙箱"),
+        ArgItem::new("status", "只看现状：工作区、审计、策略、限制"),
+        ArgItem::new("graph", "这一页的行为链路图"),
+        ArgItem::new("export", "导出审计报告（HTML + 原始记录）"),
+        ArgItem::new("allow", "这次任务里放行一个域名（通配）"),
+        ArgItem::new("allow-cmd", "这次任务里放行一类命令（通配）"),
+        ArgItem::new("passthrough", "看 / 清直通名单（不解密的主机）"),
+        ArgItem::new("worktree", "换进项目的一棵 git 工作树（改动不碰原项目）"),
+        ArgItem::new("inplace", "回到原项目（工作树留着）"),
+    ]
+}
+
 pub fn args_for(kind: ArgKind, settings: Option<&AppSettings>) -> Vec<ArgItem> {
     match kind {
         ArgKind::Tab => tab_args(),
@@ -866,6 +893,7 @@ pub fn args_for(kind: ArgKind, settings: Option<&AppSettings>) -> Vec<ArgItem> {
         ArgKind::Effort => effort_args(settings),
         ArgKind::LoopInterval => loop_interval_args(),
         ArgKind::Lsp => lsp_args(),
+        ArgKind::Sandbox => sandbox_args(),
     }
 }
 
@@ -1090,6 +1118,7 @@ mod tests {
             cordis_spine::slash(),
             cordis_spine::session_commands(),
             cordis_spine::settings_commands(),
+            cordis_spine::sandbox_plugin(),
             cordis_spine::goal_command(),
             cordis_spine::plan_commands(),
             cordis_spine::loop_command(),

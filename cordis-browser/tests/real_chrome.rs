@@ -1711,3 +1711,114 @@ async fn a_click_that_navigates_invalidates_the_refs() {
     assert!(stale.text.contains("unknown ref"), "{}", stale.text);
     hub.shutdown().await;
 }
+
+/// 会话开着审计（Dock 在 `_meta` 里带了目录）：它标签页的网络请求记进 `browser.jsonl`，
+/// 页面文档和 fetch 的正文都抓到（浏览器里本来就是明文）；关了就不再记。
+#[tokio::test]
+#[ignore = "needs a real Chrome; page text and snapshots differ by Chrome version/locale"]
+async fn audited_sessions_record_their_tabs_network() {
+    let dock_home = tempfile::tempdir().unwrap();
+    let _env = cordis_base::test_env::scoped().set("DOCK_HOME", dock_home.path());
+    if !chrome_or_skip("browser audit") {
+        return;
+    }
+    let port = slow_site();
+    let base = format!("http://127.0.0.1:{port}");
+    let audit = tempfile::tempdir().unwrap();
+    let hub = BrowserHub::new();
+    hub.set_audit("s", Some(audit.path().to_path_buf())).await;
+    ok(
+        &hub,
+        "s",
+        "browser_open",
+        json!({"url": format!("{base}/other")}),
+    )
+    .await;
+    ok(
+        &hub,
+        "s",
+        "browser_evaluate",
+        json!({"expression": "fetch('/delayed', { method: 'POST', body: 'q=1' }).then(r => r.text()).then(t => t.length)"}),
+    )
+    .await;
+    let mut events = Vec::new();
+    for _ in 0..100 {
+        events = dock_sandbox::audit::store::read(audit.path());
+        if events.iter().any(|e| e["path"] == "/delayed") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let doc = events
+        .iter()
+        .find(|e| e["kind"] == "net" && e["path"] == "/other")
+        .unwrap_or_else(|| panic!("页面文档要记：{events:?}"));
+    assert!(
+        doc["tag"].as_str().unwrap().starts_with("browser:"),
+        "{doc}"
+    );
+    assert_eq!(doc["status"], 200);
+    assert_eq!(doc["decrypted"], true);
+    let sha = doc["response"]["body"]["sha256"].as_str().unwrap();
+    let body = std::fs::read_to_string(audit.path().join("bodies").join(sha)).unwrap();
+    assert!(body.contains("other"), "{body}");
+    let xhr = events.iter().find(|e| e["path"] == "/delayed").unwrap();
+    assert_eq!(xhr["method"], "POST");
+    let sha = xhr["request"]["body"]["sha256"].as_str().unwrap();
+    assert_eq!(
+        std::fs::read_to_string(audit.path().join("bodies").join(sha)).unwrap(),
+        "q=1"
+    );
+    assert!(dock_sandbox::audit::store::verify(audit.path())
+        .iter()
+        .all(|v| v.broken_at.is_none()));
+
+    hub.set_audit("s", None).await;
+    let before = dock_sandbox::audit::store::read(audit.path()).len();
+    ok(
+        &hub,
+        "s",
+        "browser_navigate",
+        json!({"url": format!("{base}/again")}),
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(
+        dock_sandbox::audit::store::read(audit.path()).len(),
+        before,
+        "关了就不记"
+    );
+    hub.shutdown().await;
+}
+
+/// 沙箱的主机规则（Dock 在 `_meta["dock/policy"]` 带来）拦这个会话标签页的请求：被阻断的
+/// 主机连不上，别的照常；规则清空就恢复。用 `no-cors`：跨源本来就读不到响应，别把 CORS
+/// 失败当成被拦。
+#[tokio::test]
+#[ignore = "needs a real Chrome; page text and snapshots differ by Chrome version/locale"]
+async fn sandbox_host_rules_block_tab_requests() {
+    let dock_home = tempfile::tempdir().unwrap();
+    let _env = cordis_base::test_env::scoped().set("DOCK_HOME", dock_home.path());
+    if !chrome_or_skip("browser blocked urls") {
+        return;
+    }
+    let port = slow_site();
+    let hub = BrowserHub::new();
+    hub.set_blocked("s", vec![("localhost".into(), true)]).await;
+    ok(
+        &hub,
+        "s",
+        "browser_open",
+        json!({"url": format!("http://127.0.0.1:{port}/other")}),
+    )
+    .await;
+    let fetch = |host: &str| json!({"expression": format!("fetch('http://{host}:{port}/x', {{ mode: 'no-cors' }}).then(() => 'ok', () => 'blocked')")});
+    let out = ok(&hub, "s", "browser_evaluate", fetch("localhost")).await;
+    assert_eq!(out.text, "blocked", "被规则阻断的主机");
+    let out = ok(&hub, "s", "browser_evaluate", fetch("127.0.0.1")).await;
+    assert_eq!(out.text, "ok");
+    hub.set_blocked("s", Vec::new()).await;
+    let out = ok(&hub, "s", "browser_evaluate", fetch("localhost")).await;
+    assert_eq!(out.text, "ok", "规则清空就恢复");
+    hub.shutdown().await;
+}

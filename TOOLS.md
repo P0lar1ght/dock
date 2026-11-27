@@ -73,7 +73,7 @@
 
 **权限档位**：询问 / 智能授权 / 始终允许（每页一份，子代理可单独设）。智能授权下要过权限门的调用先过规则（`host::approval::rules`）：只读命令、项目里的编辑直接放行；硬清单（sudo、rm -rf、碰 `~/.ssh` / `.env`、写项目外或 `.git` / `.dock`、git push --force、往外传文件、桌面操作、加载插件、建条件命令 / 监听项目外文件的定时任务）一定问人；其余交给判断模型（`[approval] model`，没配用这一页的模型），它只看工具、参数、目录和用户最近一条消息，说安全才放行、理由挂到工具卡上，说有风险或没判成就问人。「始终允许 / 始终拒绝」过的照旧算数，只是定时任务那几轮（无人值守）里硬清单不吃「始终允许」；只读场景和插件要求的确认（严格请求）不吃智能授权。
 
-**权限门**（询问 overlay）：`bash` `search_replace` `write_file` `scheduler_create`（带 `watch` 时单独记作 `scheduler_create:watch`，监听项目外的文件时记作 `scheduler_create:files`） `kill_task` `monitor` `cordis_plugin`（按插件及其钩子 / HTTP host 记「始终允许」） `mcp_browser__browser_evaluate` `mcp_browser__browser_js` `mcp_browser__browser_file_upload`，以及全部 `mcp_cua-driver__*`。
+**权限门**（询问 overlay）：`bash` `search_replace` `write_file` `scheduler_create`（带 `watch` 时单独记作 `scheduler_create:watch`，监听项目外的文件时记作 `scheduler_create:files`） `kill_task` `monitor` `cordis_plugin`（按插件及其钩子 / HTTP host 记「始终允许」） `mcp_browser__browser_evaluate` `mcp_browser__browser_js` `mcp_browser__browser_file_upload`，以及全部 `mcp_cua-driver__*`。 这一页开了 `/sandbox` 时见 [SANDBOX](docs/SANDBOX.md)。
 
 **计划门**：同上（`enter_plan_mode` 之后返回 blocked，直到 `exit_plan_mode`）。例外：对**本页**计划文件的 `search_replace` / `write_file` 自动放行（对齐 grok）。
 

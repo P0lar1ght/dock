@@ -131,6 +131,10 @@ pub(super) fn prompt_chrome_info(ctx: &Context) -> String {
         }
     }
     parts.push(perm.to_string());
+    // 这一页的命令在沙箱里跑（`/sandbox`）：和权限模式一起读，决定了 bash 弹不弹框。
+    if settings.as_ref().is_some_and(|s| s.sandbox()) {
+        parts.push("沙箱".into());
+    }
     if plan {
         parts.push("计划".into());
     }
@@ -1023,6 +1027,7 @@ pub(super) fn arg_picker_title(kind: crate::slash::ArgKind) -> &'static str {
         crate::slash::ArgKind::Effort => "推理强度",
         crate::slash::ArgKind::LoopInterval => "循环间隔",
         crate::slash::ArgKind::Lsp => "LSP",
+        crate::slash::ArgKind::Sandbox => "沙箱",
     }
 }
 
