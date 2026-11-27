@@ -6,7 +6,7 @@ coherent piece of work (open → act → check → read), not one click.
 ## Workflow
 
 1. **Look first.** `await snapshot()` returns the ARIA tree (roles, names, values), with the
-   contents of iframes appended as `- frame "<url>":` sections (reach them with
+   contents of iframes (srcdoc / about:blank ones too) appended as `- frame "<url>":` sections (reach them with
    `page.frameLocator('iframe[src^="…"]')`). It is cheap and tells you what is clickable and
    what the controls are called. Take one before
    acting on an unfamiliar page, and again when the page changed in a way you cannot

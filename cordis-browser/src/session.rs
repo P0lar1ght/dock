@@ -433,6 +433,11 @@ pub struct ConnectedSession {
     dialog_seq: Arc<tokio::sync::watch::Sender<u64>>,
     capture: Arc<AsyncMutex<CaptureBuffers>>,
     pub refs: HashMap<String, RefEntry>,
+    /// 每一页主框架换过几次文档（`Page.frameNavigated`，没有父框架）。按页记：后台标签页
+    /// 自己刷新不碰当前页的 refs；同文档内的跳转（SPA 路由、锚点）不算换文档。
+    docs: Arc<std::sync::Mutex<HashMap<String, u64>>>,
+    /// `refs` 是哪一页、第几份文档上拍的。那一页换了文档就作废（[`Self::drop_stale_refs`]）。
+    refs_doc: Option<(String, u64)>,
 }
 
 impl ConnectedSession {
@@ -456,12 +461,14 @@ impl ConnectedSession {
         let pending_dialog = Arc::new(std::sync::Mutex::new(None));
         let dialog_seq = Arc::new(tokio::sync::watch::channel(0u64).0);
         let capture = Arc::new(AsyncMutex::new(CaptureBuffers::new()));
+        let docs = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let mut dialog_tasks = Vec::new();
         let mut capture_tasks = Vec::new();
         dialog_tasks.push(
             Self::spawn_dialog_listener(&page, pending_dialog.clone(), dialog_seq.clone()).await?,
         );
-        capture_tasks.extend(Self::attach_page_capture(&page, capture.clone()).await?);
+        capture_tasks
+            .extend(Self::attach_page_capture(&page, capture.clone(), docs.clone()).await?);
 
         Ok(Self {
             browser,
@@ -473,6 +480,8 @@ impl ConnectedSession {
             dialog_seq,
             capture,
             refs: HashMap::new(),
+            docs,
+            refs_doc: None,
         })
     }
 
@@ -537,8 +546,9 @@ impl ConnectedSession {
             };
             self.dialog_tasks
                 .push(self.dialog_listener_for(&page).await?);
-            self.capture_tasks
-                .extend(Self::attach_page_capture(&page, self.capture.clone()).await?);
+            self.capture_tasks.extend(
+                Self::attach_page_capture(&page, self.capture.clone(), self.docs.clone()).await?,
+            );
             self.pages.insert(at + 1, page);
             self.active = at + 1;
             changed = true;
@@ -575,8 +585,9 @@ impl ConnectedSession {
             page.ok_or_else(|| format!("tab {target} opened by the script is not reachable"))?;
         self.dialog_tasks
             .push(self.dialog_listener_for(&page).await?);
-        self.capture_tasks
-            .extend(Self::attach_page_capture(&page, self.capture.clone()).await?);
+        self.capture_tasks.extend(
+            Self::attach_page_capture(&page, self.capture.clone(), self.docs.clone()).await?,
+        );
         self.pages.push(page);
         Ok(())
     }
@@ -692,11 +703,23 @@ impl ConnectedSession {
     async fn attach_page_capture(
         page: &Page,
         capture: Arc<AsyncMutex<CaptureBuffers>>,
+        docs: Arc<std::sync::Mutex<HashMap<String, u64>>>,
     ) -> Result<Vec<JoinHandle<()>>, String> {
         // Network/Runtime are enabled by chromiumoxide's frame/network managers
         // on target attach. Do not re-send Enable — it can time out the command
         // queue. Event listeners alone surface request/console traffic.
-        let mut tasks = Vec::with_capacity(3);
+        let mut tasks = Vec::with_capacity(4);
+        // 主框架换了文档：这一页拍的 refs 作废（点击 / 输入带走了页面也算，不只 browser_navigate）。
+        if let Ok(mut events) = page.event_listener::<EventFrameNavigated>().await {
+            let target = page.target_id().inner().to_string();
+            tasks.push(tokio::spawn(async move {
+                while let Some(ev) = events.next().await {
+                    if ev.frame.parent_id.is_none() {
+                        *docs.lock().unwrap().entry(target.clone()).or_default() += 1;
+                    }
+                }
+            }));
+        }
         if let Ok(mut events) = page.event_listener::<EventRequestWillBeSent>().await {
             let capture = capture.clone();
             tasks.push(tokio::spawn(async move {
@@ -827,17 +850,31 @@ impl ConnectedSession {
         .await
         .map_err(|e| format!("browser_snapshot: {e}"))?;
         self.refs = snap.refs.clone();
+        let target = page.target_id().inner().to_string();
+        let doc = self.doc_of(&target);
+        self.refs_doc = Some((target, doc));
         Ok(snap)
     }
 
+    /// `target` 这一页主框架换过几次文档。
+    fn doc_of(&self, target: &str) -> u64 {
+        self.docs.lock().unwrap().get(target).copied().unwrap_or(0)
+    }
+
+    /// 拍 refs 的那一页换了文档：refs 作废，不拿旧文档的节点号去点新文档。
+    fn drop_stale_refs(&mut self) {
+        let stale = self
+            .refs_doc
+            .as_ref()
+            .is_some_and(|(target, doc)| self.doc_of(target) != *doc);
+        if stale {
+            self.refs.clear();
+            self.refs_doc = None;
+        }
+    }
+
     pub async fn click_ref(&mut self, ref_id: &str) -> Result<String, String> {
-        let key = snapshot::parse_ref(ref_id).ok_or_else(|| "missing ref".to_string())?;
-        let entry = self.refs.get(&key).cloned().ok_or_else(|| {
-            format!(
-                "unknown ref `{key}` — call browser_snapshot first (have {} refs)",
-                self.refs.len()
-            )
-        })?;
+        let (key, entry) = self.lookup_ref(ref_id)?;
         let backend = snapshot::backend_id(&entry)
             .ok_or_else(|| format!("ref `{key}` has no backend DOM node"))?;
         let page = self.active_page()?.clone();
@@ -881,12 +918,7 @@ impl ConnectedSession {
     ) -> Result<String, String> {
         let page = self.active_page()?.clone();
         if let Some(raw) = ref_id {
-            let key = snapshot::parse_ref(raw).ok_or_else(|| "missing ref".to_string())?;
-            let entry = self
-                .refs
-                .get(&key)
-                .cloned()
-                .ok_or_else(|| format!("unknown ref `{key}` — call browser_snapshot first"))?;
+            let (key, entry) = self.lookup_ref(raw)?;
             let backend = snapshot::backend_id(&entry)
                 .ok_or_else(|| format!("ref `{key}` has no backend DOM node"))?;
             Self::focus_backend(&page, backend)
@@ -989,8 +1021,10 @@ impl ConnectedSession {
                     .map_err(|e| format!("new tab: {e}"))?;
                 self.dialog_tasks
                     .push(self.dialog_listener_for(&page).await?);
-                self.capture_tasks
-                    .extend(Self::attach_page_capture(&page, self.capture.clone()).await?);
+                self.capture_tasks.extend(
+                    Self::attach_page_capture(&page, self.capture.clone(), self.docs.clone())
+                        .await?,
+                );
                 self.pages.push(page);
                 self.active = self.pages.len() - 1;
                 self.refs.clear();
@@ -1040,7 +1074,8 @@ impl ConnectedSession {
         }
     }
 
-    fn lookup_ref(&self, ref_id: &str) -> Result<(String, RefEntry), String> {
+    fn lookup_ref(&mut self, ref_id: &str) -> Result<(String, RefEntry), String> {
+        self.drop_stale_refs();
         let key = snapshot::parse_ref(ref_id).ok_or_else(|| "missing ref".to_string())?;
         let entry = self.refs.get(&key).cloned().ok_or_else(|| {
             format!(
@@ -1442,7 +1477,7 @@ impl ConnectedSession {
     }
 
     async fn resolve_point(
-        &self,
+        &mut self,
         page: &Page,
         ref_id: Option<&str>,
         x: Option<f64>,
