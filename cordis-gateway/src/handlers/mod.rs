@@ -12,6 +12,7 @@ pub mod memory;
 pub mod permission;
 pub mod plugin_settings;
 pub mod preset;
+pub mod sandbox;
 pub mod schedule;
 pub mod settings;
 pub mod side_chat;

@@ -1,0 +1,180 @@
+// 行为轨迹（dock.1 `sandbox/status` / `sandbox/trace`，见网关 handlers/sandbox.rs）。
+// 开了沙箱的页，Dock 把工具调用、命令、命令和浏览器的出网记进审计日志；这里取汇总的链路图和时间线。
+// 开关、导出走 `/sandbox` 斜杠（store.runSlash）。
+
+import { dock } from "../../dock/client";
+
+/** 这一页的工作区：原地（选定的项目目录）或工作树（项目仓库的一棵 git worktree）。 */
+export interface Workspace {
+  root: string;
+  /** 选定的项目目录：会话归在它名下。原地时和 `root` 相同。 */
+  home: string;
+  mode: "in_place" | "worktree";
+  branch?: string;
+}
+
+export interface SandboxRule {
+  host?: string | null;
+  command?: string | null;
+  action: "allow" | "ask" | "deny";
+}
+
+export interface SandboxStatus {
+  enabled: boolean;
+  workspace: Workspace;
+  cwd: string;
+  /** 正在记（沙箱开着）。 */
+  auditing: boolean;
+  dir: string | null;
+  records: number;
+  /** 哈希链和正文块都对得上。 */
+  intact: boolean;
+  decrypt: boolean;
+  egress: "running" | "unavailable" | "idle";
+  /** 命令进系统沙箱（`[sandbox] confine`）。 */
+  confine: boolean;
+  network: "allow" | "proxy" | "off";
+  backend: string | null;
+  rules: SandboxRule[];
+  passthrough: { host: string; saved: boolean }[];
+}
+
+/** 图分四层：会话 → 工具 → 程序（命令里的）→ 主机；`source` 是认不出是谁发的出网，`others` 是并起来的主机。 */
+export type NodeKind = "session" | "tool" | "program" | "source" | "host" | "others";
+
+export interface TraceNode {
+  id: string;
+  kind: NodeKind;
+  label: string;
+  n: number;
+  errors: number;
+  bytes: number;
+}
+
+export interface TraceEdge {
+  from: string;
+  to: string;
+  n: number;
+  errors: number;
+  bytes: number;
+}
+
+export type RowKind = "tool" | "result" | "command" | "command_end" | "net" | "audit";
+
+export interface TraceRow {
+  ts: number;
+  kind: RowKind;
+  title: string;
+  detail: string;
+  error: string | null;
+  /** 工具调用 id（tool / result / command 有）。 */
+  call?: string | null;
+  /** 命令的 job（command / command_end 有）。 */
+  job?: string | null;
+  /** 出网是哪条命令（job）或哪个标签页（`browser:<id>`）发的。 */
+  tag?: string | null;
+  host?: string;
+  bytes?: number;
+  decrypted?: boolean;
+}
+
+export interface TraceTotals {
+  toolCalls: number;
+  commands: number;
+  requests: number;
+  decrypted: number;
+  bytes: number;
+  errors: number;
+}
+
+export interface SandboxTrace {
+  auditing: boolean;
+  records?: number;
+  graph: { nodes: TraceNode[]; edges: TraceEdge[] };
+  totals: TraceTotals | null;
+  timeline: TraceRow[];
+}
+
+/** 这个 Dock 认不认 `sandbox/*`（老版本没有）。 */
+export const canTrace = () => !!dock.capabilities.sandboxTrace;
+
+export const sandboxStatus = (threadId: string) => dock.call<SandboxStatus>("sandbox/status", { threadId });
+
+export const sandboxTrace = (threadId: string, limit = 300) =>
+  dock.call<SandboxTrace>("sandbox/trace", { threadId, limit });
+
+export function humanBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  return `${(n / 1024 / 1024 / 1024).toFixed(1)} GB`;
+}
+
+// ---- HTTP 历史 ----
+
+/** 一次出网（`sandbox/http` 的一行）：时间线的 `net` 行再加上请求的细节。 */
+export interface HttpRow extends TraceRow {
+  /** 按它取完整的请求 / 响应包（`sandbox/flow`）。 */
+  id: string | null;
+  method?: string | null;
+  scheme?: string | null;
+  port?: number | null;
+  path?: string | null;
+  status?: number | null;
+  ms?: number | null;
+  note?: string | null;
+}
+
+export interface SandboxHttp {
+  auditing: boolean;
+  records?: number;
+  requests: HttpRow[];
+}
+
+export interface PacketBody {
+  /** 原始长度（可能比记下来的长）。 */
+  size: number;
+  /** 记下来的字节数（最多 `body_cap_kb`）。 */
+  captured: number;
+  truncated: boolean;
+  /** 按 Content-Encoding 解开了什么；没解是 `null`。 */
+  decoded: "gzip" | "deflate" | "br" | null;
+  /** UTF-8 正文；二进制时是 `null`，看 `base64`。 */
+  text: string | null;
+  base64: string | null;
+  shown: number;
+}
+
+/** 一边的包：首行（请求行 / 状态行）、头、正文。 */
+export interface Packet {
+  line: string;
+  headers: [string, string][];
+  contentType: string | null;
+  body: PacketBody;
+}
+
+export interface FlowDetail {
+  id: string;
+  tag: string | null;
+  scheme: string | null;
+  host: string;
+  port: number | null;
+  method: string | null;
+  path: string | null;
+  status: number | null;
+  decrypted: boolean;
+  note: string | null;
+  error: string | null;
+  startedMs: number | null;
+  durationMs: number | null;
+  bytesUp: number | null;
+  bytesDown: number | null;
+  /** 没解密的连接没有包，只有目的地和字节数。 */
+  request: Packet | null;
+  response: Packet | null;
+}
+
+export const sandboxHttp = (threadId: string, limit = 1000) =>
+  dock.call<SandboxHttp>("sandbox/http", { threadId, limit });
+
+export const sandboxFlow = (threadId: string, id: string) => dock.call<FlowDetail>("sandbox/flow", { threadId, id });

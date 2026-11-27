@@ -1432,7 +1432,10 @@ dependencies = [
 name = "dock-sandbox"
 version = "0.3.0"
 dependencies = [
+ "base64 0.22.1",
+ "brotli-decompressor",
  "bytes",
+ "flate2",
  "http",
  "http-body",
  "http-body-util",

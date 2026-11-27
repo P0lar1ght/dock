@@ -10,3 +10,4 @@ import "./workflows";
 import "./turn-changes";
 import "./plugin-cards";
 import "./memory-graph";
+import "./sandbox-trace";

@@ -84,6 +84,10 @@ pub const CAPABILITIES: &[(&str, bool)] = &[
     ("turnCards", true),
     // `vcs/worktree/diff`：项目 git 仓库相对 HEAD 的改动 + 未跟踪的新文件（受信连接）。
     ("worktreeDiff", true),
+    // `sandbox/status` / `sandbox/trace` / `sandbox/http` / `sandbox/flow`：一页沙箱的现状、
+    // 行为链路图（会话 → 工具 → 程序 → 主机）、时间线、HTTP 历史和每次出网的请求 / 响应包。
+    // 开关、导出等走 `/sandbox` 斜杠。
+    ("sandboxTrace", true),
     // `thread/context/get`：上下文窗口按类别拆开（系统提示 / 工具定义 / 消息 / 其余 / 空闲，
     // 各带明细）+ 按需加载、不占窗口的 MCP / 本地工具。
     ("contextBreakdown", true),
@@ -160,6 +164,10 @@ pub const VCS_PR_DIFF: &str = "vcs/pr/diff";
 pub const VCS_DIFF: &str = "vcs/diff";
 /// 线程项目所在 git 仓库相对 HEAD 的全部改动 + 未跟踪的新文件（受信连接）。
 pub const VCS_WORKTREE_DIFF: &str = "vcs/worktree/diff";
+pub const SANDBOX_STATUS: &str = "sandbox/status";
+pub const SANDBOX_TRACE: &str = "sandbox/trace";
+pub const SANDBOX_HTTP: &str = "sandbox/http";
+pub const SANDBOX_FLOW: &str = "sandbox/flow";
 /// 线程每轮改了哪些文件（`search_replace` / `write_file`）；推送 `turn/changes/updated`。
 pub const TURN_CHANGES_LIST: &str = "turn/changes/list";
 /// 一轮改动的统一 diff。
