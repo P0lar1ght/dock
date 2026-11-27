@@ -151,6 +151,9 @@ struct HttpShared {
     listen_resources: AtomicBool,
 }
 
+/// `ttlMs` 的上限：远端给多大都最多缓存这么久。
+const MAX_LIST_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+
 /// `tools/list` 按 `ttlMs` 缓存。作废靠代数而不是一个 `stale` 标记：拉列表的途中
 /// 又来一条 `tools/list_changed` 时，拉完不能把它清掉——不然下一次刷新会拿到
 /// 这份已经过时的列表。
@@ -173,8 +176,9 @@ impl ListCache {
         }
     }
 
+    /// 空列表也是一份结果：第一页带了 `ttlMs`，就在有效期里照用，不每次重拉。
     fn hit(&self, now: Instant) -> Option<Vec<protocol::ListedTool>> {
-        if self.tools.is_empty() || self.fetched_at != Some(self.generation) {
+        if self.fetched_at != Some(self.generation) {
             return None;
         }
         match self.until {
@@ -185,7 +189,8 @@ impl ListCache {
 
     fn remember(&mut self, tools: &[protocol::ListedTool], ttl: Option<Duration>, began: u64) {
         self.tools = tools.to_vec();
-        self.until = ttl.map(|ttl| Instant::now() + ttl);
+        // 远端给的 `ttlMs` 不可信：离谱的大数加上去会溢出 panic（还握着锁）。封顶一天。
+        self.until = ttl.and_then(|ttl| Instant::now().checked_add(ttl.min(MAX_LIST_TTL)));
         self.fetched_at = Some(began);
     }
 }
@@ -232,9 +237,17 @@ async fn handshake(s: &HttpShared) -> Result<Vec<protocol::ListedTool>, String> 
             // 别让探测这一步把以前连得上的服务器挡在门外。
             handshake_without_discover(s).await
         }
-        Err(e) if looks_legacy_http(&e) => handshake_without_discover(s).await,
-        Err(e) => Err(e),
+        // 要登录的照原样交回去（OAuth 流程认这个错）。别的传输层失败——超时、5xx、
+        // 对不认识的方法直接断开——也退回老路径（同 stdio：discover 失败或超时就走
+        // initialize）：以前直接 `tools/list` 连得上的老服务器，不能被探测这一步挡在门外。
+        // 服务器真连不上时，老路径会再报一次真正的错。
+        Err(e) if looks_unauthorized(&e) => Err(e),
+        Err(_) => handshake_without_discover(s).await,
     }
+}
+
+fn looks_unauthorized(err: &str) -> bool {
+    err.contains("HTTP 401") || err.starts_with("HTTP 403")
 }
 
 async fn handshake_without_discover(s: &HttpShared) -> Result<Vec<protocol::ListedTool>, String> {
@@ -850,6 +863,13 @@ async fn listen_once(s: &HttpShared, stop: &mut watch::Receiver<bool>) -> Listen
                         };
                         let text = String::from_utf8_lossy(&bytes);
                         for v in parser.push_chunk(&text, &mut carry) {
+                            // 不少服务器用 200 + SSE 回 JSON-RPC 错误：这次 listen 的回包是
+                            // `-32601` 就不再开（同 JSON 回包），不当成断开去退避重连。
+                            if v.get("id").and_then(Value::as_u64) == Some(id)
+                                && listen_unsupported_rpc(&v)
+                            {
+                                return ListenEnd::Unsupported;
+                            }
                             ingest(s, v, None).await;
                         }
                     }
@@ -924,6 +944,10 @@ mod tests {
         /// 不认 `server/discover` 的老服务器，回的是 `-32602 Invalid request
         /// parameters`（Python MCP SDK 对不认识的方法就这么回），其余同 `Legacy`。
         DiscoverInvalidParams,
+        /// `server/discover` 回 HTTP 500（对不认识的方法直接报服务器错的老服务器），其余同 `Legacy`。
+        DiscoverServerError,
+        /// 同 `ModernListen`，但 `subscriptions/listen` 用 200 + SSE 回 `-32601`。
+        ListenSseUnsupported,
     }
 
     async fn connect_with(
@@ -1273,6 +1297,19 @@ mod tests {
                 .to_string(),
             ),
             Mode::DiscoverInvalidParams => legacy_handle(headers, &v, &id, false, calls, false),
+            Mode::DiscoverServerError if method == "server/discover" => {
+                b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n".to_vec()
+            }
+            Mode::DiscoverServerError => legacy_handle(headers, &v, &id, false, calls, false),
+            Mode::ListenSseUnsupported if method == "subscriptions/listen" => {
+                calls.fetch_add(1 << 16, Ordering::SeqCst);
+                sse_response(&[json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": { "code": -32601, "message": "Method not found" }
+                })])
+            }
+            Mode::ListenSseUnsupported => modern_listen_handle(headers, method, &id, calls),
             Mode::SessionRequired | Mode::SessionRestart | Mode::SessionParamError => {
                 session_only_handle(mode, headers, method, &id, calls)
             }
@@ -1618,6 +1655,50 @@ mod tests {
             .expect("connect");
         assert_eq!(listed[0].public, "mcp_local__ping");
         handle.abort();
+    }
+
+    /// 回归：discover 报 HTTP 500（或超时、连接被断）也要退回老路径。以前只认 JSON-RPC 错误
+    /// 和 400/404/405，这类老服务器在探测这一步就被挡在门外。
+    #[tokio::test]
+    async fn discover_server_error_falls_back_to_legacy() {
+        let (url, handle) = spawn_server(Mode::DiscoverServerError).await;
+        let (listed, _call) = connect_with(&http_server(url), incoming::dummy_hooks("local"))
+            .await
+            .expect("connect");
+        assert_eq!(listed[0].public, "mcp_local__ping");
+        handle.abort();
+    }
+
+    /// 回归：listen 用 200 + SSE 回 `-32601` 就不再开。以前只认 JSON 回包里的 `-32601`，
+    /// SSE 里的当成流正常结束，马上又去重连。
+    #[tokio::test]
+    async fn listen_answered_with_method_not_found_over_sse_is_not_reopened() {
+        let (url, handle, hits) = spawn_counted(Mode::ListenSseUnsupported).await;
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let hooks = LiveHooks {
+            server: "local".into(),
+            elicit: Elicitation::new(cordis::Context::new()),
+            tools_changed: tx,
+        };
+        let (stop_tx, stop_rx) = watch::channel(false);
+        let _conn = connect(&http_server(url), hooks, stop_rx)
+            .await
+            .expect("connect");
+        // 老逻辑下前两次重连不退避，这段时间里早就第二次 listen 了。
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!((hits.load(Ordering::SeqCst) >> 16) & 0xFFFF, 1, "只开一次");
+        drop(stop_tx);
+        handle.abort();
+    }
+
+    /// 远端给的 `ttlMs` 离谱地大也不 panic（以前 `Instant + Duration` 溢出，还握着锁），
+    /// 空列表也照样缓存。
+    #[test]
+    fn huge_ttl_is_capped_and_an_empty_list_is_cached() {
+        let mut cache = ListCache::new();
+        let began = cache.generation;
+        cache.remember(&[], Some(Duration::MAX), began);
+        assert_eq!(cache.hit(Instant::now()).map(|t| t.len()), Some(0));
     }
 
     /// 拉列表的途中来了 `tools/list_changed`：拉完的这份不能当成新的缓存。

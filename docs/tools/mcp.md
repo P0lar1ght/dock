@@ -19,10 +19,10 @@ stdio + Streamable HTTP。先走 MCP `2026-07-28`（无 initialize / 无 session
 
 HTTP 握手与工具清单（`2026-07-28`）：
 - 先发 `server/discover`，按 `supportedVersions` 挑协议版本；挑到老版本就走 initialize。
-- `server/discover` 报错（`-32601`、session 类 `-32602`，或 Python SDK 那种 `-32602 Invalid request parameters`）一律退回老路径：先 `tools/list`，不行再 initialize。和 stdio 一致。
-- `tools/list` 第一页带 `ttlMs` 时按它缓存，重列时缓存没过期就不再请求。
+- `server/discover` 报错（`-32601`、session 类 `-32602`，或 Python SDK 那种 `-32602 Invalid request parameters`），或者传输层失败（超时、5xx、连接被断），一律退回老路径：先 `tools/list`，不行再 initialize。和 stdio 一致。只有 401 / 403 原样交回（要登录）。
+- `tools/list` 第一页带 `ttlMs` 时按它缓存（空列表也缓存），重列时缓存没过期就不再请求。`ttlMs` 最多按一天算。
   - 来一条 `tools/list_changed` 缓存就作废，按代数判断：拉列表途中来的通知，拉完的那份也算过期。
-- `server/discover` 的 `capabilities.*.listChanged` 为真时，后台开一条 `subscriptions/listen`（POST + SSE），断了按退避重连；服务器回 404 / 405 / `-32601` 就不再开。
+- `server/discover` 的 `capabilities.*.listChanged` 为真时，后台开一条 `subscriptions/listen`（POST + SSE），断了按退避重连；服务器回 404 / 405 / `-32601` 就不再开（`-32601` 用 JSON 回或用 SSE 回都认）。
 
 ### MCP Elicitation（向用户要信息）
 
