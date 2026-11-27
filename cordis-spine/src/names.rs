@@ -119,6 +119,8 @@ pub const SUBAGENT_CHANGED: &str = "subagent/changed";
 /// 一条工作流 run 出现了或变了（阶段、子代理行、上报、收尾），载荷
 /// [`crate::WorkflowChanged`]。只带 run id；当前状态在监听里 `Workflows::list` 现取。
 pub const WORKFLOW_CHANGED: &str = "workflow/changed";
+/// 审计（工具调用、命令、出网），见 [`crate::host::audit::Audit`]。
+pub const AUDIT: &str = "audit";
 /// 每轮改动（`search_replace` / `write_file` 改了哪些文件），见 [`crate::TurnChanges`]。
 pub const TURN_CHANGES: &str = "turn-changes";
 /// 一页某一轮的文件改动变了（又改了、撤销了），载荷 [`crate::TurnChangesChanged`]。

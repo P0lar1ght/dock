@@ -21,7 +21,8 @@ use chromiumoxide::cdp::browser_protocol::input::{
     InsertTextParams, MouseButton,
 };
 use chromiumoxide::cdp::browser_protocol::network::{
-    EventRequestWillBeSent, EventResponseReceived,
+    EventLoadingFailed, EventLoadingFinished, EventRequestWillBeSent, EventResponseReceived,
+    GetResponseBodyParams, ResourceType,
 };
 use chromiumoxide::cdp::browser_protocol::page::{
     EventFrameNavigated, EventJavascriptDialogClosed, EventJavascriptDialogOpening,
@@ -432,8 +433,13 @@ pub struct ConnectedSession {
     pending_dialog: Arc<std::sync::Mutex<Option<PendingDialog>>>,
     dialog_seq: Arc<tokio::sync::watch::Sender<u64>>,
     capture: Arc<AsyncMutex<CaptureBuffers>>,
+    /// 审计开着时（Dock 在 `_meta["dock/audit"]` 里带了目录）这一组的网络请求记进去。
+    audit: AuditSlot,
     pub refs: HashMap<String, RefEntry>,
 }
+
+/// 一组标签页的审计日志（`None` = 没在审计）。各页的网络监听共用这一格。
+pub type AuditSlot = Arc<std::sync::Mutex<Option<Arc<dock_audit::store::AuditLog>>>>;
 
 impl ConnectedSession {
     /// 在共享的 Chromium 里给这个会话开第一个标签页（空白页）。先挂好对话框与 console /
@@ -461,7 +467,9 @@ impl ConnectedSession {
         dialog_tasks.push(
             Self::spawn_dialog_listener(&page, pending_dialog.clone(), dialog_seq.clone()).await?,
         );
-        capture_tasks.extend(Self::attach_page_capture(&page, capture.clone()).await?);
+        let audit: AuditSlot = Arc::default();
+        capture_tasks
+            .extend(Self::attach_page_capture(&page, capture.clone(), audit.clone()).await?);
 
         Ok(Self {
             browser,
@@ -472,6 +480,7 @@ impl ConnectedSession {
             pending_dialog,
             dialog_seq,
             capture,
+            audit,
             refs: HashMap::new(),
         })
     }
@@ -537,8 +546,9 @@ impl ConnectedSession {
             };
             self.dialog_tasks
                 .push(self.dialog_listener_for(&page).await?);
-            self.capture_tasks
-                .extend(Self::attach_page_capture(&page, self.capture.clone()).await?);
+            self.capture_tasks.extend(
+                Self::attach_page_capture(&page, self.capture.clone(), self.audit.clone()).await?,
+            );
             self.pages.insert(at + 1, page);
             self.active = at + 1;
             changed = true;
@@ -575,8 +585,9 @@ impl ConnectedSession {
             page.ok_or_else(|| format!("tab {target} opened by the script is not reachable"))?;
         self.dialog_tasks
             .push(self.dialog_listener_for(&page).await?);
-        self.capture_tasks
-            .extend(Self::attach_page_capture(&page, self.capture.clone()).await?);
+        self.capture_tasks.extend(
+            Self::attach_page_capture(&page, self.capture.clone(), self.audit.clone()).await?,
+        );
         self.pages.push(page);
         Ok(())
     }
@@ -689,14 +700,23 @@ impl ConnectedSession {
         }
     }
 
+    /// 开 / 关这一组的审计（`None` = 关）。
+    pub fn set_audit(&self, log: Option<Arc<dock_audit::store::AuditLog>>) {
+        *self.audit.lock().unwrap() = log;
+    }
+
     async fn attach_page_capture(
         page: &Page,
         capture: Arc<AsyncMutex<CaptureBuffers>>,
+        audit: AuditSlot,
     ) -> Result<Vec<JoinHandle<()>>, String> {
         // Network/Runtime are enabled by chromiumoxide's frame/network managers
         // on target attach. Do not re-send Enable — it can time out the command
         // queue. Event listeners alone surface request/console traffic.
-        let mut tasks = Vec::with_capacity(3);
+        let mut tasks = Vec::with_capacity(4);
+        if let Some(task) = audit_network(page, audit).await {
+            tasks.push(task);
+        }
         if let Ok(mut events) = page.event_listener::<EventRequestWillBeSent>().await {
             let capture = capture.clone();
             tasks.push(tokio::spawn(async move {
@@ -989,8 +1009,10 @@ impl ConnectedSession {
                     .map_err(|e| format!("new tab: {e}"))?;
                 self.dialog_tasks
                     .push(self.dialog_listener_for(&page).await?);
-                self.capture_tasks
-                    .extend(Self::attach_page_capture(&page, self.capture.clone()).await?);
+                self.capture_tasks.extend(
+                    Self::attach_page_capture(&page, self.capture.clone(), self.audit.clone())
+                        .await?,
+                );
                 self.pages.push(page);
                 self.active = self.pages.len() - 1;
                 self.refs.clear();
@@ -1810,6 +1832,184 @@ impl ConnectedSession {
     }
 }
 
+/// 审计时记哪些响应的正文（页面文档、XHR、fetch）；图片、字体、脚本只记大小。
+const AUDIT_BODY_TYPES: &[ResourceType] = &[
+    ResourceType::Document,
+    ResourceType::Xhr,
+    ResourceType::Fetch,
+];
+/// 比这大的响应不去取正文（只记大小）。
+const AUDIT_BODY_FETCH_MAX: f64 = 4.0 * 1024.0 * 1024.0;
+
+/// 审计开着时把这一页的网络请求记成 [`dock_audit::record::Flow`]（`tag = browser:<标签页>`）。
+/// 浏览器里看到的是明文：HTTPS 的网址、头、正文都在，`decrypted` 记成 true。审计关着时
+/// 只看一眼那一格就跳过。
+async fn audit_network(page: &Page, slot: AuditSlot) -> Option<JoinHandle<()>> {
+    use dock_audit::record::{header_pairs, now_ms, Captured, Flow, Message};
+    let mut sent = page.event_listener::<EventRequestWillBeSent>().await.ok()?;
+    let mut answered = page.event_listener::<EventResponseReceived>().await.ok()?;
+    let mut finished = page.event_listener::<EventLoadingFinished>().await.ok()?;
+    let mut failed = page.event_listener::<EventLoadingFailed>().await.ok()?;
+    let page = page.clone();
+    let tag = format!("browser:{}", page.target_id().inner());
+    Some(tokio::spawn(async move {
+        let cfg = cordis_base::config::load_audit_config();
+        let cap = (cfg.body_cap_kb as usize) * 1024;
+        let redact = cfg.redact_secrets;
+        let headers = |h: &chromiumoxide::cdp::browser_protocol::network::Headers| {
+            let pairs = h
+                .inner()
+                .as_object()
+                .map(|m| {
+                    m.iter()
+                        .map(|(k, v)| {
+                            (
+                                k.clone(),
+                                v.as_str()
+                                    .map(str::to_string)
+                                    .unwrap_or_else(|| v.to_string()),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            header_pairs(pairs, redact)
+        };
+        let mut pending: HashMap<String, (Flow, Option<ResourceType>, std::time::Instant)> =
+            HashMap::new();
+        loop {
+            tokio::select! {
+                Some(ev) = sent.next() => {
+                    let on = slot.lock().unwrap().is_some();
+                    if !on {
+                        pending.clear();
+                        continue;
+                    }
+                    let Some((scheme, host, port, path)) = split_url(&ev.request.url) else { continue };
+                    let mut body = Captured::default();
+                    for entry in ev.request.post_data_entries.iter().flatten() {
+                        if let Some(bytes) = entry.bytes.as_ref() {
+                            use base64::Engine;
+                            if let Ok(raw) = base64::engine::general_purpose::STANDARD.decode(AsRef::<str>::as_ref(bytes)) {
+                                body.push(&raw, cap);
+                            }
+                        }
+                    }
+                    let flow = Flow {
+                        tag: tag.clone(),
+                        kind: "http",
+                        scheme,
+                        host,
+                        port,
+                        method: Some(ev.request.method.clone()),
+                        path: Some(path),
+                        status: None,
+                        request: Some(Message { headers: headers(&ev.request.headers), body }),
+                        response: None,
+                        bytes_up: 0,
+                        bytes_down: 0,
+                        started_ms: now_ms(),
+                        duration_ms: 0,
+                        decrypted: true,
+                        note: ev.r#type.as_ref().map(|t| t.as_ref().to_string()),
+                        error: None,
+                    };
+                    let id = ev.request_id.inner().to_string();
+                    // 重定向：同一个请求 id 又来一次，前一跳照样记一条。
+                    if let Some((mut prev, _, t0)) = pending.insert(id, (flow, ev.r#type.clone(), std::time::Instant::now())) {
+                        prev.duration_ms = t0.elapsed().as_millis() as u64;
+                        prev.note = Some("重定向".into());
+                        if let Some(log) = slot.lock().unwrap().clone() {
+                            log.flow(prev);
+                        }
+                    }
+                }
+                Some(ev) = answered.next() => {
+                    if let Some((flow, _, _)) = pending.get_mut(ev.request_id.inner()) {
+                        flow.status = u16::try_from(ev.response.status).ok();
+                        flow.response = Some(Message { headers: headers(&ev.response.headers), body: Captured::default() });
+                        if let Some(ip) = ev.response.remote_ip_address.as_ref() {
+                            let kind = flow.note.take().unwrap_or_default();
+                            flow.note = Some(format!("{kind} {ip}").trim().to_string());
+                        }
+                    }
+                }
+                Some(ev) = finished.next() => {
+                    let Some((mut flow, kind, t0)) = pending.remove(ev.request_id.inner()) else { continue };
+                    flow.bytes_down = ev.encoded_data_length.max(0.0) as u64;
+                    flow.duration_ms = t0.elapsed().as_millis() as u64;
+                    let wants_body = cap > 0
+                        && kind.as_ref().is_some_and(|k| AUDIT_BODY_TYPES.contains(k))
+                        && ev.encoded_data_length <= AUDIT_BODY_FETCH_MAX;
+                    if wants_body {
+                        if let Ok(Ok(r)) = tokio::time::timeout(
+                            Duration::from_secs(5),
+                            page.execute(GetResponseBodyParams::new(ev.request_id.clone())),
+                        )
+                        .await
+                        {
+                            let raw = if r.result.base64_encoded {
+                                use base64::Engine;
+                                base64::engine::general_purpose::STANDARD.decode(&r.result.body).unwrap_or_default()
+                            } else {
+                                r.result.body.clone().into_bytes()
+                            };
+                            if let Some(m) = flow.response.as_mut() {
+                                m.body.push(&raw, cap);
+                            }
+                        }
+                    }
+                    if let Some(log) = slot.lock().unwrap().clone() {
+                        log.flow(flow);
+                    }
+                }
+                Some(ev) = failed.next() => {
+                    let Some((mut flow, _, t0)) = pending.remove(ev.request_id.inner()) else { continue };
+                    flow.duration_ms = t0.elapsed().as_millis() as u64;
+                    flow.error = Some(ev.error_text.clone());
+                    if let Some(log) = slot.lock().unwrap().clone() {
+                        log.flow(flow);
+                    }
+                }
+                else => break,
+            }
+        }
+    }))
+}
+
+/// `https://host:port/path?q` → (`https`, host, port, `/path?q`)。`data:` / `blob:` 这类不算出网。
+fn split_url(url: &str) -> Option<(&'static str, String, u16, String)> {
+    const SCHEMES: &[(&str, &str, u16)] = &[
+        ("https://", "https", 443),
+        ("http://", "http", 80),
+        ("wss://", "wss", 443),
+        ("ws://", "ws", 80),
+    ];
+    let (scheme, rest, default) = SCHEMES
+        .iter()
+        .find_map(|(prefix, scheme, port)| url.strip_prefix(prefix).map(|r| (*scheme, r, *port)))?;
+    let (authority, path) = match rest.find('/') {
+        Some(i) => (&rest[..i], rest[i..].to_string()),
+        None => (rest, "/".to_string()),
+    };
+    let authority = authority.rsplit('@').next().unwrap_or(authority);
+    let (host, port) = if let Some(v6) = authority.strip_prefix('[') {
+        let (h, rest) = v6.split_once(']')?;
+        (
+            h.to_string(),
+            rest.strip_prefix(':')
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(default),
+        )
+    } else {
+        match authority.rsplit_once(':') {
+            Some((h, p)) => (h.to_string(), p.parse().unwrap_or(default)),
+            None => (authority.to_string(), default),
+        }
+    };
+    Some((scheme, host, port, path))
+}
+
 /// 跳到 `url`，到 DOMContentLoaded 就算到了；之后最多再等 [`LOAD_GRACE`] 让 `load` 收尾。
 ///
 /// 不经 chromiumoxide 发 `Page.navigate`：它每页只有一个「进行中的跳转」，新的跳转排在上一次
@@ -2122,6 +2322,23 @@ fn normalize_modifier(p: &str) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn audit_urls_split_into_host_and_path() {
+        assert_eq!(
+            split_url("https://user@a.example:8443/x?y=1"),
+            Some(("https", "a.example".into(), 8443, "/x?y=1".into()))
+        );
+        assert_eq!(
+            split_url("http://[::1]/"),
+            Some(("http", "::1".into(), 80, "/".into()))
+        );
+        assert_eq!(
+            split_url("https://b.example"),
+            Some(("https", "b.example".into(), 443, "/".into()))
+        );
+        assert!(split_url("data:text/html,x").is_none());
+    }
 
     #[test]
     fn page_ws_url_points_at_the_target() {

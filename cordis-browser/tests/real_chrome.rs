@@ -1637,3 +1637,82 @@ async fn refs_from_one_snapshot_survive_several_actions() {
     assert!(gone.text.contains("no longer on the page"), "{}", gone.text);
     hub.shutdown().await;
 }
+
+/// 会话开着审计（Dock 在 `_meta` 里带了目录）：它标签页的网络请求记进 `browser.jsonl`，
+/// 页面文档和 fetch 的正文都抓到（浏览器里本来就是明文）；关了就不再记。
+#[tokio::test]
+#[ignore = "needs a real Chrome; page text and snapshots differ by Chrome version/locale"]
+async fn audited_sessions_record_their_tabs_network() {
+    let dock_home = tempfile::tempdir().unwrap();
+    let _env = cordis_base::test_env::scoped().set("DOCK_HOME", dock_home.path());
+    if !chrome_or_skip("browser audit") {
+        return;
+    }
+    let port = slow_site();
+    let base = format!("http://127.0.0.1:{port}");
+    let audit = tempfile::tempdir().unwrap();
+    let hub = BrowserHub::new();
+    hub.set_audit("s", Some(audit.path().to_path_buf())).await;
+    ok(
+        &hub,
+        "s",
+        "browser_open",
+        json!({"url": format!("{base}/other")}),
+    )
+    .await;
+    ok(
+        &hub,
+        "s",
+        "browser_evaluate",
+        json!({"expression": "fetch('/delayed', { method: 'POST', body: 'q=1' }).then(r => r.text()).then(t => t.length)"}),
+    )
+    .await;
+    let mut events = Vec::new();
+    for _ in 0..100 {
+        events = dock_audit::store::read(audit.path());
+        if events.iter().any(|e| e["path"] == "/delayed") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let doc = events
+        .iter()
+        .find(|e| e["kind"] == "net" && e["path"] == "/other")
+        .unwrap_or_else(|| panic!("页面文档要记：{events:?}"));
+    assert!(
+        doc["tag"].as_str().unwrap().starts_with("browser:"),
+        "{doc}"
+    );
+    assert_eq!(doc["status"], 200);
+    assert_eq!(doc["decrypted"], true);
+    let sha = doc["response"]["body"]["sha256"].as_str().unwrap();
+    let body = std::fs::read_to_string(audit.path().join("bodies").join(sha)).unwrap();
+    assert!(body.contains("other"), "{body}");
+    let xhr = events.iter().find(|e| e["path"] == "/delayed").unwrap();
+    assert_eq!(xhr["method"], "POST");
+    let sha = xhr["request"]["body"]["sha256"].as_str().unwrap();
+    assert_eq!(
+        std::fs::read_to_string(audit.path().join("bodies").join(sha)).unwrap(),
+        "q=1"
+    );
+    assert!(dock_audit::store::verify(audit.path())
+        .iter()
+        .all(|v| v.broken_at.is_none()));
+
+    hub.set_audit("s", None).await;
+    let before = dock_audit::store::read(audit.path()).len();
+    ok(
+        &hub,
+        "s",
+        "browser_navigate",
+        json!({"url": format!("{base}/again")}),
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(
+        dock_audit::store::read(audit.path()).len(),
+        before,
+        "关了就不记"
+    );
+    hub.shutdown().await;
+}

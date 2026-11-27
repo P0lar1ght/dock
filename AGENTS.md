@@ -25,6 +25,7 @@ cordis-tui/      全屏终端 UI 插件（theme / scrollback / prompt / overlay 
 cordis-gateway/  回环 HTTP/WS 插件：Origin 配对、dock.1 投影、slash list|execute
 cordis-app/      二进制入口：install_app + agent-loop + gateway + tui；`dock mcp browser`
 cordis-browser/  浏览器 MCP 服务（chromiumoxide CDP，按会话分标签页）；不含插件
+dock-audit/      审计引擎：出口代理（HTTPS 解密）、只追加的审计日志（哈希链）、链路图；不含插件（插件是 spine 的 `audit`）
 cordis-apps/     内置 MCP Apps 服务（白板：`dock mcp whiteboard`，Excalidraw 界面在 web/ 构建进 assets/）；不含插件
 dock-render/     markdown（`cordis-markdown`）、mermaid（`xai-grok-mermaid`）；third_party/ 为 Mermaid 布局栈
 embed-sdk/       宿主页 SDK（npm，`dist/dock-embed.js`，协议 dock.1）；见 embed-sdk/AGENTS.md

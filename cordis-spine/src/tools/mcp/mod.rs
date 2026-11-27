@@ -75,11 +75,17 @@ pub(super) fn call_params(public: &str, arguments: &str, local: bool) -> serde_j
         serde_json::json!({ "name": raw_tool_name(public), "arguments": args }),
         calling_session().as_deref(),
     );
-    if local {
-        protocol::with_cwd(params, calling_cwd().as_deref())
-    } else {
-        params
+    if !local {
+        return params;
     }
+    let params = protocol::with_cwd(params, calling_cwd().as_deref());
+    // 内置浏览器：调用页开着审计时带上审计目录，它把这个会话标签页的网络请求写进去。
+    // 只给它：目录路径不发给第三方服务器。
+    if public.starts_with(crate::tools::browser::BROWSER_MCP_PREFIX) {
+        let dir = crate::host::audit::calling_audit_dir();
+        return protocol::with_audit(params, dir.as_deref());
+    }
+    params
 }
 
 /// 本机子进程（stdio）服务器：本来就看得到本机文件，可以告诉它工作目录。

@@ -184,6 +184,14 @@ prompt_cache = true
 # [approval]
 # model = "deepseek/deepseek-chat"
 
+# 审计（docs/AUDIT.md）：开了的页记工具调用、命令和出网，命令的 HTTPS 在出口代理处解密。
+# 默认关，/audit on|off 按页切。只认用户配置，项目里的 .dock/config.toml 改不了它。
+# [audit]
+# enabled = false
+# decrypt = true
+# body_cap_kb = 256
+# redact_secrets = true
+
 # [browser]
 # headed = false
 

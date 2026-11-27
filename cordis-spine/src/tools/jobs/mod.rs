@@ -581,7 +581,9 @@ impl Jobs {
             id: id.clone(),
             hook: self.on_finish.clone(),
         };
-        tokio::spawn(run_job(job, command, cancel_rx, cwd, finished));
+        // 调用页开着审计：记下这条命令，给它开出口代理口（没开就是 None、什么都不做）。
+        let audit = crate::host::audit::for_command(&id, &command, is_monitor, cwd.as_deref());
+        tokio::spawn(run_job(job, command, cancel_rx, cwd, finished, audit));
         id
     }
 
@@ -803,16 +805,24 @@ async fn run_job(
     mut cancel: tokio::sync::watch::Receiver<bool>,
     cwd: Option<PathBuf>,
     finished: Finisher,
+    audit: Option<crate::host::audit::CommandAudit>,
 ) {
     let mut builder = tokio::process::Command::new("bash");
+    let run = match &audit {
+        Some(audit) => audit.wrap(&command),
+        None => command,
+    };
     builder
         .arg("-lc")
-        .arg(&command)
+        .arg(&run)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
     if let Some(cwd) = cwd.as_deref() {
         builder.current_dir(cwd);
+    }
+    if let Some(audit) = &audit {
+        builder.envs(audit.env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
     }
     let spawned = builder.spawn();
     let mut child = match spawned {
@@ -821,6 +831,9 @@ async fn run_job(
                 .lock()
                 .unwrap()
                 .push(format!("Error spawning bash: {e}").as_bytes());
+            if let Some(audit) = audit {
+                audit.finish(None);
+            }
             finished.settle(&job, JobEnd::SpawnFailed);
             return;
         }
@@ -870,6 +883,9 @@ async fn run_job(
             None => JobEnd::Signaled,
         }
     };
+    if let Some(audit) = audit {
+        audit.finish(status.and_then(|st| st.code()));
+    }
     finished.settle(&job, end);
 }
 

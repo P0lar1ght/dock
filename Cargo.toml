@@ -8,6 +8,7 @@ members = [
     "cordis-gateway",
     "cordis-app",
     "cordis-browser",
+    "dock-audit",
     "cordis-apps",
     "dock-memory",
     "dock-render/markdown",

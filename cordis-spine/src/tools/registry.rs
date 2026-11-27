@@ -27,6 +27,13 @@ use cordis_base::types::{PreExecute, ToolCall, ToolResult, ToolSpec};
 tokio::task_local! {
     static EXEC_CTX: Context;
     static CALL_ARGUMENTS: String;
+    static CALL_ID: String;
+}
+
+/// 正在跑的工具体属于哪一次调用（`ToolCall::id`）。工具体里起的东西（后台命令、出网）要
+/// 追到是哪次调用发起的就靠它（审计）。不在工具体里是 `None`。
+pub fn current_call_id() -> Option<String> {
+    CALL_ID.try_with(|id| id.clone()).ok()
 }
 
 /// 这颗工具被本会话的能力档位挡住了吗？
@@ -451,7 +458,9 @@ impl Tools {
         let pre = {
             let seed = PreExecute::new(&call.name, &call.arguments, identity);
             let fallback = seed.clone();
-            exec.waterfall(TOOLS_PRE_EXECUTE, seed, move || fallback)
+            CALL_ID.sync_scope(call.id.clone(), || {
+                exec.waterfall(TOOLS_PRE_EXECUTE, seed, move || fallback)
+            })
         };
         // `ToolResult.name` 一律报**实际（将要）跑的那颗**，改道后就是新名字。回喂
         // 模型的 tool 消息只带 `tool_call_id`（见 `llm/http`），名字是给 UI 和日志
@@ -650,11 +659,15 @@ impl Tools {
         // identity of its own, and every tab's listener still runs.
         if let Some(body) = body {
             let exec = exec.clone();
+            let id = call.id.clone();
             return EXEC_CTX
-                .scope(exec.clone(), async move {
-                    let result = body(call).await;
-                    finish(&exec, &hook_args, result)
-                })
+                .scope(
+                    exec.clone(),
+                    CALL_ID.scope(id, async move {
+                        let result = body(call).await;
+                        finish(&exec, &hook_args, result)
+                    }),
+                )
                 .await;
         }
         let result = if looks_like_mcp_name(&call.name) {
@@ -674,23 +687,27 @@ impl Tools {
     async fn dispatch_local(&self, exec: &Context, call: ToolCall) -> ToolResult {
         if self.workspace && workspace::handles(&call.name) {
             let jobs = exec.get::<crate::tools::jobs::Jobs>(JOBS);
+            let id = call.id.clone();
             // 挂上调用页：后台任务记下是哪一页起的（跑完通知送回那一页），相对路径和
             // bash 的起始目录按那一页的 cwd 算。循环里本来就挂着同一个 ctx；不在循环里
             // 直接 `execute_on`（插件经 host 调、测试）时，不挂这一层就退回进程级的默认。
             return EXEC_CTX
                 .scope(
                     exec.clone(),
-                    workspace::execute_with(
-                        call,
-                        || {
-                            exec.get::<TurnControl>(TURN)
-                                .is_some_and(|t| t.is_cancelled())
-                        },
-                        || {
-                            exec.get::<TurnControl>(TURN)
-                                .is_some_and(|t| t.yield_requested())
-                        },
-                        jobs.as_deref(),
+                    CALL_ID.scope(
+                        id,
+                        workspace::execute_with(
+                            call,
+                            || {
+                                exec.get::<TurnControl>(TURN)
+                                    .is_some_and(|t| t.is_cancelled())
+                            },
+                            || {
+                                exec.get::<TurnControl>(TURN)
+                                    .is_some_and(|t| t.yield_requested())
+                            },
+                            jobs.as_deref(),
+                        ),
                     ),
                 )
                 .await;

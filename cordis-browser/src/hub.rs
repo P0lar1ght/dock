@@ -77,6 +77,8 @@ pub struct BrowserHub {
     registry_dir: Option<std::path::PathBuf>,
     /// `browser_js` 的 Node 执行器，第一次用时才起。
     js: Mutex<Option<Arc<JsRunner>>>,
+    /// 开着审计的会话：审计目录和写进去的日志（`browser.jsonl`）。
+    audits: std::sync::Mutex<HashMap<String, (PathBuf, Arc<dock_audit::store::AuditLog>)>>,
 }
 
 impl BrowserHub {
@@ -359,6 +361,43 @@ impl BrowserHub {
         Ok(runner)
     }
 
+    /// Dock 每次调用都带上这个会话的审计目录（`None` = 没在审计）。变了才去动标签页组。
+    pub async fn set_audit(&self, session: &str, dir: Option<PathBuf>) {
+        let log = {
+            let mut audits = self.audits.lock().unwrap();
+            match (&dir, audits.get(session)) {
+                (Some(d), Some((current, _))) if current == d => return,
+                (None, None) => return,
+                _ => {}
+            }
+            match dir {
+                Some(dir) => match dock_audit::store::AuditLog::open(&dir, "browser.jsonl") {
+                    Ok(log) => {
+                        let log = Arc::new(log);
+                        audits.insert(session.to_string(), (dir, log.clone()));
+                        Some(log)
+                    }
+                    Err(_) => None,
+                },
+                None => {
+                    audits.remove(session);
+                    None
+                }
+            }
+        };
+        if let Some(group) = self.group(session).await {
+            group.lock().await.set_audit(log);
+        }
+    }
+
+    fn audit_log(&self, session: &str) -> Option<Arc<dock_audit::store::AuditLog>> {
+        self.audits
+            .lock()
+            .unwrap()
+            .get(session)
+            .map(|(_, log)| log.clone())
+    }
+
     async fn group(&self, session: &str) -> Option<Group> {
         self.groups.lock().await.get(session).cloned()
     }
@@ -468,6 +507,7 @@ impl BrowserHub {
             let chromium = chromium.as_ref().expect("just ensured");
             ConnectedSession::open(chromium).await?
         };
+        fresh.set_audit(self.audit_log(session));
         let (targets, active) = (fresh.target_ids(), fresh.active_target_id());
         let group = Arc::new(Mutex::new(fresh));
         // 两次并发 open 同一会话：后到的那组关掉，别留孤儿标签页。

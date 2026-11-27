@@ -12,6 +12,7 @@
 //! `dock serve` 不链接终端 UI。
 
 pub mod approval;
+pub mod audit;
 pub mod gateway_port;
 pub mod hooks_bridge;
 pub mod mcp_app_context;

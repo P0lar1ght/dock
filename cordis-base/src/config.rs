@@ -489,6 +489,62 @@ struct FileConfig {
     /// `[approval]` — 智能授权。
     #[serde(default)]
     approval: ApprovalSection,
+    /// `[audit]`：审计（默认关）。
+    #[serde(default)]
+    audit: AuditSection,
+}
+
+/// `[audit]`：审计。见 [`AuditConfig`]。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+struct AuditSection {
+    enabled: Option<bool>,
+    decrypt: Option<bool>,
+    body_cap_kb: Option<u64>,
+    redact_secrets: Option<bool>,
+}
+
+/// 审计设置。**只认用户配置**（`$DOCK_HOME/config.toml`）：项目里的 `.dock/config.toml`
+/// 是仓库作者写的，不能替你关掉审计、或者让它停止遮住凭据。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuditConfig {
+    /// 新开的页默认开不开（`/audit on|off` 按页切）。
+    pub enabled: bool,
+    /// 命令的 HTTPS 在出口代理处解密（用 Dock 自己的根证书）。
+    pub decrypt: bool,
+    /// 请求 / 响应正文最多记这么多 KB（之后只计长度）。
+    pub body_cap_kb: u64,
+    /// `Authorization`、`Cookie` 这类凭据头遮住（留长度和哈希）。
+    pub redact_secrets: bool,
+}
+
+impl Default for AuditConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            decrypt: true,
+            body_cap_kb: 256,
+            redact_secrets: true,
+        }
+    }
+}
+
+pub fn load_audit_config() -> AuditConfig {
+    load_audit_config_from(&dock_home().join("config.toml"))
+}
+
+pub fn load_audit_config_from(path: &Path) -> AuditConfig {
+    let d = AuditConfig::default();
+    let Some(file) = read_file(path) else {
+        return d;
+    };
+    let a = file.audit;
+    AuditConfig {
+        enabled: a.enabled.unwrap_or(d.enabled),
+        decrypt: a.decrypt.unwrap_or(d.decrypt),
+        body_cap_kb: a.body_cap_kb.unwrap_or(d.body_cap_kb).clamp(0, 64 * 1024),
+        redact_secrets: a.redact_secrets.unwrap_or(d.redact_secrets),
+    }
 }
 
 /// `[approval]`：智能授权。
@@ -3236,6 +3292,22 @@ default = "grok-4"
         );
         std::fs::write(&user, "[approval]\nmodel = \"\"\n").unwrap();
         assert_eq!(load_approval_model_from(&user), None);
+    }
+
+    /// `[audit]` 默认关、解密、遮凭据；写了的键覆盖默认值，正文上限有封顶。
+    #[test]
+    fn audit_config_defaults_and_overrides() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("config.toml");
+        assert_eq!(load_audit_config_from(&user), AuditConfig::default());
+        std::fs::write(
+            &user,
+            "[audit]\nenabled = true\ndecrypt = false\nbody_cap_kb = 99999999\n",
+        )
+        .unwrap();
+        let cfg = load_audit_config_from(&user);
+        assert!(cfg.enabled && !cfg.decrypt && cfg.redact_secrets);
+        assert_eq!(cfg.body_cap_kb, 64 * 1024);
     }
 
     #[test]

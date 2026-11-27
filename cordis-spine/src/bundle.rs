@@ -142,6 +142,8 @@ pub async fn install_app(ctx: &Context) -> Result<()> {
     ctx.plugin(user_edits(), ())?.wait().await?;
     // 每轮改了哪些文件（编辑工具前存原文）：对话流里的改动卡、审查、撤销。
     ctx.plugin(turn_changes(), ())?.wait().await?;
+    // 审计（默认关）：开了的页记工具调用、命令和出网，命令的出网走出口代理。
+    ctx.plugin(crate::host::audit::audit(), ())?.wait().await?;
     // MCP App 界面交来的状态（网关 `mcp/app/context`）：下一步提醒 agent。
     ctx.plugin(mcp_app_context(), ())?.wait().await?;
     // MCP App 界面自己的工具（网关 `mcp/app/view/expose`）：界面开着时经 use_tool 交给模型。
