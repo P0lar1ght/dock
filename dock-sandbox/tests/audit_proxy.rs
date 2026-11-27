@@ -370,13 +370,14 @@ async fn a_client_that_rejects_dock_is_passed_through_afterwards() {
             rig.learned.lock().unwrap()
         );
     }
+    // 两种拒绝（握手里拒绝 / 握手后不发请求就断开）措辞不同，结果一样：之后原样转发。
     let rejected = &first[0];
     assert!(
         rejected
             .error
             .as_deref()
             .unwrap_or("")
-            .contains("客户端拒绝了 Dock 根证书"),
+            .contains("之后这个主机原样转发"),
         "{rejected:?}"
     );
     assert_eq!(rig.learned.lock().unwrap().as_slice(), ["localhost"]);
