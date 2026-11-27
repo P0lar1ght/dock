@@ -341,6 +341,19 @@ async fn a_client_that_rejects_dock_is_passed_through_afterwards() {
     let url = format!("https://localhost:{server}/again");
     let (ok, _) = curl(rig.port, &["--cacert", &only_upstream, &url]).await;
     assert!(!ok, "信不过 Dock 根证书的客户端第一次会失败");
+    // curl 发完 alert 就退出了，代理读到它、记进直通名单是异步的：等代理发出这一次的出错
+    // 记录（和记名单在同一个分支里，紧跟在后面）再看名单。以前 curl 一返回就看，
+    // Linux CI 上跑得快，看早了，名单还是空的。
+    let first = wait_flows(&rig.flows, 1).await;
+    let rejected = first.first().expect("第一次要记一条出错记录");
+    assert!(
+        rejected
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("客户端拒绝了 Dock 根证书"),
+        "{rejected:?}"
+    );
     assert_eq!(rig.learned.lock().unwrap().as_slice(), ["localhost"]);
     let (ok, out) = curl(rig.port, &["--cacert", &only_upstream, &url]).await;
     assert!(ok, "第二次原样转发：{out}");
