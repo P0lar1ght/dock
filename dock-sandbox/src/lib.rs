@@ -10,8 +10,11 @@
 //!   在沙箱外跑起来。
 //! - 后端做不到的保证列在 [`Limit`] 里，由调用方展示给用户。
 //!
+//! 另有 [`audit`]：出口代理（HTTPS 解密）、只追加的审计日志、链路图——沙箱的观测与审计。
+//!
 //! 本 crate 不认识 Dock 的插件、配置文件和会话：路径和开关都由调用方传进来。
 
+pub mod audit;
 mod backend;
 mod denial;
 mod env;
@@ -21,6 +24,7 @@ mod guard;
 mod linux;
 mod paths;
 mod policy;
+pub mod rules;
 #[cfg(target_os = "macos")]
 mod seatbelt;
 mod tree;

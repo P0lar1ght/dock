@@ -16,7 +16,6 @@ webbrowser = "1"
 cordis = { path = "../cordis-rust" }
 cordis-base = { path = "../cordis-base" }
 dock-memory = { path = "../dock-memory" }
-dock-audit = { path = "../dock-audit" }
 dock-sandbox = { path = "../dock-sandbox" }
 futures-util = "0.3"
 regex = "1"

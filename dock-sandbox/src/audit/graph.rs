@@ -3,7 +3,7 @@
 //! 记录的种类（spine 的 `audit` 插件与浏览器服务写，这里只读）：
 //! - `tool_call` / `tool_result`：`tool`、`call_id`、`is_error`。
 //! - `command` / `command_end`：`job`、`tool`、`program`、`command`、`exit`、`ms`。
-//! - `net`：一次出网（[`crate::record::Flow`]）。`tag` 是命令的 `job`，浏览器的是 `browser:<标签页>`。
+//! - `net`：一次出网（[`crate::audit::record::Flow`]）。`tag` 是命令的 `job`，浏览器的是 `browser:<标签页>`。
 //!
 //! 图分四层：会话 → 工具 → 命令里的程序 → 目的主机。边上写次数和流量；主机太多时每个来源只画
 //! 流量最大的几个，其余并成一个「其他」。
@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use crate::store::{self, Verified};
+use crate::audit::store::{self, Verified};
 
 /// 每个来源最多画几个主机（其余并成「其他 N 个」）。
 const HOSTS_PER_SOURCE: usize = 8;
@@ -552,7 +552,7 @@ summary{{cursor:pointer}}pre{{white-space:pre-wrap;word-break:break-all;backgrou
 pub fn export(dir: &Path, title: &str) -> Result<PathBuf, String> {
     let events = store::read(dir);
     let verified = store::verify(dir);
-    let out = dir.join(format!("export-{}", crate::record::now_ms()));
+    let out = dir.join(format!("export-{}", crate::audit::record::now_ms()));
     std::fs::create_dir_all(out.join(store::BODIES))
         .map_err(|e| format!("create {}: {e}", out.display()))?;
     std::fs::write(

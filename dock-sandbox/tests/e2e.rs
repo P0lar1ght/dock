@@ -239,3 +239,43 @@ fn secret_env_vars_are_not_passed_and_the_backend_is_named() {
     assert!(r.out.contains("token=[]"), "{}", r.out);
     assert!(!r.out.contains("sandbox=[]"), "{}", r.out);
 }
+
+/// 只许连本机（出网只能经本机上的审计代理）：连回环照常，连真正的远端连不上。同一份脚本
+/// 在全放开时连得上远端，作对照——对照都连不上（离线）就跳过。注意 Seatbelt 的
+/// `localhost` 是本机的任何地址（连本机的局域网 IP 也算本机：那也不出这台机器）。
+#[cfg(target_os = "macos")]
+#[test]
+fn proxy_only_reaches_loopback_but_not_remote_addresses() {
+    if !ready() {
+        return;
+    }
+    let w = World::new();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let local = format!("exec 3<>/dev/tcp/127.0.0.1/{port} && echo connected");
+    let remote = "exec 3<>/dev/tcp/1.1.1.1/443 && echo connected";
+
+    let open = w.policy(Access::WorkspaceWrite, true);
+    let control = run(&open, &w.ws, remote);
+    if !(control.ok && control.out.contains("connected")) {
+        eprintln!(
+            "skip: 1.1.1.1:443 unreachable even unconfined: {}",
+            control.out
+        );
+        return;
+    }
+    let settings = Settings {
+        network: true,
+        proxy_only: true,
+        ..Settings::default()
+    };
+    let only = Policy::build(Access::WorkspaceWrite, &w.ws, &settings, &w.host());
+    let r = run(&only, &w.ws, &local);
+    assert!(
+        r.ok && r.out.contains("connected"),
+        "回环该连得上：{}",
+        r.out
+    );
+    let r = run(&only, &w.ws, remote);
+    assert!(!r.ok, "远端不该连得上：{}", r.out);
+}

@@ -1,14 +1,14 @@
 //! 手动试：经出口代理跑一条命令，跑完列出它的出网，并导出一份审计报告（链路图 + 时间线）。
 //!
 //! ```sh
-//! cargo run -p dock-audit --example egress -- curl -s https://example.com -o /dev/null
+//! cargo run -p dock-sandbox --example egress -- curl -s https://example.com -o /dev/null
 //! ```
 
 use std::sync::{Arc, Mutex};
 
-use dock_audit::ca::Authority;
-use dock_audit::proxy::{Options, Proxy};
-use dock_audit::record::Flow;
+use dock_sandbox::audit::ca::Authority;
+use dock_sandbox::audit::proxy::{Options, Proxy};
+use dock_sandbox::audit::record::Flow;
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
@@ -17,13 +17,14 @@ async fn main() {
         eprintln!("usage: egress <command> [args…]");
         std::process::exit(2);
     };
-    let dir = std::env::temp_dir().join("dock-audit-example");
+    let dir = std::env::temp_dir().join("dock-sandbox-egress");
     let ca = Arc::new(Authority::load_or_create(&dir).expect("CA"));
     let bundle = ca.bundle().expect("bundle");
     let flows: Arc<Mutex<Vec<Flow>>> = Arc::default();
-    let audit_dir = dir.join(format!("run-{}", dock_audit::record::now_ms()));
-    let log =
-        Arc::new(dock_audit::store::AuditLog::open(&audit_dir, "events.jsonl").expect("audit log"));
+    let audit_dir = dir.join(format!("run-{}", dock_sandbox::audit::record::now_ms()));
+    let log = Arc::new(
+        dock_sandbox::audit::store::AuditLog::open(&audit_dir, "events.jsonl").expect("audit log"),
+    );
     let command = args.join(" ");
     log.record(
         "tool_call",
@@ -43,7 +44,8 @@ async fn main() {
         None,
     );
     let listener = proxy.listen("example").await.expect("listen");
-    let env = dock_audit::env::command_env(listener.port, Some((&ca.cert_path(), &bundle)), "");
+    let env =
+        dock_sandbox::audit::env::command_env(listener.port, Some((&ca.cert_path(), &bundle)), "");
     let status = tokio::process::Command::new(program)
         .args(rest)
         .envs(env)
@@ -61,9 +63,12 @@ async fn main() {
     );
     drop(log);
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    let events = dock_audit::store::read(&audit_dir);
-    eprintln!("\n{}", dock_audit::graph::Summary::build(&events).tree());
-    match dock_audit::graph::export(&audit_dir, "egress 示例") {
+    let events = dock_sandbox::audit::store::read(&audit_dir);
+    eprintln!(
+        "\n{}",
+        dock_sandbox::audit::graph::Summary::build(&events).tree()
+    );
+    match dock_sandbox::audit::graph::export(&audit_dir, "egress 示例") {
         Ok(out) => eprintln!("report: {}", out.join("report.html").display()),
         Err(e) => eprintln!("export failed: {e}"),
     }

@@ -263,6 +263,31 @@ pub fn with_audit(mut params: Value, dir: Option<&std::path::Path>) -> Value {
     params
 }
 
+/// 沙箱的主机规则（内置浏览器拿去拦子请求）：`[{host, block}]`，按顺序。
+pub const META_POLICY: &str = "dock/policy";
+
+pub fn with_policy(mut params: Value, rules: &[(String, bool)]) -> Value {
+    if rules.is_empty() {
+        return params;
+    }
+    if !params.is_object() {
+        params = json!({});
+    }
+    let meta = params
+        .as_object_mut()
+        .expect("just ensured object")
+        .entry("_meta")
+        .or_insert_with(|| json!({}));
+    if !meta.is_object() {
+        *meta = json!({});
+    }
+    meta[META_POLICY] = json!(rules
+        .iter()
+        .map(|(host, block)| json!({ "host": host, "block": block }))
+        .collect::<Vec<_>>());
+    params
+}
+
 /// MRTR：把重试请求的 `params` 补上 `inputResponses` + `requestState`。
 ///
 /// 规范（2026-07-28 MRTR）：

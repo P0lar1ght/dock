@@ -71,7 +71,17 @@ pub(crate) fn render(policy: &Policy) -> Profile {
         ));
     }
 
-    if policy.network() {
+    if policy.proxy_only() {
+        // 只许连本机：出网只能经本机上的审计代理。本机的开发服务器照常连、照常监听；
+        // 证书校验、读网络配置这类本机服务（NETWORK 里那些）照常放行。
+        b.raw(
+            "; Dock：只许连本机（出网经审计代理）\n\
+             (allow network-outbound (remote ip \"localhost:*\"))\n\
+             (allow network-bind (local ip \"localhost:*\"))\n\
+             (allow network-inbound (local ip \"localhost:*\"))",
+        );
+        b.raw(NETWORK);
+    } else if policy.network() {
         b.raw("; Dock：联网\n(allow network*)");
         b.raw(NETWORK);
     }
@@ -195,6 +205,24 @@ mod tests {
             .params
             .iter()
             .any(|(k, v)| k.starts_with("ANCHOR") && v.ends_with(".git")));
+    }
+
+    #[test]
+    fn proxy_only_allows_loopback_but_not_the_network() {
+        let (_dir, mut p) = policy(true);
+        let settings = Settings {
+            proxy_only: true,
+            ..Settings::default()
+        };
+        p = Policy::build(
+            Access::WorkspaceWrite,
+            p.workspace(),
+            &settings,
+            &Host::default(),
+        );
+        let text = render(&p).text;
+        assert!(text.contains("(remote ip \"localhost:*\")"), "{text}");
+        assert!(!text.contains("(allow network*)"), "{text}");
     }
 
     #[test]

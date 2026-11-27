@@ -1,15 +1,16 @@
-//! `audit` 插件：开了审计的页，它做过什么都记进一份和聊天记录分开的审计日志
-//! （`$DOCK_HOME/audit/<开始时刻>-<会话>/`，格式见 [`dock_audit::store`]）：
+//! 沙箱的「观测」和「审计」：开着沙箱（`/sandbox on`，见 [`crate::host::sandbox`]）的页，
+//! 它做过什么都记进一份和聊天记录分开的审计日志（`$DOCK_HOME/audit/<开始时刻>-<会话>/`，
+//! 格式见 [`dock_sandbox::audit::store`]）：
 //!
 //! - **工具调用**：`tools/pre-execute` 记调用（工具、参数），`tools/execute` 记结果（成败、长度、
 //!   开头一段、全文哈希）。
 //! - **命令**：`jobs` 起进程时（[`for_command`]）记命令、退出码、耗时，并给它开一个出口代理口、
-//!   注入代理和证书的环境变量——命令和它的子进程走代理的出网（HTTPS 在代理处解密）都记下来。
+//!   注入代理和证书的环境变量——命令和它的子进程走代理的出网（HTTPS 在代理处解密）都记下来，
+//!   出网目的地还要过沙箱策略（[`Audit::rules_for`]）。
 //! - **内置浏览器**：MCP 调用的 `_meta["dock/audit"]` 带上审计目录，浏览器服务把这个会话
 //!   标签页的网络请求写进同一个目录（`browser.jsonl`）。浏览器里看到的本来就是明文。
 //!
-//! 开关按页：新开的页按 `[audit] enabled`（默认关，插件挂载时读一次），`/audit on|off` 切
-//! 当前页。**关着时什么都不做**：不起代理、不注入环境变量、不写盘，开销为零。
+//! **沙箱关着时什么都不做**：不起代理、不注入环境变量、不写盘，开销为零。
 //! 子代理（含工作流派的）记进派它那一页的审计（`Sessions::ui_page`）。
 
 use std::collections::HashMap;
@@ -19,17 +20,18 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use cordis::{plugin, Context, Inject, Plugin};
-use cordis_base::config::{dock_home, load_audit_config};
+use cordis_base::config::{dock_home, load_sandbox_config, RuleAction, SandboxRule};
 use cordis_base::types::{PreExecute, ToolResult};
-use dock_audit::ca::Authority;
-use dock_audit::proxy::{Learn, Listener, Options, Proxy, Sink, Upstream};
-use dock_audit::record::Flow;
-use dock_audit::store::AuditLog;
+use dock_sandbox::audit::ca::Authority;
+use dock_sandbox::audit::proxy::{Gate, Learn, Listener, Options, Proxy, Sink, Upstream};
+use dock_sandbox::audit::record::Flow;
+use dock_sandbox::audit::store::AuditLog;
+use dock_sandbox::rules::{self, Action, Rule};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use crate::host::slash::{register_commands, slash_handler, SlashCommand, SlashOutcome};
-use crate::names::{AUDIT, SESSIONS, SLASH, TOOLS_EXECUTE, TOOLS_PRE_EXECUTE};
+use crate::host::permissions::{Decision, Permissions};
+use crate::names::{AUDIT, PERMISSIONS, SESSIONS, TOOLS_EXECUTE, TOOLS_PRE_EXECUTE};
 use crate::session::log::Sessions;
 
 /// 工具参数最多记这么多字符（`write_file` 的全文可能很长；全文哈希另记）。
@@ -55,21 +57,30 @@ struct Egress {
     decrypt: bool,
 }
 
+/// 出口代理口（命令的 job id）属于谁：记进哪份日志、出网要确认时在哪一页问。
+#[derive(Clone)]
+struct Route {
+    log: Arc<AuditLog>,
+    page: Context,
+}
+
+type Routes = Arc<Mutex<HashMap<String, Route>>>;
+
 /// named `"audit"`。
 pub struct Audit {
-    default_on: bool,
-    /// 页（`ui_page`）→ 开着的审计；`None` = 明确关了（`/audit off`），不再按默认开。
-    pages: Mutex<HashMap<String, Option<Arc<Active>>>>,
+    /// 页（`ui_page`）→ 这一页正在进行的审计（沙箱开着、第一次有东西要记时开）。
+    pages: Mutex<HashMap<String, Arc<Active>>>,
+    /// 页 → 这次任务里临时放行的规则（`/sandbox allow …`），排在配置的规则前面。
+    grants: Mutex<HashMap<String, Vec<Rule>>>,
     egress: OnceLock<Result<Arc<Egress>, String>>,
-    /// 出口代理口的 tag（命令的 job id）→ 记进哪份日志。
-    routes: Arc<Mutex<HashMap<String, Arc<AuditLog>>>>,
+    routes: Routes,
 }
 
 impl Audit {
-    fn new(default_on: bool) -> Self {
+    fn new() -> Self {
         Self {
-            default_on,
             pages: Mutex::new(HashMap::new()),
+            grants: Mutex::new(HashMap::new()),
             egress: OnceLock::new(),
             routes: Arc::default(),
         }
@@ -84,47 +95,102 @@ impl Audit {
         Some((page, sessions))
     }
 
-    /// `ctx` 所在那一页开着的审计（按默认值第一次碰到时开）。
+    /// `ctx` 所在那一页正在进行的审计：沙箱没开就是 `None`；开着就第一次碰到时开一份。
     pub fn active(&self, ctx: &Context) -> Option<Arc<Active>> {
+        if !crate::host::sandbox::enabled(ctx) {
+            return None;
+        }
         let (page, sessions) = Self::page_of(ctx)?;
         let mut pages = self.pages.lock().unwrap();
-        match pages.get(&page) {
-            Some(state) => state.clone(),
-            None if self.default_on => {
-                let started = start(&page, &sessions).ok().map(Arc::new);
-                pages.insert(page, started.clone());
-                started
-            }
-            None => None,
+        if let Some(active) = pages.get(&page) {
+            return Some(active.clone());
         }
+        let active = Arc::new(start(&page, &sessions).ok()?);
+        pages.insert(page, active.clone());
+        Some(active)
     }
 
-    /// 开 `ctx` 这一页的审计；已经开着就返回原来那份。
-    pub fn turn_on(&self, ctx: &Context) -> Result<Arc<Active>, String> {
-        let (page, sessions) = Self::page_of(ctx).ok_or("这一页没有会话")?;
-        let mut pages = self.pages.lock().unwrap();
-        if let Some(Some(active)) = pages.get(&page) {
-            return Ok(active.clone());
-        }
-        let active = Arc::new(start(&page, &sessions)?);
-        pages.insert(page, Some(active.clone()));
-        Ok(active)
-    }
-
-    /// 关 `ctx` 这一页的审计，返回刚才那份的目录。
-    pub fn turn_off(&self, ctx: &Context) -> Option<PathBuf> {
+    /// 沙箱关了：结束这一页的审计（记一条「结束」），这次任务的临时放行也作废。返回目录。
+    pub fn close(&self, ctx: &Context) -> Option<PathBuf> {
         let (page, _) = Self::page_of(ctx)?;
-        let previous = self.pages.lock().unwrap().insert(page, None).flatten();
+        self.grants.lock().unwrap().remove(&page);
+        let previous = self.pages.lock().unwrap().remove(&page);
         previous.map(|active| {
             active.log.record("audit", json!({ "event": "结束" }));
             active.dir.clone()
         })
     }
 
+    /// 这次任务里临时放行一条（`/sandbox allow`）：排在配置的规则前面，沙箱关掉就作废。
+    pub fn grant(&self, ctx: &Context, rule: Rule) {
+        if let Some((page, _)) = Self::page_of(ctx) {
+            if let Some(active) = self.active(ctx) {
+                active.log.record(
+                    "audit",
+                    json!({ "event": "临时放行", "host": rule.host, "command": rule.command }),
+                );
+            }
+            self.grants
+                .lock()
+                .unwrap()
+                .entry(page)
+                .or_default()
+                .push(rule);
+        }
+    }
+
+    /// 这一页生效的规则：临时放行的在前，配置的（`[[sandbox.rules]]`）在后。
+    pub fn rules_for(&self, ctx: &Context) -> Vec<Rule> {
+        let mut out = Self::page_of(ctx)
+            .and_then(|(page, _)| self.grants.lock().unwrap().get(&page).cloned())
+            .unwrap_or_default();
+        out.extend(load_sandbox_config().rules.iter().map(to_rule));
+        out
+    }
+
     fn egress(&self) -> Result<Arc<Egress>, String> {
         self.egress
             .get_or_init(|| start_egress(self.routes.clone()).map(Arc::new))
             .clone()
+    }
+}
+
+fn to_rule(r: &SandboxRule) -> Rule {
+    Rule {
+        host: r.host.clone(),
+        command: r.command.clone(),
+        action: match r.action {
+            RuleAction::Allow => Action::Allow,
+            RuleAction::Ask => Action::Ask,
+            RuleAction::Deny => Action::Deny,
+        },
+    }
+}
+
+/// 出网目的地过一遍策略：`None` 放行，`Some(原因)` 阻断。要问的在 `page` 上问（权限档位、
+/// 「始终允许」照常算——这一页点过「始终允许」就是这次任务授权放行了）。
+pub(crate) async fn check_host(page: &Context, host: &str, port: Option<u16>) -> Option<String> {
+    let audit = page.get::<Audit>(AUDIT)?;
+    let rule = rules::for_host(&audit.rules_for(page), host)?.clone();
+    let pattern = rule.host.clone().unwrap_or_default();
+    match rule.action {
+        Action::Allow => None,
+        Action::Deny => Some(format!("规则 {pattern} → deny")),
+        Action::Ask => {
+            let Some(perms) = page.get::<Permissions>(PERMISSIONS) else {
+                return Some(format!("规则 {pattern} → ask，但这里没人能确认"));
+            };
+            let target = match port {
+                Some(port) => format!("{host}:{port}"),
+                None => host.to_string(),
+            };
+            let summary = format!("沙箱策略：要连 {target}（规则 {pattern} → ask）");
+            match perms.decide(&format!("net:{host}"), &summary, None).await {
+                Decision::Allowed => None,
+                Decision::Denied => Some("用户没有放行".into()),
+                Decision::TimedOut(_) => Some("等确认超时".into()),
+            }
+        }
     }
 }
 
@@ -141,7 +207,7 @@ fn start(page: &str, sessions: &Sessions) -> Result<Active, String> {
     ));
     let log =
         AuditLog::open(&dir, EVENTS).map_err(|e| format!("开审计目录 {}：{e}", dir.display()))?;
-    let cfg = load_audit_config();
+    let cfg = load_sandbox_config();
     log.record(
         "audit",
         json!({
@@ -187,8 +253,8 @@ fn time_now() -> (i64, u32, u32, u32, u32, u32) {
     )
 }
 
-fn start_egress(routes: Arc<Mutex<HashMap<String, Arc<AuditLog>>>>) -> Result<Egress, String> {
-    let cfg = load_audit_config();
+fn start_egress(routes: Routes) -> Result<Egress, String> {
+    let cfg = load_sandbox_config();
     let root = dock_home().join("audit");
     let ca = if cfg.decrypt {
         Some(Arc::new(Authority::load_or_create(&root.join("ca"))?))
@@ -199,18 +265,29 @@ fn start_egress(routes: Arc<Mutex<HashMap<String, Arc<AuditLog>>>>) -> Result<Eg
         Some(ca) => Some((ca.cert_path(), ca.bundle()?)),
         None => None,
     };
+    let sink_routes = routes.clone();
     let sink: Sink = Arc::new(move |flow: Flow| {
-        let log = routes.lock().unwrap().get(&flow.tag).cloned();
+        let log = sink_routes
+            .lock()
+            .unwrap()
+            .get(&flow.tag)
+            .map(|r| r.log.clone());
         if let Some(log) = log {
             log.flow(flow);
         }
+    });
+    // 出网先过沙箱策略：按发起它的那条命令找到页，在那一页上判、要问就在那一页上问。
+    let gate: Gate = Arc::new(move |tag: &str, host: &str, port: u16| {
+        let page = routes.lock().unwrap().get(tag).map(|r| r.page.clone());
+        let host = host.to_string();
+        Box::pin(async move { check_host(&page?, &host, Some(port)).await })
     });
     let learned_root = root.clone();
     let learn: Learn =
         Arc::new(move |host: &str, why: &str| save_passthrough(&learned_root, host, why));
     let (proxy_url, no_proxy) = user_proxy();
     let upstream = proxy_url.and_then(|url| Upstream::parse(&url, &no_proxy));
-    let proxy = Proxy::new(
+    let proxy = Proxy::with_gate(
         ca,
         Options {
             decrypt: cfg.decrypt,
@@ -222,6 +299,7 @@ fn start_egress(routes: Arc<Mutex<HashMap<String, Arc<AuditLog>>>>) -> Result<Eg
         sink,
         load_passthrough(&root),
         Some(learn),
+        Some(gate),
     );
     Ok(Egress {
         proxy,
@@ -330,7 +408,7 @@ fn save_passthrough(root: &Path, host: &str, why: &str) {
         .unwrap_or_default();
     map.insert(
         host.to_ascii_lowercase(),
-        json!({ "reason": why, "ts": dock_audit::record::now_ms() }),
+        json!({ "reason": why, "ts": dock_sandbox::audit::record::now_ms() }),
     );
     let _ = std::fs::create_dir_all(root);
     let _ = std::fs::write(
@@ -344,7 +422,7 @@ pub(crate) struct CommandAudit {
     pub env: Vec<(String, String)>,
     job: String,
     log: Arc<AuditLog>,
-    routes: Arc<Mutex<HashMap<String, Arc<AuditLog>>>>,
+    routes: Routes,
     started: Instant,
     _listener: Option<Listener>,
 }
@@ -409,16 +487,18 @@ pub(crate) fn for_command(
     match audit.egress() {
         Ok(egress) => match egress.proxy.listen_now(job) {
             Ok(l) => {
-                audit
-                    .routes
-                    .lock()
-                    .unwrap()
-                    .insert(job.to_string(), active.log.clone());
+                audit.routes.lock().unwrap().insert(
+                    job.to_string(),
+                    Route {
+                        log: active.log.clone(),
+                        page: exec.clone(),
+                    },
+                );
                 let certs = egress
                     .certs
                     .as_ref()
                     .map(|(ca, bundle)| (ca.as_path(), bundle.as_path()));
-                env = dock_audit::env::command_env(l.port, certs, &egress.no_proxy);
+                env = dock_sandbox::audit::env::command_env(l.port, certs, &egress.no_proxy);
                 listener = Some(l);
             }
             Err(e) => active.log.record(
@@ -465,6 +545,28 @@ pub(crate) fn calling_audit_dir() -> Option<PathBuf> {
     let exec = crate::tools::registry::exec_ctx()?;
     let audit = exec.get::<Audit>(AUDIT)?;
     audit.active(&exec).map(|a| a.dir.clone())
+}
+
+/// 内置浏览器要套的主机规则（按顺序；`ask` 子请求问不了人，不带）：`(通配, 阻断?)`。
+pub(crate) fn calling_host_rules() -> Vec<(String, bool)> {
+    let Some(exec) = crate::tools::registry::exec_ctx() else {
+        return Vec::new();
+    };
+    let Some(audit) = exec.get::<Audit>(AUDIT) else {
+        return Vec::new();
+    };
+    if audit.active(&exec).is_none() {
+        return Vec::new();
+    }
+    audit
+        .rules_for(&exec)
+        .into_iter()
+        .filter_map(|r| match r.action {
+            Action::Allow => r.host.map(|h| (h, false)),
+            Action::Deny => r.host.map(|h| (h, true)),
+            Action::Ask => None,
+        })
+        .collect()
 }
 
 fn clip(s: &str, max: usize) -> String {
@@ -537,108 +639,74 @@ fn on_execute(result: &ToolResult) {
 
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
-fn run_command(page: &Context, args: &str) -> SlashOutcome {
-    let Some(audit) = page.get::<Audit>(AUDIT) else {
-        return SlashOutcome::notice("审计", "审计服务没有挂载。");
-    };
-    let sub = args.split_whitespace().next().unwrap_or("status");
-    match sub {
-        "on" => match audit.turn_on(page) {
-            Ok(active) => {
-                SlashOutcome::Applied(format!("这一页开始审计：{}", active.dir.display()))
-            }
-            Err(e) => SlashOutcome::Applied(format!("开不了审计：{e}")),
-        },
-        "off" => match audit.turn_off(page) {
-            Some(dir) => {
-                SlashOutcome::Applied(format!("这一页停止审计（记录在 {}）", dir.display()))
-            }
-            None => SlashOutcome::Applied("这一页没有在审计".into()),
-        },
-        "graph" => match audit.active(page) {
-            Some(active) => {
-                let events = dock_audit::store::read(&active.dir);
-                let summary = dock_audit::graph::Summary::build(&events);
-                SlashOutcome::notice(
-                    "审计链路图",
-                    format!(
-                        "工具调用 {} · 命令 {} · 出网 {}（解密 {}）· 流量 {} · 失败 {}\n\n{}\n可视化报告：/audit export\n\n```mermaid\n{}```",
-                        summary.tool_calls,
-                        summary.commands,
-                        summary.requests,
-                        summary.decrypted,
-                        dock_audit::graph::human_bytes(summary.bytes),
-                        summary.errors,
-                        summary.tree(),
-                        summary.mermaid()
-                    ),
-                )
-            }
-            None => SlashOutcome::Applied("这一页没有在审计（/audit on 开始）".into()),
-        },
-        "export" => match audit.active(page) {
-            Some(active) => {
-                let n = SEQ.fetch_add(1, Ordering::Relaxed);
-                let title = format!("Dock 审计报告 #{n}");
-                match dock_audit::graph::export(&active.dir, &title) {
-                    Ok(out) => SlashOutcome::Applied(format!(
-                        "已导出：{}",
-                        out.join("report.html").display()
-                    )),
-                    Err(e) => SlashOutcome::Applied(format!("导出失败：{e}")),
-                }
-            }
-            None => SlashOutcome::Applied("这一页没有在审计（/audit on 开始）".into()),
-        },
-        _ => SlashOutcome::notice("审计", status(&audit, page)),
-    }
+/// `/sandbox graph`：概况、终端里的链路树，后面附 Mermaid（桌面端画成图）。
+pub(crate) fn graph_text(active: &Active) -> String {
+    let events = dock_sandbox::audit::store::read(&active.dir);
+    let summary = dock_sandbox::audit::graph::Summary::build(&events);
+    format!(
+        "工具调用 {} · 命令 {} · 出网 {}（解密 {}）· 流量 {} · 失败 {}\n\n{}\n可视化报告：/sandbox export\n\n```mermaid\n{}```",
+        summary.tool_calls,
+        summary.commands,
+        summary.requests,
+        summary.decrypted,
+        dock_sandbox::audit::graph::human_bytes(summary.bytes),
+        summary.errors,
+        summary.tree(),
+        summary.mermaid()
+    )
 }
 
-fn status(audit: &Audit, page: &Context) -> String {
-    let mut out = String::new();
+/// `/sandbox export`：报告与原始记录，返回 `report.html` 的路径。
+pub(crate) fn export(active: &Active) -> Result<PathBuf, String> {
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    dock_sandbox::audit::graph::export(&active.dir, &format!("Dock 沙箱审计报告 #{n}"))
+        .map(|out| out.join("report.html"))
+}
+
+/// `/sandbox status` 里审计那几行。
+pub(crate) fn status_lines(audit: &Audit, page: &Context) -> Vec<String> {
+    let mut out = Vec::new();
     match audit.active(page) {
         Some(active) => {
-            let events = dock_audit::store::read(&active.dir);
-            let verified = dock_audit::store::verify(&active.dir);
-            let intact = verified.iter().all(|v| v.broken_at.is_none());
-            out.push_str(&format!(
-                "这一页：**审计中**\n记录：{}（{} 条，哈希链{}）\n",
+            let events = dock_sandbox::audit::store::read(&active.dir);
+            let intact = dock_sandbox::audit::store::verify(&active.dir)
+                .iter()
+                .all(|v| v.broken_at.is_none());
+            out.push(format!(
+                "审计：{}（{} 条，哈希链{}）",
                 active.dir.display(),
                 events.len(),
                 if intact { "完好" } else { "对不上" }
             ));
         }
-        None => out.push_str(
-            "这一页：没有在审计（`/audit on` 开始；`[audit] enabled = true` 让新开的页默认开）\n",
-        ),
+        None => out.push("审计：没在记（沙箱开着才记）".into()),
     }
     match audit.egress.get() {
-        Some(Ok(e)) => out.push_str(&format!(
-            "出口代理：已启动，HTTPS {}\n",
+        Some(Ok(e)) => out.push(format!(
+            "出口代理：已启动，HTTPS {}",
             if e.decrypt {
                 "在代理处解密（Dock 根证书只经命令的环境变量信任，不装进系统）"
             } else {
                 "不解密（只记目的地和字节数）"
             }
         )),
-        Some(Err(e)) => out.push_str(&format!("出口代理：不可用（{e}）\n")),
-        None => out.push_str("出口代理：还没有命令用过\n"),
+        Some(Err(e)) => out.push(format!("出口代理：不可用（{e}）")),
+        None => out.push("出口代理：还没有命令用过".into()),
     }
     let passthrough = load_passthrough(&dock_home().join("audit"));
     if !passthrough.is_empty() {
-        out.push_str(&format!(
-            "原样转发（客户端不信 Dock 根证书）的主机：{}\n",
+        out.push(format!(
+            "原样转发（客户端不信 Dock 根证书）的主机：{}",
             passthrough.join("、")
         ));
     }
-    out.push_str("\n`/audit on` · `/audit off` · `/audit graph` · `/audit export`");
     out
 }
 
-/// 挂 [`AUDIT`]，记工具调用；`/audit` 命令。
+/// 挂 [`AUDIT`]，记工具调用（沙箱开着的页）。开关与命令在 `sandbox` 插件（`/sandbox`）。
 pub fn audit() -> Plugin {
-    plugin("audit", Inject::from([SLASH]), |ctx, _: &()| {
-        let service = ctx.provide(AUDIT, Audit::new(load_audit_config().enabled))?;
+    plugin("audit", Inject::new(), |ctx, _: &()| {
+        let service = ctx.provide(AUDIT, Audit::new())?;
         let pre = ctx
             .clone()
             .on_waterfall(TOOLS_PRE_EXECUTE, |pre: PreExecute, args| {
@@ -653,19 +721,6 @@ pub fn audit() -> Plugin {
                 on_execute(&next);
                 next
             })?;
-        register_commands(
-            ctx,
-            vec![SlashCommand::host(
-                "audit",
-                "审计：记录这一页的工具调用、命令和出网",
-                slash_handler(run_command),
-            )
-            .takes_args(true)
-            .hint("audit on", "开始审计这一页", false)
-            .hint("audit off", "停止审计这一页", false)
-            .hint("audit graph", "看这一页的行为链路图", false)
-            .hint("audit export", "导出报告（HTML + 原始记录）", false)],
-        )?;
         let all = ctx.effect("audit", |scope| {
             scope.own(service);
             scope.own(pre);
@@ -713,20 +768,25 @@ mod tests {
         }
         let _env = cordis_base::test_env::scoped().home();
         let ctx = Context::new();
-        ctx.plugin(crate::session::log::sessions(), ())
-            .unwrap()
-            .wait()
-            .await
-            .unwrap();
-        let _svc = ctx.provide(AUDIT, Audit::new(false)).unwrap();
+        for p in [
+            crate::session::log::sessions(),
+            crate::host::settings::settings(),
+        ] {
+            ctx.plugin(p, ()).unwrap().wait().await.unwrap();
+        }
+        let _svc = ctx.provide(AUDIT, Audit::new()).unwrap();
         let audit = ctx.require::<Audit>(AUDIT).unwrap();
+        let settings = ctx
+            .require::<crate::host::settings::AppSettings>(crate::names::SETTINGS)
+            .unwrap();
         let off = crate::tools::registry::with_exec_ctx_async(ctx.clone(), async {
             for_command("job-0", "true", false, None).is_none()
         })
         .await;
-        assert!(off, "没开审计：不记、不起代理");
+        assert!(off, "沙箱没开：不记、不起代理");
 
-        let active = audit.turn_on(&ctx).unwrap();
+        settings.set_sandbox(true);
+        let active = audit.active(&ctx).unwrap();
         let port = http_once().await;
         // 发往本机的默认不走代理（那不是出网）；这里强制走一回。
         let command = format!("curl -s --noproxy '' http://127.0.0.1:{port}/hi");
@@ -746,7 +806,7 @@ mod tests {
 
         let mut events = Vec::new();
         for _ in 0..100 {
-            events = dock_audit::store::read(&active.dir);
+            events = dock_sandbox::audit::store::read(&active.dir);
             if events.iter().any(|e| e["kind"] == "command_end")
                 && events.iter().any(|e| e["kind"] == "net")
             {
@@ -769,10 +829,12 @@ mod tests {
         assert_eq!(net["path"], "/hi");
         assert_eq!(net["status"], 200);
         assert_eq!(kind("command_end")["exit"], 0);
-        assert!(dock_audit::store::verify(&active.dir)
+        assert!(dock_sandbox::audit::store::verify(&active.dir)
             .iter()
             .all(|v| v.broken_at.is_none()));
-        assert!(audit.turn_off(&ctx).is_some());
+        settings.set_sandbox(false);
+        assert!(audit.close(&ctx).is_some());
+        assert!(audit.active(&ctx).is_none());
     }
 
     /// 工具调用经注册表跑：`tools/pre-execute` 记调用（参数、调用 id），`tools/execute` 记结果
@@ -783,7 +845,7 @@ mod tests {
         let ctx = Context::new();
         for p in [
             crate::session::log::sessions(),
-            crate::host::slash::slash(),
+            crate::host::settings::settings(),
             audit(),
         ] {
             ctx.plugin(p, ()).unwrap().wait().await.unwrap();
@@ -802,7 +864,10 @@ mod tests {
             )
             .unwrap();
         let audit = ctx.require::<Audit>(AUDIT).unwrap();
-        let active = audit.turn_on(&ctx).unwrap();
+        ctx.require::<crate::host::settings::AppSettings>(crate::names::SETTINGS)
+            .unwrap()
+            .set_sandbox(true);
+        let active = audit.active(&ctx).unwrap();
         let out = crate::tools::registry::with_exec_ctx_async(
             ctx.clone(),
             tools.execute_on(
@@ -818,7 +883,7 @@ mod tests {
         assert_eq!(out.content, "pong");
         let mut events = Vec::new();
         for _ in 0..50 {
-            events = dock_audit::store::read(&active.dir);
+            events = dock_sandbox::audit::store::read(&active.dir);
             if events.iter().any(|e| e["kind"] == "tool_result") {
                 break;
             }
@@ -834,12 +899,17 @@ mod tests {
         assert_eq!(result["is_error"], false);
 
         // 关了就不再记。
-        audit.turn_off(&ctx);
+        ctx.require::<crate::host::settings::AppSettings>(crate::names::SETTINGS)
+            .unwrap()
+            .set_sandbox(false);
+        audit.close(&ctx);
         // 「结束」那条是后台写的：等它落盘再数。
         tokio::time::sleep(Duration::from_millis(50)).await;
-        let before = dock_audit::store::read(&active.dir).len();
+        let before = dock_sandbox::audit::store::read(&active.dir).len();
         assert_eq!(
-            dock_audit::store::read(&active.dir).last().unwrap()["event"],
+            dock_sandbox::audit::store::read(&active.dir)
+                .last()
+                .unwrap()["event"],
             "结束"
         );
         crate::tools::registry::with_exec_ctx_async(
@@ -855,7 +925,7 @@ mod tests {
         )
         .await;
         tokio::time::sleep(Duration::from_millis(50)).await;
-        assert_eq!(dock_audit::store::read(&active.dir).len(), before);
+        assert_eq!(dock_sandbox::audit::store::read(&active.dir).len(), before);
     }
 
     #[test]

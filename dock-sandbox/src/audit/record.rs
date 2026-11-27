@@ -49,7 +49,7 @@ pub struct Message {
 pub struct Captured {
     pub size: u64,
     pub truncated: bool,
-    /// 抓到的那段的 sha256（[`crate::store`] 写块时填）。
+    /// 抓到的那段的 sha256（[`crate::audit::store`] 写块时填）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sha256: Option<String>,
     #[serde(skip)]

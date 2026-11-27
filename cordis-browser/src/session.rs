@@ -21,8 +21,8 @@ use chromiumoxide::cdp::browser_protocol::input::{
     InsertTextParams, MouseButton,
 };
 use chromiumoxide::cdp::browser_protocol::network::{
-    EventLoadingFailed, EventLoadingFinished, EventRequestWillBeSent, EventResponseReceived,
-    GetResponseBodyParams, ResourceType,
+    BlockPattern, EventLoadingFailed, EventLoadingFinished, EventRequestWillBeSent,
+    EventResponseReceived, GetResponseBodyParams, ResourceType, SetBlockedUrLsParams,
 };
 use chromiumoxide::cdp::browser_protocol::page::{
     EventFrameNavigated, EventJavascriptDialogClosed, EventJavascriptDialogOpening,
@@ -435,11 +435,40 @@ pub struct ConnectedSession {
     capture: Arc<AsyncMutex<CaptureBuffers>>,
     /// 审计开着时（Dock 在 `_meta["dock/audit"]` 里带了目录）这一组的网络请求记进去。
     audit: AuditSlot,
+    /// 沙箱的主机规则翻成的拦截模式（`Network.setBlockedURLs`）；各页共用，后开的页也套上。
+    blocked: BlockedSlot,
     pub refs: HashMap<String, RefEntry>,
 }
 
+type BlockedSlot = Arc<std::sync::Mutex<Vec<BlockPattern>>>;
+
+/// 沙箱主机规则（`(通配, 阻断?)`，按顺序）→ 拦截模式。`*.example.com` 也管 `example.com` 本身；
+/// 带不带端口都匹配。
+fn block_patterns(rules: &[(String, bool)]) -> Vec<BlockPattern> {
+    let mut out = Vec::new();
+    for (host, block) in rules {
+        let host = host.trim().to_ascii_lowercase();
+        let mut hosts = vec![host.clone()];
+        if let Some(bare) = host.strip_prefix("*.") {
+            hosts.push(bare.to_string());
+        }
+        for h in hosts {
+            out.push(BlockPattern::new(format!("*://{h}/*"), *block));
+            out.push(BlockPattern::new(format!("*://{h}:*/*"), *block));
+        }
+    }
+    out
+}
+
+async fn apply_blocked(page: &Page, patterns: &[BlockPattern]) {
+    let params = SetBlockedUrLsParams {
+        url_patterns: Some(patterns.to_vec()),
+    };
+    let _ = page.execute(params).await;
+}
+
 /// 一组标签页的审计日志（`None` = 没在审计）。各页的网络监听共用这一格。
-pub type AuditSlot = Arc<std::sync::Mutex<Option<Arc<dock_audit::store::AuditLog>>>>;
+pub type AuditSlot = Arc<std::sync::Mutex<Option<Arc<dock_sandbox::audit::store::AuditLog>>>>;
 
 impl ConnectedSession {
     /// 在共享的 Chromium 里给这个会话开第一个标签页（空白页）。先挂好对话框与 console /
@@ -468,8 +497,11 @@ impl ConnectedSession {
             Self::spawn_dialog_listener(&page, pending_dialog.clone(), dialog_seq.clone()).await?,
         );
         let audit: AuditSlot = Arc::default();
-        capture_tasks
-            .extend(Self::attach_page_capture(&page, capture.clone(), audit.clone()).await?);
+        let blocked: BlockedSlot = Arc::default();
+        capture_tasks.extend(
+            Self::attach_page_capture(&page, capture.clone(), audit.clone(), blocked.clone())
+                .await?,
+        );
 
         Ok(Self {
             browser,
@@ -481,6 +513,7 @@ impl ConnectedSession {
             dialog_seq,
             capture,
             audit,
+            blocked,
             refs: HashMap::new(),
         })
     }
@@ -547,7 +580,13 @@ impl ConnectedSession {
             self.dialog_tasks
                 .push(self.dialog_listener_for(&page).await?);
             self.capture_tasks.extend(
-                Self::attach_page_capture(&page, self.capture.clone(), self.audit.clone()).await?,
+                Self::attach_page_capture(
+                    &page,
+                    self.capture.clone(),
+                    self.audit.clone(),
+                    self.blocked.clone(),
+                )
+                .await?,
             );
             self.pages.insert(at + 1, page);
             self.active = at + 1;
@@ -586,7 +625,13 @@ impl ConnectedSession {
         self.dialog_tasks
             .push(self.dialog_listener_for(&page).await?);
         self.capture_tasks.extend(
-            Self::attach_page_capture(&page, self.capture.clone(), self.audit.clone()).await?,
+            Self::attach_page_capture(
+                &page,
+                self.capture.clone(),
+                self.audit.clone(),
+                self.blocked.clone(),
+            )
+            .await?,
         );
         self.pages.push(page);
         Ok(())
@@ -701,15 +746,29 @@ impl ConnectedSession {
     }
 
     /// 开 / 关这一组的审计（`None` = 关）。
-    pub fn set_audit(&self, log: Option<Arc<dock_audit::store::AuditLog>>) {
+    pub fn set_audit(&self, log: Option<Arc<dock_sandbox::audit::store::AuditLog>>) {
         *self.audit.lock().unwrap() = log;
+    }
+
+    /// 套上沙箱的主机规则（`[]` = 不拦）：现有的每一页，以及之后开的页。
+    pub async fn set_blocked(&self, rules: Vec<(String, bool)>) {
+        let patterns = block_patterns(&rules);
+        *self.blocked.lock().unwrap() = patterns.clone();
+        for page in &self.pages {
+            apply_blocked(page, &patterns).await;
+        }
     }
 
     async fn attach_page_capture(
         page: &Page,
         capture: Arc<AsyncMutex<CaptureBuffers>>,
         audit: AuditSlot,
+        blocked: BlockedSlot,
     ) -> Result<Vec<JoinHandle<()>>, String> {
+        let patterns = blocked.lock().unwrap().clone();
+        if !patterns.is_empty() {
+            apply_blocked(page, &patterns).await;
+        }
         // Network/Runtime are enabled by chromiumoxide's frame/network managers
         // on target attach. Do not re-send Enable — it can time out the command
         // queue. Event listeners alone surface request/console traffic.
@@ -1010,8 +1069,13 @@ impl ConnectedSession {
                 self.dialog_tasks
                     .push(self.dialog_listener_for(&page).await?);
                 self.capture_tasks.extend(
-                    Self::attach_page_capture(&page, self.capture.clone(), self.audit.clone())
-                        .await?,
+                    Self::attach_page_capture(
+                        &page,
+                        self.capture.clone(),
+                        self.audit.clone(),
+                        self.blocked.clone(),
+                    )
+                    .await?,
                 );
                 self.pages.push(page);
                 self.active = self.pages.len() - 1;
@@ -1841,11 +1905,11 @@ const AUDIT_BODY_TYPES: &[ResourceType] = &[
 /// 比这大的响应不去取正文（只记大小）。
 const AUDIT_BODY_FETCH_MAX: f64 = 4.0 * 1024.0 * 1024.0;
 
-/// 审计开着时把这一页的网络请求记成 [`dock_audit::record::Flow`]（`tag = browser:<标签页>`）。
+/// 审计开着时把这一页的网络请求记成 [`dock_sandbox::audit::record::Flow`]（`tag = browser:<标签页>`）。
 /// 浏览器里看到的是明文：HTTPS 的网址、头、正文都在，`decrypted` 记成 true。审计关着时
 /// 只看一眼那一格就跳过。
 async fn audit_network(page: &Page, slot: AuditSlot) -> Option<JoinHandle<()>> {
-    use dock_audit::record::{header_pairs, now_ms, Captured, Flow, Message};
+    use dock_sandbox::audit::record::{header_pairs, now_ms, Captured, Flow, Message};
     let mut sent = page.event_listener::<EventRequestWillBeSent>().await.ok()?;
     let mut answered = page.event_listener::<EventResponseReceived>().await.ok()?;
     let mut finished = page.event_listener::<EventLoadingFinished>().await.ok()?;
@@ -1853,7 +1917,7 @@ async fn audit_network(page: &Page, slot: AuditSlot) -> Option<JoinHandle<()>> {
     let page = page.clone();
     let tag = format!("browser:{}", page.target_id().inner());
     Some(tokio::spawn(async move {
-        let cfg = cordis_base::config::load_audit_config();
+        let cfg = cordis_base::config::load_sandbox_config();
         let cap = (cfg.body_cap_kb as usize) * 1024;
         let redact = cfg.redact_secrets;
         let headers = |h: &chromiumoxide::cdp::browser_protocol::network::Headers| {
@@ -2322,6 +2386,26 @@ fn normalize_modifier(p: &str) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_rules_become_block_patterns_in_order() {
+        let p = block_patterns(&[
+            ("api.x.example".into(), false),
+            ("*.x.example".into(), true),
+        ]);
+        let got: Vec<(String, bool)> = p.iter().map(|b| (b.url_pattern.clone(), b.block)).collect();
+        assert_eq!(
+            got,
+            vec![
+                ("*://api.x.example/*".into(), false),
+                ("*://api.x.example:*/*".into(), false),
+                ("*://*.x.example/*".into(), true),
+                ("*://*.x.example:*/*".into(), true),
+                ("*://x.example/*".into(), true),
+                ("*://x.example:*/*".into(), true),
+            ]
+        );
+    }
 
     #[test]
     fn audit_urls_split_into_host_and_path() {

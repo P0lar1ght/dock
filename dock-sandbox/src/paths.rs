@@ -100,6 +100,8 @@ pub(crate) const DOCK_SECRETS: &[&str] = &[
     "mcp_credentials.json",
     "credentials",
     "devices.json",
+    // 审计用的 Dock 根证书私钥：读得到就能签出命令信任的证书。
+    "audit/ca/ca.key.pem",
     "browser/user-data",
 ];
 

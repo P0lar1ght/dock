@@ -4,9 +4,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use dock_audit::ca::Authority;
-use dock_audit::proxy::{Options, Proxy};
-use dock_audit::record::Flow;
+use dock_sandbox::audit::ca::Authority;
+use dock_sandbox::audit::proxy::{Options, Proxy};
+use dock_sandbox::audit::record::Flow;
 use rcgen::{BasicConstraints, CertificateParams, IsCa, Issuer, KeyPair};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -143,7 +143,7 @@ struct Rig {
     port: u16,
     flows: Arc<Mutex<Vec<Flow>>>,
     learned: Arc<Mutex<Vec<String>>>,
-    _listener: dock_audit::proxy::Listener,
+    _listener: dock_sandbox::audit::proxy::Listener,
 }
 
 async fn rig(extra_roots: Vec<Vec<u8>>) -> Rig {
@@ -351,5 +351,45 @@ async fn a_client_that_rejects_dock_is_passed_through_afterwards() {
     assert!(
         last.note.as_deref().unwrap_or("").contains("拒绝过"),
         "{last:?}"
+    );
+}
+
+/// 沙箱策略的关卡：阻断的连接回 403、记一条，命令拿到的是明确的拒绝，别的照常走。
+#[tokio::test(flavor = "multi_thread")]
+async fn the_gate_blocks_hosts_the_policy_denies() {
+    if !curl_or_skip() {
+        return;
+    }
+    let server = serve(None).await;
+    let dir = tempfile::tempdir().unwrap();
+    let flows: Arc<Mutex<Vec<Flow>>> = Arc::default();
+    let sink_flows = flows.clone();
+    let gate: dock_sandbox::audit::proxy::Gate = Arc::new(|_tag: &str, host: &str, _port: u16| {
+        let deny = host == "localhost";
+        Box::pin(async move { deny.then(|| "规则 localhost → deny".to_string()) })
+    });
+    let proxy = Proxy::with_gate(
+        Some(Arc::new(Authority::load_or_create(dir.path()).unwrap())),
+        Options::default(),
+        Arc::new(move |f| sink_flows.lock().unwrap().push(f)),
+        Vec::new(),
+        None,
+        Some(gate),
+    );
+    let listener = proxy.listen("call-1").await.unwrap();
+    let (ok, out) = curl(
+        listener.port,
+        &["-f", &format!("http://localhost:{server}/no")],
+    )
+    .await;
+    assert!(!ok, "被策略阻断：{out}");
+    let (ok, out) = curl(listener.port, &[&format!("http://127.0.0.1:{server}/yes")]).await;
+    assert!(ok, "{out}");
+    let flows = wait_flows(&flows, 2).await;
+    assert!(
+        flows
+            .iter()
+            .any(|f| f.error.as_deref().unwrap_or("").contains("沙箱策略阻断")),
+        "{flows:?}"
     );
 }

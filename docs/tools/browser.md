@@ -177,7 +177,8 @@ Codex 那套是闭源插件，这里用开源的 playwright-core 自己实现。
 
 ## 审计
 
-- 调用页开着审计（`/audit on`，见 [AUDIT](../AUDIT.md)）时，Dock 在 `tools/call` 的 `_meta["dock/audit"]` 里带上审计目录（只给内置浏览器，不发给第三方 MCP）。
+- 调用页开着沙箱（`/sandbox on`，见 [SANDBOX](../SANDBOX.md)、[AUDIT](../AUDIT.md)）时，Dock 在 `tools/call` 的 `_meta["dock/audit"]` 里带上审计目录，`_meta["dock/policy"]` 里带上主机规则（`[{host, block}]`，按顺序；只给内置浏览器，不发给第三方 MCP）。
+- 主机规则翻成 `Network.setBlockedURLs`，套在这个会话的每个标签页上（后开的页也套）：`deny` 的主机连不上，`allow` 的排在前面优先。`ask` 规则子请求问不了人，只在跳转时（`tools/pre-execute`）问。
 - 浏览器服务把这个会话标签页的网络请求写进那个目录的 `browser.jsonl`：方法、网址、状态、头（凭据遮住）、远端 IP、耗时；页面文档、XHR、fetch 的正文开头（`Network.getResponseBody`，大于 4MB 的不取）。
 - 浏览器里看到的本来就是明文，`decrypted` 记成 true；`tag` 是 `browser:<标签页>`。
 - 关了审计（不再带这个键）就不再记；没开时网络监听只看一眼就跳过。

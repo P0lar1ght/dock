@@ -1,10 +1,16 @@
-//! `sandbox` 插件：这一页的 `bash` / `monitor` 命令在系统沙箱里跑（[`dock_sandbox`]），
-//! 沙箱里的命令不再弹权限框；`write_file` / `search_replace` 写在沙箱可写范围内也不弹。
+//! `sandbox` 插件：沙箱 = 隔离 + 观测 + 控制 + 审计，**不减少 agent 能做的事**。按页开
+//! （`/sandbox on|off`，新开的页按 `[sandbox] enabled` 播种）。开着的页：
 //!
-//! - 开关按页（[`AppSettings::sandbox`]）：挂载时按 `$DOCK_HOME/config.toml` 的
-//!   `[sandbox] enabled` 给第 1 页播种，新开的页抄开它的那一页；`/sandbox` 切当前页。
-//! - 策略每次现算（[`policy`]）：改了 `[sandbox]` 不用重启。
-//! - 后端不可用（内核没有 Landlock 之类）时一切照旧：命令照常过权限门，不会不加防护地跑。
+//! - **观测 / 审计**：工具调用、命令、命令和浏览器的出网都记下来（[`crate::host::audit`]）。
+//! - **控制**：策略单独放（`[[sandbox.rules]]`），按出网目的地或命令放行 / 询问 / 阻断；
+//!   默认放行。命令和 `web_fetch` / 浏览器跳转的网址在 `tools/pre-execute` 上判（[`on_policy`]），
+//!   命令自己的出网在出口代理上判（[`crate::host::audit::check_host`]）。这次任务临时放行
+//!   用 `/sandbox allow`。权限档位（询问 / 智能授权 / 始终允许）照旧，沙箱不替它放行。
+//! - **限制**（默认不限）：`[sandbox] confine = true` 时 `bash` / `monitor` 在系统沙箱里跑
+//!   （[`dock_sandbox`]：只能写工作区等、读不到密钥），这时沙箱里的命令不再弹权限框；
+//!   `network = "proxy"` 让命令只能经审计代理出网（macOS 由内核挡住直连）。
+//!
+//! 后端不可用（内核没有 Landlock 之类）时限制不起作用：命令照常过权限门，不会不加防护地跑。
 //!
 //! 不变式：关卡判「沙箱里跑、不用问」（[`Gate::Sandboxed`]）的调用，执行时**一定**在沙箱里跑。
 //! 这个决定由注册表经任务局部变量交给工具体（[`with_access`] / [`granted_access`]），不让
@@ -15,12 +21,16 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 
 use cordis::{plugin, Context, Inject, Plugin};
+use cordis_base::config::SandboxNetwork;
+use cordis_base::types::PreExecute;
+use dock_sandbox::rules::{self, Action, Rule};
 use dock_sandbox::{Access, Availability, Host, Policy, Settings};
 use serde_json::Value;
 
+use crate::host::audit::Audit;
 use crate::host::settings::AppSettings;
 use crate::host::slash::{register_commands, slash_handler, SlashCommand, SlashOutcome};
-use crate::names::{SETTINGS, SLASH};
+use crate::names::{AUDIT, SETTINGS, SLASH, TOOLS_PRE_EXECUTE};
 
 tokio::task_local! {
     static GRANTED: Access;
@@ -55,7 +65,8 @@ fn settings() -> Settings {
             .collect()
     };
     Settings {
-        network: cfg.network,
+        network: cfg.network != SandboxNetwork::Off,
+        proxy_only: cfg.network == SandboxNetwork::Proxy,
         build_caches: cfg.build_caches,
         writable_roots: paths(&cfg.writable_roots),
         deny_read: paths(&cfg.deny_read),
@@ -111,7 +122,8 @@ fn runs_commands(tool: &str) -> bool {
 }
 
 pub(crate) fn gate(exec: &Context, tool: &str, arguments: &str) -> Gate {
-    if !enabled(exec) {
+    // 限制默认不开：沙箱开着也只是审计 + 策略，关卡照旧。
+    if !enabled(exec) || !cordis_base::config::load_sandbox_config().confine {
         return Gate::Default;
     }
     let args: Value = serde_json::from_str(arguments).unwrap_or(Value::Null);
@@ -240,34 +252,135 @@ pub(crate) fn guard_note(report: &dock_sandbox::GuardReport) -> Option<String> {
     Some(lines.join("\n"))
 }
 
+/// 跑命令的工具，和它们的命令参数。
+fn command_arg(tool: &str, args: &Value) -> Option<String> {
+    runs_commands(tool)
+        .then(|| {
+            args.get("command")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .flatten()
+}
+
+/// 带网址的工具（Dock 自己出网、浏览器跳转）和它们的网址里的主机。
+fn url_host(tool: &str, args: &Value) -> Option<String> {
+    let url = match tool {
+        "web_fetch" | "mcp_browser__browser_open" | "mcp_browser__browser_navigate" => {
+            args.get("url").and_then(Value::as_str)?
+        }
+        _ => return None,
+    };
+    let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let authority = authority.rsplit('@').next().unwrap_or(authority);
+    let host = match authority.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or(""),
+        None => authority.split(':').next().unwrap_or(""),
+    };
+    (!host.is_empty()).then(|| host.to_ascii_lowercase())
+}
+
+/// 沙箱策略落在一次调用上：命令按命令规则、带网址的按主机规则。阻断 = 拒掉这次调用；
+/// 询问 = 要人点头（自动批准不算数）。沙箱没开、没命中规则都不动它（默认放行）。
+fn on_policy(pre: &mut PreExecute) {
+    let Some(exec) = crate::tools::registry::exec_ctx() else {
+        return;
+    };
+    if !enabled(&exec) {
+        return;
+    }
+    let Some(audit) = exec.get::<Audit>(AUDIT) else {
+        return;
+    };
+    let args: Value = serde_json::from_str(pre.arguments()).unwrap_or(Value::Null);
+    let rules = audit.rules_for(&exec);
+    let (rule, what) = if let Some(command) = command_arg(pre.name(), &args) {
+        (rules::for_command(&rules, &command).cloned(), "命令")
+    } else if let Some(host) = url_host(pre.name(), &args) {
+        (rules::for_host(&rules, &host).cloned(), "网址")
+    } else {
+        return;
+    };
+    let Some(rule) = rule else {
+        return;
+    };
+    let pattern = rule.command.or(rule.host).unwrap_or_default();
+    match rule.action {
+        Action::Allow => {}
+        Action::Deny => pre.deny(format!(
+            "沙箱策略阻断了这个{what}（规则 {pattern} → deny）。不要换写法绕开；确实需要就请用户 /sandbox allow 放行。"
+        )),
+        Action::Ask => pre.ask(format!("沙箱策略：{what}命中规则 {pattern} → ask")),
+    }
+}
+
 /// 给人看的现状。
 fn describe(page: &Context) -> String {
+    let cfg = cordis_base::config::load_sandbox_config();
     let on = enabled(page);
     let mut out = vec![format!("这一页的沙箱：{}", if on { "开" } else { "关" })];
+    if let Some(audit) = page.get::<Audit>(AUDIT) {
+        out.extend(crate::host::audit::status_lines(&audit, page));
+        let rules = audit.rules_for(page);
+        if rules.is_empty() {
+            out.push(
+                "策略：没有规则，全部放行（[[sandbox.rules]] 加规则，/sandbox allow 临时放行）"
+                    .into(),
+            );
+        } else {
+            out.push("策略（按顺序第一条命中的算，都不中就放行）：".into());
+            for r in &rules {
+                let what = match (&r.host, &r.command) {
+                    (Some(h), _) => format!("出网 {h}"),
+                    (_, Some(c)) => format!("命令 {c}"),
+                    _ => continue,
+                };
+                let action = match r.action {
+                    Action::Allow => "放行",
+                    Action::Ask => "询问",
+                    Action::Deny => "阻断",
+                };
+                out.push(format!("  {what} → {action}"));
+            }
+        }
+    }
+    if !cfg.confine {
+        out.push(
+            "限制：没开（命令照常跑、照常过权限门；[sandbox] confine = true 让命令进系统沙箱）"
+                .into(),
+        );
+        return out.join("\n");
+    }
     match dock_sandbox::availability() {
         Availability::Unavailable { reason } => {
-            out.push(format!("本机不可用：{reason}"));
-            out.push("开着也不起作用：命令照常走权限确认。".into());
+            out.push(format!("限制：本机不可用（{reason}），命令照常走权限确认"));
         }
         Availability::Ready { backend, limits } => {
             let p = policy(page, Access::WorkspaceWrite);
-            out.push(format!("后端：{}", backend.name()));
-            out.push(format!("工作区：{}", p.workspace().display()));
-            out.push(format!("网络：{}", if p.network() { "开" } else { "关" }));
+            out.push(format!("限制：命令在系统沙箱里跑（{}）", backend.name()));
+            out.push(format!("  工作区：{}", p.workspace().display()));
+            let net = match cfg.network {
+                SandboxNetwork::Allow => "能联网",
+                SandboxNetwork::Proxy if cfg!(target_os = "macos") => {
+                    "只能经审计代理出网（直连连不上）"
+                }
+                SandboxNetwork::Proxy => "只能经审计代理出网（这个系统上内核挡不住直连）",
+                SandboxNetwork::Off => "不能联网",
+            };
+            out.push(format!("  网络：{net}"));
+            out.push("  可写：工作区、临时目录、$DOCK_HOME/scratch，以及依赖缓存和 [sandbox] writable_roots".into());
             out.push(
-                "可写：工作区、临时目录、$DOCK_HOME/scratch，以及依赖缓存和 [sandbox] writable_roots"
+                "  不可读：~/.ssh、~/.aws、钥匙串、Dock 的密钥等（[sandbox] deny_read 可加）"
                     .into(),
             );
-            out.push(
-                "不可读：~/.ssh、~/.aws、钥匙串、Dock 的密钥等（[sandbox] deny_read 可加）".into(),
-            );
-            out.push("只读：.git/hooks、.git/config、.dock".into());
+            out.push("  只读：.git/hooks、.git/config、.dock".into());
             for limit in limits {
-                out.push(format!("限制：{}", limit.describe()));
+                out.push(format!("  限制：{}", limit.describe()));
             }
             if on {
                 out.push(
-                    "沙箱里的命令不再弹权限框；要出沙箱的（\"sandbox\": false）照常问你。".into(),
+                    "  沙箱里的命令不再弹权限框；要出沙箱的（\"sandbox\": false）照常问你。".into(),
                 );
             }
         }
@@ -279,22 +392,69 @@ fn sandbox_command(page: &Context, args: &str) -> SlashOutcome {
     let Some(settings) = page.get::<AppSettings>(SETTINGS) else {
         return SlashOutcome::notice("沙箱", "设置服务未挂载。");
     };
-    match args.trim() {
-        "" => settings.set_sandbox(!settings.sandbox()),
-        "on" | "开" => settings.set_sandbox(true),
-        "off" | "关" => settings.set_sandbox(false),
+    let audit = page.get::<Audit>(AUDIT);
+    let (sub, rest) = match args.trim().split_once(char::is_whitespace) {
+        Some((sub, rest)) => (sub, rest.trim()),
+        None => (args.trim(), ""),
+    };
+    let turn = |on: bool| {
+        settings.set_sandbox(on);
+        if !on {
+            if let Some(audit) = &audit {
+                audit.close(page);
+            }
+        }
+    };
+    match sub {
+        "" => turn(!settings.sandbox()),
+        "on" | "开" => turn(true),
+        "off" | "关" => turn(false),
         "status" | "状态" => {}
+        "graph" | "图" => {
+            return match audit.as_ref().and_then(|a| a.active(page)) {
+                Some(active) => SlashOutcome::notice("沙箱链路图", crate::host::audit::graph_text(&active)),
+                None => SlashOutcome::Applied("这一页的沙箱没开（/sandbox on）".into()),
+            }
+        }
+        "export" | "导出" => {
+            return match audit.as_ref().and_then(|a| a.active(page)) {
+                Some(active) => match crate::host::audit::export(&active) {
+                    Ok(report) => SlashOutcome::Applied(format!("已导出：{}", report.display())),
+                    Err(e) => SlashOutcome::Applied(format!("导出失败：{e}")),
+                },
+                None => SlashOutcome::Applied("这一页的沙箱没开（/sandbox on）".into()),
+            }
+        }
+        "allow" | "allow-cmd" => {
+            let Some(audit) = audit else {
+                return SlashOutcome::notice("沙箱", "审计服务未挂载。");
+            };
+            if !settings.sandbox() {
+                return SlashOutcome::Applied("这一页的沙箱没开（/sandbox on）".into());
+            }
+            if rest.is_empty() {
+                return SlashOutcome::Applied("用法：/sandbox allow <域名通配>，/sandbox allow-cmd <命令通配>".into());
+            }
+            let rule = if sub == "allow" {
+                Rule { host: Some(rest.to_string()), command: None, action: Action::Allow }
+            } else {
+                Rule { host: None, command: Some(rest.to_string()), action: Action::Allow }
+            };
+            audit.grant(page, rule);
+            return SlashOutcome::Applied(format!("这次任务里放行：{rest}（沙箱关掉就作废）"));
+        }
         other => {
             return SlashOutcome::notice(
                 "沙箱",
-                format!("不认识「{other}」：用 /sandbox [on|off|status]，不带参数是切换。"),
+                format!("不认识「{other}」：用 /sandbox [on|off|status|graph|export|allow|allow-cmd]，不带参数是切换。"),
             )
         }
     }
     SlashOutcome::notice("沙箱", describe(page))
 }
 
-/// `sandbox` 插件：播种第 1 页的开关、挂 `/sandbox`。
+/// `sandbox` 插件：播种第 1 页的开关、挂 `/sandbox`（别名 `/audit`），在 `tools/pre-execute`
+/// 上落沙箱策略。
 pub fn sandbox() -> Plugin {
     plugin("sandbox", Inject::from([SLASH]), |ctx, _: &()| {
         if let Some(settings) = ctx.get::<AppSettings>(SETTINGS) {
@@ -304,18 +464,172 @@ pub fn sandbox() -> Plugin {
             ctx,
             vec![SlashCommand::host(
                 "sandbox",
-                "开关这一页的命令沙箱（/sandbox on|off|status）",
+                "沙箱：审计这一页的工具调用、命令和出网，按策略放行 / 询问 / 阻断",
                 slash_handler(sandbox_command),
             )
-            .takes_args(true)],
+            .aliases(&["audit"])
+            .takes_args(true)
+            .hint("sandbox on", "开这一页的沙箱（审计 + 策略）", false)
+            .hint("sandbox off", "关这一页的沙箱", false)
+            .hint("sandbox graph", "看这一页的行为链路图", false)
+            .hint("sandbox export", "导出审计报告（HTML + 原始记录）", false)
+            .hint("sandbox allow", "这次任务里放行一个域名（通配）", true)
+            .hint("sandbox allow-cmd", "这次任务里放行一类命令（通配）", true)],
         )?;
-        Ok(None)
+        let policy = ctx
+            .clone()
+            .on_waterfall(TOOLS_PRE_EXECUTE, |pre: PreExecute, args| {
+                let mut next = args.next::<PreExecute>().unwrap_or(pre);
+                if next.denial().is_none() {
+                    on_policy(&mut next);
+                }
+                next
+            })?;
+        let all = ctx.effect("sandbox", |scope| {
+            scope.own(policy);
+            Ok(())
+        })?;
+        Ok(Some(all))
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 沙箱开着、限制没开（默认）：一页只有审计和策略，配了 `rules` 的临时 `$DOCK_HOME`。
+    async fn policy_page(config: &str) -> (cordis_base::test_env::EnvScope, Context) {
+        let env = cordis_base::test_env::scoped().home();
+        std::fs::write(cordis_base::config::dock_home().join("config.toml"), config).unwrap();
+        let ctx = Context::new();
+        for p in [
+            crate::session::log::sessions(),
+            crate::host::settings::settings(),
+            crate::host::audit::audit(),
+        ] {
+            ctx.plugin(p, ()).unwrap().wait().await.unwrap();
+        }
+        ctx.require::<AppSettings>(SETTINGS)
+            .unwrap()
+            .set_sandbox(true);
+        (env, ctx)
+    }
+
+    fn pre(ctx: &Context, name: &str, args: serde_json::Value) -> PreExecute {
+        let mut pre = PreExecute::new(name, args.to_string(), "main");
+        crate::tools::registry::with_exec_ctx(ctx, || on_policy(&mut pre));
+        pre
+    }
+
+    const RULES: &str = r#"[sandbox]
+[[sandbox.rules]]
+command = "git push*"
+action = "ask"
+[[sandbox.rules]]
+command = "*rm -rf /*"
+action = "deny"
+[[sandbox.rules]]
+host = "*.blocked.example"
+action = "deny"
+"#;
+
+    /// 沙箱开着、限制没开：关卡照旧（不进系统沙箱、也不替权限档位放行），策略照常落。
+    #[tokio::test]
+    async fn without_confine_the_gate_stays_default_and_rules_apply() {
+        let (_env, ctx) = policy_page(RULES).await;
+        assert_eq!(
+            gate(&ctx, "bash", r#"{"command":"ls"}"#),
+            Gate::Default,
+            "沙箱开着但没开限制：照常过权限门"
+        );
+        let push = pre(
+            &ctx,
+            "bash",
+            serde_json::json!({"command": "git push origin main"}),
+        );
+        assert!(
+            push.ask_reason().unwrap().contains("git push*"),
+            "{:?}",
+            push.ask_reason()
+        );
+        let rm = pre(
+            &ctx,
+            "bash",
+            serde_json::json!({"command": "cd x && rm -rf /"}),
+        );
+        assert!(rm.denial().unwrap().contains("deny"), "{:?}", rm.denial());
+        let fine = pre(&ctx, "bash", serde_json::json!({"command": "cargo build"}));
+        assert!(
+            fine.denial().is_none() && fine.ask_reason().is_none(),
+            "默认放行"
+        );
+        let fetch = pre(
+            &ctx,
+            "web_fetch",
+            serde_json::json!({"url": "https://api.blocked.example/x"}),
+        );
+        assert!(fetch.denial().is_some(), "网址也按主机规则判");
+        let nav = pre(
+            &ctx,
+            "mcp_browser__browser_navigate",
+            serde_json::json!({"url": "https://www.example.org/"}),
+        );
+        assert!(nav.denial().is_none());
+    }
+
+    /// 这次任务临时放行的排在配置规则前面；沙箱关了就作废。沙箱关着时策略不落。
+    #[tokio::test]
+    async fn task_grants_override_config_rules_until_the_sandbox_closes() {
+        let (_env, ctx) = policy_page(RULES).await;
+        let out = sandbox_command(&ctx, "allow-cmd git push origin main");
+        assert!(
+            matches!(out, SlashOutcome::Applied(ref t) if t.contains("放行")),
+            "{out:?}"
+        );
+        let push = pre(
+            &ctx,
+            "bash",
+            serde_json::json!({"command": "git push origin main"}),
+        );
+        assert!(push.ask_reason().is_none(), "临时放行盖过配置的 ask");
+        assert!(
+            crate::host::audit::check_host(&ctx, "x.blocked.example", Some(443))
+                .await
+                .is_some(),
+            "出口代理按同一套规则阻断"
+        );
+        sandbox_command(&ctx, "allow x.blocked.example");
+        assert!(
+            crate::host::audit::check_host(&ctx, "x.blocked.example", Some(443))
+                .await
+                .is_none()
+        );
+
+        sandbox_command(&ctx, "off");
+        let push = pre(&ctx, "bash", serde_json::json!({"command": "rm -rf /"}));
+        assert!(push.denial().is_none(), "沙箱关着：策略不落");
+        sandbox_command(&ctx, "on");
+        let push = pre(
+            &ctx,
+            "bash",
+            serde_json::json!({"command": "git push origin main"}),
+        );
+        assert!(push.ask_reason().is_some(), "重开之后，上次的临时放行作废");
+    }
+
+    /// `network = "proxy"`：限制开着时命令只能连本机（出网只能经审计代理）。
+    #[tokio::test]
+    async fn proxy_network_reaches_the_command_policy() {
+        let (_env, ctx) = policy_page("[sandbox]\nconfine = true\nnetwork = \"proxy\"\n").await;
+        let p = policy(&ctx, Access::WorkspaceWrite);
+        assert!(p.network() && p.proxy_only());
+        std::fs::write(
+            cordis_base::config::dock_home().join("config.toml"),
+            "[sandbox]\nconfine = true\nnetwork = \"off\"\n",
+        )
+        .unwrap();
+        assert!(!policy(&ctx, Access::WorkspaceWrite).network());
+    }
 
     #[test]
     fn home_expansion_only_takes_absolute_or_tilde() {
@@ -346,8 +660,10 @@ mod tests {
     use cordis_base::acp::PermissionOptionKind;
     use cordis_base::types::{ToolCall, ToolResult};
 
-    /// 一页：会话 cwd 钉在临时目录里的工作区，询问档，沙箱开着。
+    /// 一页：会话 cwd 钉在临时目录里的工作区，询问档，沙箱开着、限制开着（`confine = true`，
+    /// 写在临时的 `$DOCK_HOME/config.toml` 里）。
     struct Page {
+        _env: cordis_base::test_env::EnvScope,
         _dir: tempfile::TempDir,
         ctx: Context,
         ws: PathBuf,
@@ -356,6 +672,12 @@ mod tests {
     }
 
     fn page() -> Page {
+        let env = cordis_base::test_env::scoped().home();
+        std::fs::write(
+            cordis_base::config::dock_home().join("config.toml"),
+            "[sandbox]\nconfine = true\n",
+        )
+        .unwrap();
         let dir = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(dir.path()).unwrap();
         let ws = root.join("ws");
@@ -376,6 +698,7 @@ mod tests {
         );
         let tools = Tools::workspace(ctx.clone());
         Page {
+            _env: env,
             _dir: dir,
             ctx,
             ws,

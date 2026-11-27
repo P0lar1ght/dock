@@ -489,62 +489,6 @@ struct FileConfig {
     /// `[approval]` — 智能授权。
     #[serde(default)]
     approval: ApprovalSection,
-    /// `[audit]`：审计（默认关）。
-    #[serde(default)]
-    audit: AuditSection,
-}
-
-/// `[audit]`：审计。见 [`AuditConfig`]。
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
-#[serde(default)]
-struct AuditSection {
-    enabled: Option<bool>,
-    decrypt: Option<bool>,
-    body_cap_kb: Option<u64>,
-    redact_secrets: Option<bool>,
-}
-
-/// 审计设置。**只认用户配置**（`$DOCK_HOME/config.toml`）：项目里的 `.dock/config.toml`
-/// 是仓库作者写的，不能替你关掉审计、或者让它停止遮住凭据。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AuditConfig {
-    /// 新开的页默认开不开（`/audit on|off` 按页切）。
-    pub enabled: bool,
-    /// 命令的 HTTPS 在出口代理处解密（用 Dock 自己的根证书）。
-    pub decrypt: bool,
-    /// 请求 / 响应正文最多记这么多 KB（之后只计长度）。
-    pub body_cap_kb: u64,
-    /// `Authorization`、`Cookie` 这类凭据头遮住（留长度和哈希）。
-    pub redact_secrets: bool,
-}
-
-impl Default for AuditConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            decrypt: true,
-            body_cap_kb: 256,
-            redact_secrets: true,
-        }
-    }
-}
-
-pub fn load_audit_config() -> AuditConfig {
-    load_audit_config_from(&dock_home().join("config.toml"))
-}
-
-pub fn load_audit_config_from(path: &Path) -> AuditConfig {
-    let d = AuditConfig::default();
-    let Some(file) = read_file(path) else {
-        return d;
-    };
-    let a = file.audit;
-    AuditConfig {
-        enabled: a.enabled.unwrap_or(d.enabled),
-        decrypt: a.decrypt.unwrap_or(d.decrypt),
-        body_cap_kb: a.body_cap_kb.unwrap_or(d.body_cap_kb).clamp(0, 64 * 1024),
-        redact_secrets: a.redact_secrets.unwrap_or(d.redact_secrets),
-    }
 }
 
 /// `[approval]`：智能授权。
@@ -1329,7 +1273,11 @@ pub fn load_web_fetch_config() -> WebFetchToolConfig {
     load_web_fetch_config_from(&catalog_paths())
 }
 
-/// `[sandbox]`：bash / monitor 的命令在系统沙箱里跑（`dock-sandbox`）。
+/// `[sandbox]`：沙箱。开着的页（`/sandbox on|off` 按页切）：
+/// - **审计**：工具调用、命令、命令和浏览器的出网都记下来（`docs/AUDIT.md`）。
+/// - **策略**：`[[sandbox.rules]]` 按出网目的地 / 命令放行、询问或阻断；默认放行。
+/// - **限制**（默认不限）：`confine = true` 时命令在系统沙箱里跑（`dock-sandbox`），
+///   `network` 决定它能不能出网、能不能绕过审计代理直连。
 ///
 /// **只认用户级** `$DOCK_HOME/config.toml`：项目里的 `.dock/config.toml` 是仓库作者写的，
 /// 不能替用户关掉或放宽沙箱。单独解析这一段：这里写错不连累整份配置（`FileConfig` 一处
@@ -1338,8 +1286,16 @@ pub fn load_web_fetch_config() -> WebFetchToolConfig {
 pub struct SandboxConfig {
     /// 新开的页默认开不开（`/sandbox` 可以按页临时切）。
     pub enabled: bool,
-    /// 沙箱里的命令能不能联网。
-    pub network: bool,
+    /// 命令的 HTTPS 在出口代理处解密（Dock 自己的根证书）。
+    pub decrypt: bool,
+    /// 请求 / 响应正文最多记这么多 KB（之后只计长度）。
+    pub body_cap_kb: u64,
+    /// `Authorization`、`Cookie` 这类凭据头遮住（留长度和哈希）。
+    pub redact_secrets: bool,
+    /// 命令在系统沙箱里跑（只能写工作区等、读不到密钥）。默认不限制。
+    pub confine: bool,
+    /// 命令能不能出网（`confine` 时由内核强制）。
+    pub network: SandboxNetwork,
     /// 依赖缓存（`~/.cargo/registry`、`~/.npm`、`~/.cache`…）可不可写。
     pub build_caches: bool,
     /// 额外可写的目录：绝对路径或 `~/` 开头。
@@ -1348,17 +1304,51 @@ pub struct SandboxConfig {
     pub deny_read: Vec<String>,
     /// 默认会从命令环境里去掉的变量（名字带 KEY / TOKEN / SECRET / PASSWORD…）里要留下的。
     pub keep_env: Vec<String>,
+    /// 策略规则，按顺序第一条命中的算；都不中就放行。
+    pub rules: Vec<SandboxRule>,
+}
+
+/// 沙箱里的命令能不能出网。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SandboxNetwork {
+    /// 照常（走审计代理的被记下来，直连的看不到）。
+    Allow,
+    /// 只能经审计代理出网：直连连不上（`confine` 时内核挡），出网一条不漏。
+    Proxy,
+    /// 不联网。
+    Off,
+}
+
+/// 一条策略规则：`host`（出网目的地，`*.example.com` 这样的通配）或 `command`（命令，
+/// 整条匹配的通配）二选一，命中了怎么办。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SandboxRule {
+    pub host: Option<String>,
+    pub command: Option<String>,
+    pub action: RuleAction,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleAction {
+    Allow,
+    Ask,
+    Deny,
 }
 
 impl Default for SandboxConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            network: true,
+            decrypt: true,
+            body_cap_kb: 256,
+            redact_secrets: true,
+            confine: false,
+            network: SandboxNetwork::Allow,
             build_caches: true,
             writable_roots: Vec::new(),
             deny_read: Vec::new(),
             keep_env: Vec::new(),
+            rules: Vec::new(),
         }
     }
 }
@@ -1372,11 +1362,24 @@ struct SandboxFile {
 #[derive(Debug, Default, Deserialize)]
 struct SandboxSection {
     enabled: Option<bool>,
-    network: Option<bool>,
+    decrypt: Option<bool>,
+    body_cap_kb: Option<u64>,
+    redact_secrets: Option<bool>,
+    confine: Option<bool>,
+    /// `"allow"` / `"proxy"` / `"off"`；布尔值也认（true = allow、false = off）。
+    network: Option<toml::Value>,
     build_caches: Option<bool>,
     writable_roots: Option<Vec<String>>,
     deny_read: Option<Vec<String>>,
     keep_env: Option<Vec<String>>,
+    rules: Option<Vec<RuleRow>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RuleRow {
+    host: Option<String>,
+    command: Option<String>,
+    action: String,
 }
 
 /// Live-read `[sandbox]` from `$DOCK_HOME/config.toml` only.
@@ -1391,13 +1394,48 @@ pub fn load_sandbox_config_from(path: &Path) -> SandboxConfig {
         .map(|f| f.sandbox)
         .unwrap_or_default();
     let d = SandboxConfig::default();
+    let network = match section.network {
+        Some(toml::Value::Boolean(false)) => SandboxNetwork::Off,
+        Some(toml::Value::String(s)) => match s.trim() {
+            "proxy" => SandboxNetwork::Proxy,
+            "off" | "none" => SandboxNetwork::Off,
+            _ => SandboxNetwork::Allow,
+        },
+        _ => d.network,
+    };
+    // 写错的规则（没有 host / command、action 不认识）整条不要：宁可少一条，不猜。
+    let rules = section
+        .rules
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|r| {
+            let action = match r.action.trim() {
+                "allow" => RuleAction::Allow,
+                "ask" => RuleAction::Ask,
+                "deny" => RuleAction::Deny,
+                _ => return None,
+            };
+            let host = r.host.filter(|h| !h.trim().is_empty());
+            let command = r.command.filter(|c| !c.trim().is_empty());
+            (host.is_some() != command.is_some()).then_some(SandboxRule {
+                host,
+                command,
+                action,
+            })
+        })
+        .collect();
     SandboxConfig {
         enabled: section.enabled.unwrap_or(d.enabled),
-        network: section.network.unwrap_or(d.network),
+        decrypt: section.decrypt.unwrap_or(d.decrypt),
+        body_cap_kb: section.body_cap_kb.unwrap_or(d.body_cap_kb).min(64 * 1024),
+        redact_secrets: section.redact_secrets.unwrap_or(d.redact_secrets),
+        confine: section.confine.unwrap_or(d.confine),
+        network,
         build_caches: section.build_caches.unwrap_or(d.build_caches),
         writable_roots: section.writable_roots.unwrap_or_default(),
         deny_read: section.deny_read.unwrap_or_default(),
         keep_env: section.keep_env.unwrap_or_default(),
+        rules,
     }
 }
 
@@ -1428,9 +1466,61 @@ mod sandbox_config_tests {
         .unwrap();
         let cfg = load_sandbox_config_from(&path);
         assert!(cfg.enabled);
-        assert!(!cfg.network);
+        assert_eq!(cfg.network, SandboxNetwork::Off, "布尔值照样认");
         assert!(cfg.build_caches);
+        assert!(
+            !cfg.confine && cfg.decrypt && cfg.redact_secrets,
+            "默认不限制、解密、遮凭据"
+        );
         assert_eq!(cfg.writable_roots, vec!["~/build".to_string()]);
+    }
+
+    /// 策略规则：host / command 二选一、action 认得的才收；`network` 认三档。
+    #[test]
+    fn rules_and_network_modes_parse() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"[sandbox]
+confine = true
+network = "proxy"
+body_cap_kb = 99999999
+[[sandbox.rules]]
+host = "*.corp.example"
+action = "deny"
+[[sandbox.rules]]
+command = "git push*"
+action = "ask"
+[[sandbox.rules]]
+host = "a"
+command = "b"
+action = "deny"
+[[sandbox.rules]]
+host = "c"
+action = "maybe"
+"#,
+        )
+        .unwrap();
+        let cfg = load_sandbox_config_from(&path);
+        assert!(cfg.confine);
+        assert_eq!(cfg.network, SandboxNetwork::Proxy);
+        assert_eq!(cfg.body_cap_kb, 64 * 1024);
+        assert_eq!(
+            cfg.rules,
+            vec![
+                SandboxRule {
+                    host: Some("*.corp.example".into()),
+                    command: None,
+                    action: RuleAction::Deny
+                },
+                SandboxRule {
+                    host: None,
+                    command: Some("git push*".into()),
+                    action: RuleAction::Ask
+                },
+            ]
+        );
     }
 
     /// 别的段写错了（整份 `FileConfig` 解析失败）不连累沙箱配置。
@@ -3410,22 +3500,6 @@ default = "grok-4"
         );
         std::fs::write(&user, "[approval]\nmodel = \"\"\n").unwrap();
         assert_eq!(load_approval_model_from(&user), None);
-    }
-
-    /// `[audit]` 默认关、解密、遮凭据；写了的键覆盖默认值，正文上限有封顶。
-    #[test]
-    fn audit_config_defaults_and_overrides() {
-        let dir = tempfile::tempdir().unwrap();
-        let user = dir.path().join("config.toml");
-        assert_eq!(load_audit_config_from(&user), AuditConfig::default());
-        std::fs::write(
-            &user,
-            "[audit]\nenabled = true\ndecrypt = false\nbody_cap_kb = 99999999\n",
-        )
-        .unwrap();
-        let cfg = load_audit_config_from(&user);
-        assert!(cfg.enabled && !cfg.decrypt && cfg.redact_secrets);
-        assert_eq!(cfg.body_cap_kb, 64 * 1024);
     }
 
     #[test]

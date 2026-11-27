@@ -83,7 +83,8 @@ pub(super) fn call_params(public: &str, arguments: &str, local: bool) -> serde_j
     // 只给它：目录路径不发给第三方服务器。
     if public.starts_with(crate::tools::browser::BROWSER_MCP_PREFIX) {
         let dir = crate::host::audit::calling_audit_dir();
-        return protocol::with_audit(params, dir.as_deref());
+        let params = protocol::with_audit(params, dir.as_deref());
+        return protocol::with_policy(params, &crate::host::audit::calling_host_rules());
     }
     params
 }

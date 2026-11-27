@@ -1,20 +1,66 @@
-# 命令沙箱
+# 沙箱
 
-`bash` / `monitor` 跑的命令可以放进系统沙箱：
-能写的只有工作区和几处临时 / 缓存目录，
-读不到密钥，改不了 `.git/hooks`、`.git/config`、`.dock`。
-沙箱里的命令不再弹权限框。
-要出沙箱的命令照常问你。
+沙箱 = 隔离 + 观测 + 控制 + 审计。它**不减少 agent 能做的事**：
+工具一颗不少，命令照常跑，连得上的照样连得上。
+它让发生的事看得见、管得住、证明得了；真要限制时再按策略加，而不是一开就全面上锁。
 
-默认关。`/sandbox` 开当前页，
+按页开：`/sandbox on|off`（别名 `/audit`），
 `$DOCK_HOME/config.toml` 写 `[sandbox] enabled = true` 让新开的页默认开。
+关着时什么都不做，开销为零。
 
-引擎在 crate `dock-sandbox`（不含插件），
-接进 Dock 的是 spine 的 `sandbox` 插件（`cordis-spine/src/host/sandbox.rs`）。
+引擎在 crate `dock-sandbox`（不含插件）：系统沙箱后端、策略规则匹配、审计（`audit` 模块）。
+接进 Dock 的是 spine 的 `sandbox` 插件（`cordis-spine/src/host/sandbox.rs`）
+和 `audit` 插件（`cordis-spine/src/host/audit.rs`）。
 
 ## 开着时什么变了
 
-| 场景 | 沙箱关 | 沙箱开 |
+| | 做什么 | 默认 |
+|---|---|---|
+| 观测 / 审计 | 工具调用、命令、命令和浏览器的出网（HTTPS 解密）记进独立的审计日志 | 开 |
+| 控制 | `[[sandbox.rules]]` 按出网目的地 / 命令放行、询问、阻断 | 没有规则 = 全部放行 |
+| 限制 | 命令进系统沙箱：只能写工作区、读不到密钥；网络可只走审计代理 | 关（`confine = true` 开） |
+| 隔离 | 每页的工作目录（选定的项目目录）就是沙箱的工作区 | 同现在 |
+
+- 权限档位（询问 / 智能授权 / 始终允许）照旧：沙箱不替它放行。
+  例外是开了限制时，在系统沙箱里跑的命令不再弹框（它已经被关在里面）。
+- 审计、链路图、报告：见 [AUDIT](AUDIT.md)。
+
+## 控制：策略规则
+
+```toml
+[[sandbox.rules]]
+host = "*.corp.example"   # 出网目的地（命令经审计代理的、web_fetch、浏览器）
+action = "deny"           # allow | ask | deny
+
+[[sandbox.rules]]
+command = "git push*"     # 命令（整条匹配的 * 通配）
+action = "ask"
+```
+
+- 按顺序第一条命中的算；都不中就放行。
+- `host`：`*.example.com` 也管 `example.com` 本身，大小写不敏感。落在三处：
+  - 命令的出网：出口代理连之前判。`deny` 回 403，`ask` 在发起命令的那一页弹确认（键 `net:<主机>`，「始终允许」就是这次任务放行了）。
+  - `web_fetch`、浏览器跳转（`browser_open` / `browser_navigate`）的网址：`tools/pre-execute` 上判。
+  - 浏览器标签页里的子请求（XHR、脚本、图片）：`Network.setBlockedURLs`，只认 `allow` / `deny`（子请求问不了人）。
+- `command`：`bash` / `monitor` 的命令，`tools/pre-execute` 上判。`deny` 拒掉这次调用，`ask` 要人点头（自动批准不算数）。
+- 这次任务临时放行：`/sandbox allow <域名通配>`、`/sandbox allow-cmd <命令通配>`。
+  排在配置的规则前面，沙箱关掉就作废，审计里记一条。
+- 写错的规则（`host` / `command` 两个都写或都不写、`action` 不认识）整条不要。
+
+## 限制（`confine = true`）
+
+开了限制，`bash` / `monitor` 的命令在系统沙箱里跑，沙箱里的命令不再弹权限框；
+要出沙箱的命令（模型传 `"sandbox": false`）照常问你。
+
+`network` 决定沙箱里的命令能不能出网：
+
+| `network` | 效果 |
+|---|---|
+| `"allow"`（默认） | 照常出网；走审计代理的记下来，直连的看不到 |
+| `"proxy"` | 只能连本机：出网只能经审计代理，一条不漏。本机的开发服务器照常连、照常监听。macOS 由内核挡住直连；Linux 上暂不由内核强制（`/sandbox` 状态里会写） |
+| `"off"` | 不联网 |
+
+| 场景 | 限制关 | 限制开 |
 |---|---|---|
 | `bash` / `monitor`（询问档） | 每条弹框 | 不弹，在沙箱里跑 |
 | 模型传 `"sandbox": false` | 同上 | 弹框，写明「不进沙箱运行」；批准后在沙箱外跑 |
@@ -22,17 +68,14 @@
 | 写工作区外、或写 `.git/hooks` 等受保护路径 | 弹框 | 弹框 |
 | `read_file` / `grep` / `glob` / `list_dir` 读 `~/.ssh` 等 | 不弹 | 弹框 |
 | 计划模式、只读子代理、`/btw` 里的命令 | 只读命令直接跑，别的必须你点头 | 全部在**只读沙箱**里跑（只能写临时目录、不联网），不弹 |
-| 自动批准档 | 全放行 | 沙箱里照样跑；出沙箱也自动放行 |
 
-命令像是被沙箱拦下时（退出码非零、输出里有
-`Operation not permitted` 之类），结果末尾会接一句
-`[沙箱] …`，告诉模型可以加 `"sandbox": false` 重跑。
+命令像是被沙箱拦下时（退出码非零、输出里有 `Operation not permitted` 之类），
+结果末尾会接一句 `[沙箱] …`，告诉模型可以加 `"sandbox": false` 重跑。
 
-后端不可用时（见下），开着也不起作用：
-命令照常走权限门，不会不加防护地自动跑。
+后端不可用时，开着限制也不起作用：命令照常走权限门，不会不加防护地自动跑。
 `/sandbox status` 会说原因。
 
-## 边界
+### 边界
 
 **可写**
 
@@ -66,7 +109,7 @@ Dock 下次启动照 `.dock/config.toml` 拉起 MCP 服务器。
 - `~/.netrc`、`~/.pypirc`、`~/.docker/config.json`、`~/.config/gh/hosts.yml`、
   `~/.git-credentials`、cargo 的 credentials。
 - `$DOCK_HOME` 的 `secrets.json`、`mcp_credentials.json`、`credentials/`、
-  `devices.json`、`browser/user-data`（内置浏览器的登录态）。
+  `devices.json`、`browser/user-data`（内置浏览器的登录态）、`audit/ca/ca.key.pem`（审计根证书的私钥）。
 - `[sandbox] deny_read` 里加的路径。
 
 没收 `~/.npmrc`：国内常在里面配镜像源，读不到 `npm install` 会直接报错。
@@ -86,7 +129,7 @@ Linux 的会话总线（`$XDG_RUNTIME_DIR/bus`）。
 **网络**：默认放行（`network = false` 关掉）。
 只读沙箱一律不联网。
 
-## 后端
+### 后端
 
 | 系统 | 机制 | 需要 |
 |---|---|---|
@@ -116,7 +159,7 @@ Landlock 只能「放行」，所以：
   改为命令前拍快照、跑完（含后台任务跑完）比对，被改了就还原并在结果里报告
   （`dock-sandbox/src/guard.rs`）。
 
-## 已知限制
+### 已知限制
 
 `/sandbox status` 会列出这台机器上的限制。
 
@@ -144,17 +187,27 @@ Landlock 只能「放行」，所以：
 ## 配置
 
 只认 `$DOCK_HOME/config.toml`（项目 `.dock/config.toml` 里的 `[sandbox]` 不认：
-那是仓库作者写的，不能替你关掉或放宽沙箱）。
-每次跑命令现读，改了不用重启。
+那是仓库作者写的，不能替你关掉或放宽沙箱）。规则和限制每次现读，改了不用重启；
+审计的 `decrypt` / `body_cap_kb` / `redact_secrets` 在出口代理第一次起时读，改了要重启。
 
 ```toml
 [sandbox]
 enabled = false          # 新开的页默认开不开；/sandbox 按页切
-network = true           # 沙箱里的命令能不能联网
+# 审计（docs/AUDIT.md）
+decrypt = true           # 命令的 HTTPS 在出口代理处解密
+body_cap_kb = 256        # 正文最多记多少 KB
+redact_secrets = true    # 遮住 Authorization / Cookie 这类凭据头
+# 限制（默认不限）
+confine = false          # 命令进系统沙箱
+network = "allow"        # "allow" | "proxy" | "off"（true / false 也认）
 build_caches = true      # 依赖缓存可不可写
 writable_roots = []      # 额外可写：绝对路径或 ~/ 开头
 deny_read = []           # 额外读不到：绝对路径或 ~/ 开头
 keep_env = []            # 默认会去掉的环境变量里要留下的（精确的变量名）
+
+[[sandbox.rules]]        # 策略，见上
+host = "*.corp.example"
+action = "deny"
 ```
 
 ## 手动试

@@ -7,14 +7,15 @@
 审计不减少 agent 能做的事：工具一颗不少，命令照常跑，连不上的不会因为审计而连不上。
 它只是看得见、记得住、证明得了。
 
-引擎在 crate `dock-audit`（不含插件），
+审计是[沙箱](SANDBOX.md)的观测与审计部分：开着沙箱的页才记。
+引擎在 crate `dock-sandbox` 的 `audit` 模块（不含插件），
 接进 Dock 的是 spine 的 `audit` 插件（`cordis-spine/src/host/audit.rs`）。
 
 ## 开关
 
-- 默认关。`/audit on` 开当前页，`/audit off` 关。
-- `$DOCK_HOME/config.toml` 写 `[audit] enabled = true`，新开的页默认开（插件挂载时读一次）。
-- 只认用户配置：项目 `.dock/config.toml` 里的 `[audit]` 不认，仓库作者不能替你关掉审计或者停止遮凭据。
+- 跟着沙箱走：`/sandbox on` 开当前页（别名 `/audit`），`/sandbox off` 关。
+- `$DOCK_HOME/config.toml` 写 `[sandbox] enabled = true`，新开的页默认开。
+- 只认用户配置：项目 `.dock/config.toml` 里的 `[sandbox]` 不认，仓库作者不能替你关掉审计或者停止遮凭据。
 - 子代理（含工作流派的）记进派它那一页的审计。
 - **关着时什么都不做**：不起出口代理、不注入环境变量、不写盘，开销为零。
 
@@ -39,10 +40,11 @@
 | 内置浏览器 | CDP Network 事件（浏览器服务自己写 `browser.jsonl`） | 方法、网址、状态、头、远端 IP；页面文档、XHR、fetch 的正文开头 |
 | Dock 自己（模型请求、web_fetch、MCP HTTP） | 工具调用记录 | 模型请求本身在聊天记录里，不重复存 |
 
-### 命令的出口代理（`dock-audit` 的 `proxy`）
+### 命令的出口代理（`dock_sandbox::audit::proxy`）
 
 - HTTP 代理协议，只听 `127.0.0.1`，每条命令一个口，流量记录带上那条命令的 job id。
-- 环境变量（`dock-audit` 的 `env`）：
+- 出网先过沙箱策略（`[[sandbox.rules]]` 的 `host`，见 [SANDBOX](SANDBOX.md)）：`deny` 回 403 并记一条，`ask` 在发起命令的那一页问。
+- 环境变量（`dock_sandbox::audit::env`）：
   - 代理：`HTTP(S)_PROXY` / `ALL_PROXY` 大小写两套、`NO_PROXY`、`NODE_USE_ENV_PROXY=1`。
   - 证书：`SSL_CERT_FILE` / `CURL_CA_BUNDLE` / `REQUESTS_CA_BUNDLE` / `GIT_SSL_CAINFO` / `CARGO_HTTP_CAINFO` / `PIP_CERT` / `npm_config_cafile` 指向「系统根证书 + Dock 根证书」，`NODE_EXTRA_CA_CERTS` 指向 Dock 根证书。
   - 写成命令前面的 `export …;`：命令是 `bash -lc` 起的，`~/.bash_profile` 里自己 export 的代理会盖掉进程环境。
@@ -74,10 +76,10 @@
 
 ## 看和导出
 
-- `/audit`：状态（记录在哪、多少条、哈希链完不完好、出口代理、直通名单）。
-- `/audit graph`：链路图。会话 → 工具 → 命令里的程序 → 目的主机，边上是次数和流量，
+- `/sandbox`：状态（记录在哪、多少条、哈希链完不完好、出口代理、直通名单）。
+- `/sandbox graph`：链路图。会话 → 工具 → 命令里的程序 → 目的主机，边上是次数和流量，
   主机多了每个来源只列流量最大的 8 个。终端里是缩进树，后面附 Mermaid（桌面端画成图）。
-- `/audit export`：`<审计目录>/export-<时刻>/`，里面有：
+- `/sandbox export`：`<审计目录>/export-<时刻>/`，里面有：
   - `report.html`：自包含、不带脚本、打开不出网。概况、完整性、链路图（离线渲染成 SVG）、没解密的连接和原因、时间线；每次出网可以展开看头和正文开头。
   - 原始 `*.jsonl`、`bodies/`、`verify.txt`。
 
@@ -85,22 +87,17 @@
 
 - 不认代理环境变量、自己直连的程序看不到（老版本 Node 的原生 fetch、写死地址的二进制）。下一步：Linux 用 seccomp 用户通知观察 `connect()`，macOS 扫命令进程树的 socket。
 - MCP stdio 服务器、LSP、cua-driver 驱动的桌面应用不经出口代理。
-- 改了 `[audit]` 的 `decrypt` / `body_cap_kb` / `redact_secrets` 要重启 Dock（出口代理第一次用时按当时的配置起）。
+- 改了 `[sandbox]` 的 `decrypt` / `body_cap_kb` / `redact_secrets` 要重启 Dock（出口代理第一次用时按当时的配置起）。
+- 不认代理环境变量的程序：开了限制并设 `network = "proxy"` 时（macOS）它们连不上，出网一条不漏；没开时看不到。
 
 ## 配置
 
-```toml
-[audit]
-enabled = false        # 新开的页默认开不开；/audit on|off 按页切
-decrypt = true         # 命令的 HTTPS 在出口代理处解密
-body_cap_kb = 256      # 正文最多记多少 KB
-redact_secrets = true  # 遮住 Authorization / Cookie 这类凭据头
-```
+在 `[sandbox]` 里（见 [SANDBOX](SANDBOX.md)「配置」）：`decrypt`、`body_cap_kb`、`redact_secrets`。
 
 ## 手动试
 
 ```sh
-cargo run -p dock-audit --example egress -- curl -s https://example.com -o /dev/null
+cargo run -p dock-sandbox --example egress -- curl -s https://example.com -o /dev/null
 ```
 
 跑完列出出网、打印链路树，并导出一份报告。

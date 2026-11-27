@@ -883,7 +883,7 @@ dependencies = [
  "base64 0.22.1",
  "chromiumoxide",
  "cordis-base",
- "dock-audit",
+ "dock-sandbox",
  "futures-util",
  "serde_json",
  "tempfile",
@@ -948,7 +948,6 @@ dependencies = [
  "cordis",
  "cordis-base",
  "croner",
- "dock-audit",
  "dock-memory",
  "dock-sandbox",
  "futures-util",
@@ -1408,30 +1407,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dock-audit"
-version = "0.3.0"
-dependencies = [
- "bytes",
- "http",
- "http-body",
- "http-body-util",
- "hyper",
- "hyper-util",
- "mermaid-to-svg",
- "native-tls",
- "rcgen",
- "rustls",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tempfile",
- "time",
- "tokio",
- "tokio-native-tls",
- "tokio-rustls",
-]
-
-[[package]]
 name = "dock-memory"
 version = "0.3.0"
 dependencies = [
@@ -1455,12 +1430,29 @@ dependencies = [
 
 [[package]]
 name = "dock-sandbox"
-version = "0.3.0-rc.3"
+version = "0.3.0"
 dependencies = [
+ "bytes",
+ "http",
+ "http-body",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "landlock",
  "libc",
+ "mermaid-to-svg",
+ "native-tls",
+ "rcgen",
+ "rustls",
  "seccompiler",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
  "tempfile",
+ "time",
+ "tokio",
+ "tokio-native-tls",
+ "tokio-rustls",
 ]
 
 [[package]]

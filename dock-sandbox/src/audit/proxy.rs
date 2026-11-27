@@ -31,13 +31,25 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::ca::Authority;
-use crate::record::{headers, now_ms, Captured, Flow, Message};
+use crate::audit::ca::Authority;
+use crate::audit::record::{headers, now_ms, Captured, Flow, Message};
 
 /// 每条流量记录交给谁（spine 那边落盘）。必须很快返回：在代理的读写路径上调用。
 pub type Sink = Arc<dyn Fn(Flow) + Send + Sync>;
 /// 学到了新的直通主机（客户端不信 Dock 根证书）：交给调用方落盘，下次启动还记得。
 pub type Learn = Arc<dyn Fn(&str, &str) + Send + Sync>;
+
+/// 一次出网放不放（沙箱策略）：`(tag, host, port)` → `None` 放行，`Some(原因)` 阻断。
+/// 要问人的在这里等人点头（异步）。没有关卡就一律放行。
+pub type Gate = Arc<
+    dyn Fn(
+            &str,
+            &str,
+            u16,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<String>> + Send>>
+        + Send
+        + Sync,
+>;
 
 type ProxyBody = BoxBody<Bytes, hyper::Error>;
 
@@ -127,6 +139,7 @@ pub struct Proxy {
     sink: Sink,
     passthrough: Mutex<HashSet<String>>,
     learn: Option<Learn>,
+    gate: Option<Gate>,
 }
 
 /// 一个监听口；drop 就不再接新连接（已经连上的照常跑完）。
@@ -150,13 +163,40 @@ impl Proxy {
         passthrough: impl IntoIterator<Item = String>,
         learn: Option<Learn>,
     ) -> Arc<Self> {
+        Self::with_gate(ca, opts, sink, passthrough, learn, None)
+    }
+
+    /// 同 [`Proxy::new`]，每次出网先过 `gate`（沙箱策略）。
+    pub fn with_gate(
+        ca: Option<Arc<Authority>>,
+        opts: Options,
+        sink: Sink,
+        passthrough: impl IntoIterator<Item = String>,
+        learn: Option<Learn>,
+        gate: Option<Gate>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             ca,
             opts,
             sink,
             passthrough: Mutex::new(passthrough.into_iter().collect()),
             learn,
+            gate,
         })
+    }
+
+    /// 过一遍关卡：`Some(原因)` = 阻断（顺带记一条），`None` = 放行。
+    async fn blocked(
+        &self,
+        tag: &str,
+        scheme: &'static str,
+        host: &str,
+        port: u16,
+    ) -> Option<String> {
+        let gate = self.gate.as_ref()?;
+        let why = gate(tag, host, port).await?;
+        self.emit_error(tag, scheme, host, port, format!("沙箱策略阻断：{why}"));
+        Some(why)
     }
 
     /// 在 `127.0.0.1` 上开一个口，进来的流量都记成 `tag` 的。
@@ -213,6 +253,12 @@ impl Proxy {
             let Some((host, port)) = authority(req.uri(), 443) else {
                 return text(StatusCode::BAD_REQUEST, "CONNECT 要 host:port");
             };
+            if let Some(why) = self.blocked(&tag, "https", &host, port).await {
+                return text(
+                    StatusCode::FORBIDDEN,
+                    &format!("Dock 沙箱策略阻断了 {host}:{port}：{why}"),
+                );
+            }
             let ua = req
                 .headers()
                 .get(USER_AGENT)
@@ -430,6 +476,12 @@ impl Proxy {
                 "代理请求要完整网址（http://host/path）",
             );
         };
+        if let Some(why) = self.blocked(&tag, "http", &host, port).await {
+            return text(
+                StatusCode::FORBIDDEN,
+                &format!("Dock 沙箱策略阻断了 {host}:{port}：{why}"),
+            );
+        }
         let tcp = match self.connect(&host, port).await {
             Ok(s) => s,
             Err(e) => {

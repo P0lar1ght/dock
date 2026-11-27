@@ -14,6 +14,9 @@ use crate::paths::{self, both_spellings, dedup, real_path, within};
 pub struct Settings {
     /// 沙箱里的命令能不能联网。
     pub network: bool,
+    /// 联网时只许连本机（回环）：出网只能经本机上的审计代理，直连远端连不上。
+    /// 本机的开发服务器照常连得上、照常能监听。
+    pub proxy_only: bool,
     /// 依赖缓存（`~/.cargo/registry`、`~/.npm`、`~/.cache`…）可不可写。
     pub build_caches: bool,
     /// 额外可写的目录（绝对路径）。
@@ -28,6 +31,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             network: true,
+            proxy_only: false,
             build_caches: true,
             writable_roots: Vec::new(),
             deny_read: Vec::new(),
@@ -93,6 +97,7 @@ pub struct Policy {
     deny: Vec<PathBuf>,
     sockets: Vec<PathBuf>,
     network: bool,
+    proxy_only: bool,
     keep_env: Vec<String>,
 }
 
@@ -177,6 +182,7 @@ impl Policy {
             deny,
             sockets,
             network: access == Access::WorkspaceWrite && settings.network,
+            proxy_only: settings.proxy_only,
             keep_env: settings.keep_env.clone(),
         }
     }
@@ -212,6 +218,11 @@ impl Policy {
 
     pub fn network(&self) -> bool {
         self.network
+    }
+
+    /// 联网时只许连本机（见 [`Settings::proxy_only`]）。
+    pub fn proxy_only(&self) -> bool {
+        self.network && self.proxy_only
     }
 
     pub(crate) fn keep_env(&self) -> &[String] {
@@ -388,6 +399,11 @@ mod tests {
         let p = Policy::build(Access::WorkspaceWrite, &f.ws, &settings, &f.host);
         assert!(p.denies_read(&f.home.join(".ssh/id_ed25519")));
         assert!(p.denies_read(&f.home.join(".dock/secrets.json")));
+        assert!(p.denies_read(&f.home.join(".dock/audit/ca/ca.key.pem")));
+        assert!(
+            !p.denies_read(&f.home.join(".dock/audit/ca/bundle.pem")),
+            "证书包命令要读"
+        );
         assert!(!p.allows_write(&f.home.join(".ssh/authorized_keys")));
         assert!(!p.allows_write(&f.home.join(".zshrc")));
         assert!(p.allows_write(&f.home.join("notes.txt")));
@@ -420,6 +436,7 @@ mod tests {
         let extra = f.root.join("target-dir");
         let settings = Settings {
             network: false,
+            proxy_only: false,
             build_caches: false,
             writable_roots: vec![extra.clone()],
             deny_read: vec![f.ws.join(".env")],

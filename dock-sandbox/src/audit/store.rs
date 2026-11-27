@@ -15,7 +15,7 @@ use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 
-use crate::record::{now_ms, Captured, Flow};
+use crate::audit::record::{now_ms, Captured, Flow};
 
 /// 通道里最多排这么多条（之后丢弃、计数）。
 const QUEUE: usize = 8192;
@@ -266,7 +266,7 @@ fn logs(dir: &Path) -> Vec<(String, Vec<String>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::record::Message;
+    use crate::audit::record::Message;
 
     fn flow(body: &[u8]) -> Flow {
         let mut captured = Captured::default();
