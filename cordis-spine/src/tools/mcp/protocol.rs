@@ -337,6 +337,9 @@ pub fn unsupported_versions(v: &Value) -> Option<Vec<String>> {
         })
 }
 
+pub const METHOD_DISCOVER: &str = "server/discover";
+pub const METHOD_LISTEN: &str = "subscriptions/listen";
+
 pub fn discover_versions(result: &Value) -> Vec<String> {
     let from = result
         .pointer("/result/supportedVersions")
@@ -348,6 +351,49 @@ pub fn discover_versions(result: &Value) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// `server/discover` / `tools/list` 的缓存寿命。`ttlMs` 缺省或 0 表示不要缓存。
+pub fn result_ttl(v: &Value) -> Option<std::time::Duration> {
+    let n = v.pointer("/result/ttlMs")?;
+    let ms = n
+        .as_u64()
+        .or_else(|| n.as_i64().and_then(|i| u64::try_from(i).ok()))?;
+    (ms > 0).then(|| std::time::Duration::from_millis(ms))
+}
+
+fn cap_list_changed(discover: &Value, cap: &str) -> bool {
+    discover
+        .pointer(&format!("/result/capabilities/{cap}/listChanged"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+pub fn tools_list_changed(discover: &Value) -> bool {
+    cap_list_changed(discover, "tools")
+}
+
+pub fn prompts_list_changed(discover: &Value) -> bool {
+    cap_list_changed(discover, "prompts")
+}
+
+pub fn resources_list_changed(discover: &Value) -> bool {
+    cap_list_changed(discover, "resources")
+}
+
+/// `subscriptions/listen` 的 `params.notifications` 过滤表。
+pub fn listen_params(tools: bool, prompts: bool, resources: bool) -> Value {
+    let mut notifications = serde_json::Map::new();
+    if tools {
+        notifications.insert("toolsListChanged".into(), json!(true));
+    }
+    if prompts {
+        notifications.insert("promptsListChanged".into(), json!(true));
+    }
+    if resources {
+        notifications.insert("resourcesListChanged".into(), json!(true));
+    }
+    json!({ "notifications": notifications })
 }
 
 pub fn pick_version(supported: &[String]) -> Option<&'static str> {
@@ -817,6 +863,44 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn discover_versions_and_ttl_and_listen_filter() {
+        let discover = json!({
+            "result": {
+                "supportedVersions": ["2026-07-28", "2025-11-25"],
+                "ttlMs": 300000,
+                "cacheScope": "private",
+                "capabilities": {
+                    "tools": { "listChanged": true },
+                    "prompts": { "listChanged": false },
+                    "resources": { "listChanged": true }
+                }
+            }
+        });
+        assert_eq!(
+            discover_versions(&discover),
+            vec!["2026-07-28".to_string(), "2025-11-25".to_string()]
+        );
+        assert_eq!(
+            result_ttl(&discover),
+            Some(std::time::Duration::from_millis(300_000))
+        );
+        assert!(result_ttl(&json!({ "result": { "ttlMs": 0 } })).is_none());
+        assert!(result_ttl(&json!({ "result": {} })).is_none());
+        assert!(tools_list_changed(&discover));
+        assert!(!prompts_list_changed(&discover));
+        assert!(resources_list_changed(&discover));
+        assert_eq!(
+            listen_params(true, false, true),
+            json!({
+                "notifications": {
+                    "toolsListChanged": true,
+                    "resourcesListChanged": true
+                }
+            })
+        );
+    }
 
     #[test]
     fn pick_prefers_latest_spoken() {

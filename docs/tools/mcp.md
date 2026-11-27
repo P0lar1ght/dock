@@ -17,6 +17,13 @@ stdio + Streamable HTTP。先走 MCP `2026-07-28`（无 initialize / 无 session
 - 重连 / 重载期间同样显示「连接中…」、`search_tool` 报 `partial`。
 - 握手途中被停用、重连或换了配置：晚到的结果按 `attempt` 认出过期，成败都不写回。
 
+HTTP 握手与工具清单（`2026-07-28`）：
+- 先发 `server/discover`，按 `supportedVersions` 挑协议版本；挑到老版本就走 initialize。
+- `server/discover` 报错（`-32601`、session 类 `-32602`，或 Python SDK 那种 `-32602 Invalid request parameters`）一律退回老路径：先 `tools/list`，不行再 initialize。和 stdio 一致。
+- `tools/list` 第一页带 `ttlMs` 时按它缓存，重列时缓存没过期就不再请求。
+  - 来一条 `tools/list_changed` 缓存就作废，按代数判断：拉列表途中来的通知，拉完的那份也算过期。
+- `server/discover` 的 `capabilities.*.listChanged` 为真时，后台开一条 `subscriptions/listen`（POST + SSE），断了按退避重连；服务器回 404 / 405 / `-32601` 就不再开。
+
 ### MCP Elicitation（向用户要信息）
 
 Dock 按规范当 elicitation 的客户端。两种问答路径都在：
