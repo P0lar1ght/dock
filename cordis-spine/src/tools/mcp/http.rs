@@ -2,9 +2,11 @@
 //!
 //! Prefer protocol `2026-07-28` (no session; `_meta`, `MCP-Protocol-Version`,
 //! `Mcp-Method` / `Mcp-Name` on tools/call, resources/read, prompts/get).
+//! Handshake probes `server/discover`, honours `ttlMs` on `tools/list`, and
+//! opens `subscriptions/listen` when the server advertises `listChanged`.
 //! On a 400 that is not a modern JSON-RPC error,
 //! fall back to initialize-era `2025-11-25` with `Mcp-Session-Id`.
-//! Standing GET SSE + session 404 recover.
+//! Standing GET SSE (legacy) + session 404 recover.
 //!
 //! POST SSE **不再**串行等 elicitation 完成。原来的「按序处理，elicitation 先
 //! 完成再处理该流上的后续事件」在真实场景下是死锁源：`elicitation/create` 要等
@@ -16,7 +18,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, AUTHORIZATION, USER_AGENT};
@@ -70,6 +72,10 @@ pub(super) async fn connect(
         hooks,
         handshake: tokio::sync::Mutex::new(()),
         reply_tx,
+        list_cache: Mutex::new(ListCache::new()),
+        listen_tools: AtomicBool::new(false),
+        listen_prompts: AtomicBool::new(false),
+        listen_resources: AtomicBool::new(false),
     });
     // 回复写侧：所有 sender 随 Arc<HttpShared> 一起 drop 时自然收尾。
     let reply_shared = shared.clone();
@@ -92,8 +98,15 @@ pub(super) async fn connect(
         skip_oauth,
         server.clone(),
         get_tx,
-        stop,
+        stop.clone(),
     ));
+    if shared.modern.load(Ordering::Relaxed) && wants_listen(&shared) {
+        let listen_shared = shared.clone();
+        let listen_stop = stop.clone();
+        tokio::spawn(async move {
+            listen_subscriptions(listen_shared, listen_stop).await;
+        });
+    }
     let get_shared = shared.clone();
     tokio::spawn(async move {
         while let Some(v) = get_rx.recv().await {
@@ -107,11 +120,9 @@ pub(super) async fn connect(
         Box::pin(async move { rpc(&session, &method, params).await })
     });
     let session_list = shared.clone();
-    let name = server.name.clone();
     let relist: RelistFn = std::sync::Arc::new(move || {
         let session = session_list.clone();
-        let name = name.clone();
-        Box::pin(async move { list_pages(&session, &name).await })
+        Box::pin(async move { list_pages(&session).await })
     });
     Ok((listed, call, relist))
 }
@@ -134,6 +145,54 @@ struct HttpShared {
     /// 表单。走通道还顺带打断了 `ingest → post_raw → post → ingest` 这个递归
     /// async 环 —— 有环的时候编译器推不出 `Send`，什么都 spawn 不出去。
     reply_tx: mpsc::UnboundedSender<Value>,
+    list_cache: Mutex<ListCache>,
+    listen_tools: AtomicBool,
+    listen_prompts: AtomicBool,
+    listen_resources: AtomicBool,
+}
+
+/// `ttlMs` 的上限：远端给多大都最多缓存这么久。
+const MAX_LIST_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// `tools/list` 按 `ttlMs` 缓存。作废靠代数而不是一个 `stale` 标记：拉列表的途中
+/// 又来一条 `tools/list_changed` 时，拉完不能把它清掉——不然下一次刷新会拿到
+/// 这份已经过时的列表。
+struct ListCache {
+    tools: Vec<protocol::ListedTool>,
+    until: Option<Instant>,
+    /// 每来一条 `tools/list_changed` 加一。
+    generation: u64,
+    /// 缓存里这份列表是在哪一代**开始**拉的；和 `generation` 对不上就作废。
+    fetched_at: Option<u64>,
+}
+
+impl ListCache {
+    fn new() -> Self {
+        Self {
+            tools: Vec::new(),
+            until: None,
+            generation: 0,
+            fetched_at: None,
+        }
+    }
+
+    /// 空列表也是一份结果：第一页带了 `ttlMs`，就在有效期里照用，不每次重拉。
+    fn hit(&self, now: Instant) -> Option<Vec<protocol::ListedTool>> {
+        if self.fetched_at != Some(self.generation) {
+            return None;
+        }
+        match self.until {
+            Some(until) if now < until => Some(self.tools.clone()),
+            _ => None,
+        }
+    }
+
+    fn remember(&mut self, tools: &[protocol::ListedTool], ttl: Option<Duration>, began: u64) {
+        self.tools = tools.to_vec();
+        // 远端给的 `ttlMs` 不可信：离谱的大数加上去会溢出 panic（还握着锁）。封顶一天。
+        self.until = ttl.and_then(|ttl| Instant::now().checked_add(ttl.min(MAX_LIST_TTL)));
+        self.fetched_at = Some(began);
+    }
 }
 
 impl HttpShared {
@@ -160,24 +219,84 @@ impl HttpShared {
 }
 
 async fn handshake(s: &HttpShared) -> Result<Vec<protocol::ListedTool>, String> {
+    match rpc(s, protocol::METHOD_DISCOVER, json!({})).await {
+        Ok(v) if v.get("error").is_none() => {
+            apply_discover(s, &v);
+            if !s.modern.load(Ordering::Relaxed) {
+                initialize_legacy(s).await?;
+            }
+            list_pages(s).await
+        }
+        Ok(v) => {
+            if let Some(supported) = unsupported_versions(&v) {
+                return negotiate(s, &supported).await;
+            }
+            // 不认 `server/discover` 的服务器回什么错都有：`-32601`、session 类的
+            // `-32602`，还有 Python SDK 那种把不认识的方法当成 `-32602 Invalid
+            // request parameters` 的。一律退回加 discover 之前的老路径（同 stdio），
+            // 别让探测这一步把以前连得上的服务器挡在门外。
+            handshake_without_discover(s).await
+        }
+        // 要登录的照原样交回去（OAuth 流程认这个错）。别的传输层失败——超时、5xx、
+        // 对不认识的方法直接断开——也退回老路径（同 stdio：discover 失败或超时就走
+        // initialize）：以前直接 `tools/list` 连得上的老服务器，不能被探测这一步挡在门外。
+        // 服务器真连不上时，老路径会再报一次真正的错。
+        Err(e) if looks_unauthorized(&e) => Err(e),
+        Err(_) => handshake_without_discover(s).await,
+    }
+}
+
+fn looks_unauthorized(err: &str) -> bool {
+    err.contains("HTTP 401") || err.starts_with("HTTP 403")
+}
+
+async fn handshake_without_discover(s: &HttpShared) -> Result<Vec<protocol::ListedTool>, String> {
+    let began = list_generation(s);
     match rpc(s, "tools/list", json!({})).await {
-        Ok(v) if v.get("error").is_none() => list_from_first(s, v).await,
+        Ok(v) if v.get("error").is_none() => list_from_first(s, v, began).await,
         Ok(v) => {
             if let Some(supported) = unsupported_versions(&v) {
                 return negotiate(s, &supported).await;
             }
             if looks_legacy_error(&v) || demands_session(&v) {
                 initialize_legacy(s).await?;
-                return list_pages(s, &s.server.name).await;
+                return list_pages(s).await;
             }
             Err(v["error"].to_string())
         }
         Err(e) if looks_legacy_http(&e) => {
             initialize_legacy(s).await?;
-            list_pages(s, &s.server.name).await
+            list_pages(s).await
         }
         Err(e) => Err(e),
     }
+}
+
+fn apply_discover(s: &HttpShared, v: &Value) {
+    let versions = protocol::discover_versions(v);
+    if let Some(picked) = pick_version(&versions) {
+        s.set_protocol(picked.to_string());
+    }
+    s.listen_tools
+        .store(protocol::tools_list_changed(v), Ordering::Relaxed);
+    s.listen_prompts
+        .store(protocol::prompts_list_changed(v), Ordering::Relaxed);
+    s.listen_resources
+        .store(protocol::resources_list_changed(v), Ordering::Relaxed);
+}
+
+fn wants_listen(s: &HttpShared) -> bool {
+    s.listen_tools.load(Ordering::Relaxed)
+        || s.listen_prompts.load(Ordering::Relaxed)
+        || s.listen_resources.load(Ordering::Relaxed)
+}
+
+fn list_generation(s: &HttpShared) -> u64 {
+    s.list_cache.lock().unwrap().generation
+}
+
+fn mark_list_stale(s: &HttpShared) {
+    s.list_cache.lock().unwrap().generation += 1;
 }
 
 async fn negotiate(
@@ -187,31 +306,39 @@ async fn negotiate(
     let picked = pick_version(supported)
         .ok_or_else(|| format!("server does not speak a protocol Dock supports: {supported:?}"))?;
     s.set_protocol(picked.to_string());
-    if s.modern.load(Ordering::Relaxed) {
-        let listed = rpc(s, "tools/list", json!({})).await?;
-        if listed.get("error").is_some() {
-            return Err(listed["error"].to_string());
-        }
-        list_from_first(s, listed).await
-    } else {
+    if !s.modern.load(Ordering::Relaxed) {
         initialize_legacy(s).await?;
-        list_pages(s, &s.server.name).await
     }
+    list_pages(s).await
 }
 
+/// 第一页已经拿到了，接着翻完，按第一页的 `ttlMs` 记进缓存。`began` 是发第一页
+/// 请求**之前**的代数（见 [`ListCache`]）。
 async fn list_from_first(
     s: &HttpShared,
     first: Value,
+    began: u64,
 ) -> Result<Vec<protocol::ListedTool>, String> {
-    tools_list::list_all_from_first(&s.server.name, first, |params| rpc(s, "tools/list", params))
-        .await
+    let ttl = protocol::result_ttl(&first);
+    let listed = tools_list::list_all_from_first(&s.server.name, first, |params| {
+        rpc(s, "tools/list", params)
+    })
+    .await?;
+    s.list_cache.lock().unwrap().remember(&listed, ttl, began);
+    Ok(listed)
 }
 
-async fn list_pages(
-    s: &HttpShared,
-    server_name: &str,
-) -> Result<Vec<protocol::ListedTool>, String> {
-    tools_list::list_all(server_name, |params| rpc(s, "tools/list", params)).await
+/// 全部工具：缓存还在 `ttlMs` 里、其间也没来过 `tools/list_changed` 就直接用。
+async fn list_pages(s: &HttpShared) -> Result<Vec<protocol::ListedTool>, String> {
+    if let Some(hit) = s.list_cache.lock().unwrap().hit(Instant::now()) {
+        return Ok(hit);
+    }
+    let began = list_generation(s);
+    let first = rpc(s, "tools/list", json!({})).await?;
+    if first.get("error").is_some() {
+        return Err(first["error"].to_string());
+    }
+    list_from_first(s, first, began).await
 }
 
 async fn initialize_legacy(s: &HttpShared) -> Result<(), String> {
@@ -423,6 +550,9 @@ async fn ingest(s: &HttpShared, v: Value, want_id: Option<u64>) -> Option<Value>
             None
         }
         Incoming::Notification { method, params } => {
+            if tools_list::is_changed(&method) {
+                mark_list_stale(s);
+            }
             incoming::note(&s.hooks, &method, &params);
             None
         }
@@ -603,6 +733,178 @@ async fn post(
     }
 }
 
+const LISTEN_STABLE: Duration = Duration::from_secs(2);
+
+enum ListenEnd {
+    Stop,
+    Unsupported,
+    Ok,
+    Retry,
+}
+
+async fn listen_subscriptions(s: Arc<HttpShared>, mut stop: watch::Receiver<bool>) {
+    let mut consecutive_rapid = 0u32;
+    loop {
+        if *stop.borrow() {
+            return;
+        }
+        let delay = sse::reconnect_delay(consecutive_rapid);
+        if !delay.is_zero() {
+            tokio::select! {
+                _ = tokio::time::sleep(delay) => {}
+                _ = stop.changed() => return,
+            }
+            if *stop.borrow() {
+                return;
+            }
+        }
+        let started = Instant::now();
+        match listen_once(&s, &mut stop).await {
+            ListenEnd::Stop => return,
+            ListenEnd::Unsupported => return,
+            ListenEnd::Ok | ListenEnd::Retry => {
+                if started.elapsed() < LISTEN_STABLE {
+                    consecutive_rapid = consecutive_rapid.saturating_add(1);
+                } else {
+                    consecutive_rapid = 0;
+                }
+            }
+        }
+        tokio::select! {
+            _ = stop.changed() => return,
+            _ = tokio::time::sleep(Duration::from_millis(10)) => {}
+        }
+    }
+}
+
+async fn listen_once(s: &HttpShared, stop: &mut watch::Receiver<bool>) -> ListenEnd {
+    if *stop.borrow() {
+        return ListenEnd::Stop;
+    }
+    let params = protocol::listen_params(
+        s.listen_tools.load(Ordering::Relaxed),
+        s.listen_prompts.load(Ordering::Relaxed),
+        s.listen_resources.load(Ordering::Relaxed),
+    );
+    let id = s.next_id.fetch_add(1, Ordering::Relaxed);
+    let params = with_meta(params, &s.protocol());
+    let msg = json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": protocol::METHOD_LISTEN,
+        "params": params
+    });
+    let mut retried_auth = false;
+    loop {
+        let mut req = s
+            .client
+            .post(&s.url)
+            .header(ACCEPT, format!("{EVENT_STREAM_MIME}, {JSON_MIME}"))
+            .header(HEADER_PROTOCOL, s.protocol())
+            .header(HEADER_METHOD, protocol::METHOD_LISTEN);
+        if let Some(sid) = s.session_id() {
+            req = req.header(HEADER_SESSION_ID, sid.as_str());
+        }
+        if !s.skip_oauth {
+            if let Some(token) = super::credentials::access_token(&s.server.name, &s.url) {
+                if let Ok(val) = HeaderValue::from_str(&format!("Bearer {token}")) {
+                    req = req.header(AUTHORIZATION, val);
+                }
+            }
+        }
+        let response = match req.json(&msg).send().await {
+            Ok(r) => r,
+            Err(_) => return ListenEnd::Retry,
+        };
+        let status = response.status();
+        if status.as_u16() == 401 && !s.skip_oauth && !retried_auth {
+            retried_auth = true;
+            drop(response);
+            if super::oauth::refresh_stored(&s.server).await.is_ok() {
+                continue;
+            }
+            return ListenEnd::Retry;
+        }
+        if *stop.borrow() {
+            return ListenEnd::Stop;
+        }
+        if matches!(status.as_u16(), 404 | 405) {
+            return ListenEnd::Unsupported;
+        }
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            if listen_unsupported_body(&body) {
+                return ListenEnd::Unsupported;
+            }
+            return ListenEnd::Retry;
+        }
+        if content_type
+            .as_bytes()
+            .starts_with(EVENT_STREAM_MIME.as_bytes())
+        {
+            let mut stream = response.bytes_stream();
+            let mut parser = SseParser::default();
+            let mut carry = String::new();
+            loop {
+                tokio::select! {
+                    _ = stop.changed() => return ListenEnd::Stop,
+                    chunk = stream.next() => {
+                        let Some(chunk) = chunk else {
+                            return ListenEnd::Ok;
+                        };
+                        let Ok(bytes) = chunk else {
+                            return ListenEnd::Retry;
+                        };
+                        let text = String::from_utf8_lossy(&bytes);
+                        for v in parser.push_chunk(&text, &mut carry) {
+                            // 不少服务器用 200 + SSE 回 JSON-RPC 错误：这次 listen 的回包是
+                            // `-32601` 就不再开（同 JSON 回包），不当成断开去退避重连。
+                            if v.get("id").and_then(Value::as_u64) == Some(id)
+                                && listen_unsupported_rpc(&v)
+                            {
+                                return ListenEnd::Unsupported;
+                            }
+                            ingest(s, v, None).await;
+                        }
+                    }
+                }
+            }
+        }
+        if content_type.as_bytes().starts_with(JSON_MIME.as_bytes()) {
+            match response.json::<Value>().await {
+                Ok(v) => {
+                    if listen_unsupported_rpc(&v) {
+                        return ListenEnd::Unsupported;
+                    }
+                    ingest(s, v, None).await;
+                    return ListenEnd::Ok;
+                }
+                Err(_) => return ListenEnd::Retry,
+            }
+        }
+        return ListenEnd::Retry;
+    }
+}
+
+fn listen_unsupported_body(body: &str) -> bool {
+    serde_json::from_str::<Value>(body)
+        .ok()
+        .is_some_and(|v| listen_unsupported_rpc(&v))
+}
+
+fn listen_unsupported_rpc(v: &Value) -> bool {
+    matches!(
+        protocol::jsonrpc_error_code(v),
+        Some(protocol::ERR_METHOD_NOT_FOUND)
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -636,6 +938,16 @@ mod tests {
         /// `elicitation/create`，然后才是调用结果。用来钉住「读侧不被
         /// elicitation 挡住」。
         ElicitThenResult,
+        /// `server/discover` 声明 `listChanged`，`subscriptions/listen` 推一条
+        /// `tools/list_changed`，第二次 `tools/list` 换一套工具。
+        ModernListen,
+        /// 不认 `server/discover` 的老服务器，回的是 `-32602 Invalid request
+        /// parameters`（Python MCP SDK 对不认识的方法就这么回），其余同 `Legacy`。
+        DiscoverInvalidParams,
+        /// `server/discover` 回 HTTP 500（对不认识的方法直接报服务器错的老服务器），其余同 `Legacy`。
+        DiscoverServerError,
+        /// 同 `ModernListen`，但 `subscriptions/listen` 用 200 + SSE 回 `-32601`。
+        ListenSseUnsupported,
     }
 
     async fn connect_with(
@@ -658,9 +970,15 @@ mod tests {
     }
 
     async fn spawn_server(mode: Mode) -> (String, tokio::task::JoinHandle<()>) {
+        let (url, handle, _) = spawn_counted(mode).await;
+        (url, handle)
+    }
+
+    async fn spawn_counted(mode: Mode) -> (String, tokio::task::JoinHandle<()>, Arc<AtomicU32>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let calls = Arc::new(AtomicU32::new(0));
+        let returned = calls.clone();
         let handle = tokio::spawn(async move {
             loop {
                 let Ok((mut stream, _)) = listener.accept().await else {
@@ -677,7 +995,7 @@ mod tests {
                 });
             }
         });
-        (format!("http://{addr}/mcp"), handle)
+        (format!("http://{addr}/mcp"), handle, returned)
     }
 
     async fn read_http(stream: &mut tokio::net::TcpStream) -> io::Result<(String, Vec<u8>)> {
@@ -827,8 +1145,35 @@ mod tests {
                 ]),
                 _ => json_response(200, "", &json!({ "jsonrpc": "2.0", "id": id, "result": {} }).to_string()),
             },
+            Mode::ModernListen => modern_listen_handle(headers, method, &id, calls),
             Mode::Modern => match method {
+                "server/discover" => {
+                    assert!(
+                        headers
+                            .to_ascii_lowercase()
+                            .contains("mcp-method: server/discover"),
+                        "modern discover must send Mcp-Method: {headers}"
+                    );
+                    json_response(
+                        200,
+                        "",
+                        &json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": {
+                                "supportedVersions": [PROTOCOL_LATEST],
+                                "ttlMs": 300000,
+                                "cacheScope": "private",
+                                "capabilities": {
+                                    "tools": { "listChanged": false }
+                                }
+                            }
+                        })
+                        .to_string(),
+                    )
+                }
                 "tools/list" => {
+                    calls.fetch_add(1, Ordering::SeqCst);
                     assert!(
                         headers
                             .to_ascii_lowercase()
@@ -846,6 +1191,8 @@ mod tests {
                             "jsonrpc": "2.0",
                             "id": id,
                             "result": {
+                                "ttlMs": 60000,
+                                "cacheScope": "private",
                                 "tools": [{
                                     "name": "echo",
                                     "description": "echo text",
@@ -939,6 +1286,30 @@ mod tests {
                 ),
             },
             Mode::Legacy => legacy_handle(headers, &v, &id, false, calls, false),
+            Mode::DiscoverInvalidParams if method == "server/discover" => json_response(
+                200,
+                "",
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": { "code": -32602, "message": "Invalid request parameters" }
+                })
+                .to_string(),
+            ),
+            Mode::DiscoverInvalidParams => legacy_handle(headers, &v, &id, false, calls, false),
+            Mode::DiscoverServerError if method == "server/discover" => {
+                b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n".to_vec()
+            }
+            Mode::DiscoverServerError => legacy_handle(headers, &v, &id, false, calls, false),
+            Mode::ListenSseUnsupported if method == "subscriptions/listen" => {
+                calls.fetch_add(1 << 16, Ordering::SeqCst);
+                sse_response(&[json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": { "code": -32601, "message": "Method not found" }
+                })])
+            }
+            Mode::ListenSseUnsupported => modern_listen_handle(headers, method, &id, calls),
             Mode::SessionRequired | Mode::SessionRestart | Mode::SessionParamError => {
                 session_only_handle(mode, headers, method, &id, calls)
             }
@@ -966,6 +1337,90 @@ mod tests {
                     legacy_handle(headers, &v, &id, true, calls, false)
                 }
             }
+        }
+    }
+
+    fn modern_listen_handle(headers: &str, method: &str, id: &Value, calls: &AtomicU32) -> Vec<u8> {
+        match method {
+            "server/discover" => json_response(
+                200,
+                "",
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "supportedVersions": [PROTOCOL_LATEST],
+                        "ttlMs": 300000,
+                        "cacheScope": "private",
+                        "capabilities": {
+                            "tools": { "listChanged": true }
+                        }
+                    }
+                })
+                .to_string(),
+            ),
+            "tools/list" => {
+                let n = calls.fetch_add(1, Ordering::SeqCst) & 0xFFFF;
+                let name = if n == 0 { "echo" } else { "echo2" };
+                json_response(
+                    200,
+                    "",
+                    &json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": {
+                            "ttlMs": 60000,
+                            "cacheScope": "private",
+                            "tools": [{
+                                "name": name,
+                                "description": name,
+                                "inputSchema": { "type": "object" }
+                            }]
+                        }
+                    })
+                    .to_string(),
+                )
+            }
+            "subscriptions/listen" => {
+                assert!(
+                    headers
+                        .to_ascii_lowercase()
+                        .contains("mcp-method: subscriptions/listen"),
+                    "listen must send Mcp-Method: {headers}"
+                );
+                let n = (calls.fetch_add(1 << 16, Ordering::SeqCst) >> 16) & 0xFFFF;
+                if n > 0 {
+                    return b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\n\r\n"
+                        .to_vec();
+                }
+                sse_response(&[
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": { "resultType": "complete" }
+                    }),
+                    json!({
+                        "jsonrpc": "2.0",
+                        "method": "notifications/subscriptions/acknowledged",
+                        "params": { "notifications": { "toolsListChanged": true } }
+                    }),
+                    json!({
+                        "jsonrpc": "2.0",
+                        "method": "notifications/tools/list_changed",
+                        "params": {}
+                    }),
+                ])
+            }
+            _ => json_response(
+                400,
+                "",
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": { "code": -32601, "message": method }
+                })
+                .to_string(),
+            ),
         }
     }
 
@@ -1186,6 +1641,137 @@ mod tests {
                 .and_then(|d| d.as_str()),
             Some("intro")
         );
+        drop(stop_tx);
+        handle.abort();
+    }
+
+    /// 加 `server/discover` 探测之前，这类服务器握手先发 `tools/list`、再退回
+    /// initialize，连得上；探测回来的 `-32602` 不能把它挡在门外。
+    #[tokio::test]
+    async fn discover_rejected_with_invalid_params_falls_back_to_legacy() {
+        let (url, handle) = spawn_server(Mode::DiscoverInvalidParams).await;
+        let (listed, _call) = connect_with(&http_server(url), incoming::dummy_hooks("local"))
+            .await
+            .expect("connect");
+        assert_eq!(listed[0].public, "mcp_local__ping");
+        handle.abort();
+    }
+
+    /// 回归：discover 报 HTTP 500（或超时、连接被断）也要退回老路径。以前只认 JSON-RPC 错误
+    /// 和 400/404/405，这类老服务器在探测这一步就被挡在门外。
+    #[tokio::test]
+    async fn discover_server_error_falls_back_to_legacy() {
+        let (url, handle) = spawn_server(Mode::DiscoverServerError).await;
+        let (listed, _call) = connect_with(&http_server(url), incoming::dummy_hooks("local"))
+            .await
+            .expect("connect");
+        assert_eq!(listed[0].public, "mcp_local__ping");
+        handle.abort();
+    }
+
+    /// 回归：listen 用 200 + SSE 回 `-32601` 就不再开。以前只认 JSON 回包里的 `-32601`，
+    /// SSE 里的当成流正常结束，马上又去重连。
+    #[tokio::test]
+    async fn listen_answered_with_method_not_found_over_sse_is_not_reopened() {
+        let (url, handle, hits) = spawn_counted(Mode::ListenSseUnsupported).await;
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let hooks = LiveHooks {
+            server: "local".into(),
+            elicit: Elicitation::new(cordis::Context::new()),
+            tools_changed: tx,
+        };
+        let (stop_tx, stop_rx) = watch::channel(false);
+        let _conn = connect(&http_server(url), hooks, stop_rx)
+            .await
+            .expect("connect");
+        // 老逻辑下前两次重连不退避，这段时间里早就第二次 listen 了。
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!((hits.load(Ordering::SeqCst) >> 16) & 0xFFFF, 1, "只开一次");
+        drop(stop_tx);
+        handle.abort();
+    }
+
+    /// 远端给的 `ttlMs` 离谱地大也不 panic（以前 `Instant + Duration` 溢出，还握着锁），
+    /// 空列表也照样缓存。
+    #[test]
+    fn huge_ttl_is_capped_and_an_empty_list_is_cached() {
+        let mut cache = ListCache::new();
+        let began = cache.generation;
+        cache.remember(&[], Some(Duration::MAX), began);
+        assert_eq!(cache.hit(Instant::now()).map(|t| t.len()), Some(0));
+    }
+
+    /// 拉列表的途中来了 `tools/list_changed`：拉完的这份不能当成新的缓存。
+    #[test]
+    fn list_changed_during_a_fetch_invalidates_what_it_returns() {
+        let tool = protocol::ListedTool {
+            public: "mcp_local__echo".into(),
+            description: String::new(),
+            schema: r#"{"type":"object"}"#.into(),
+            ui: Default::default(),
+        };
+        let ttl = Some(Duration::from_secs(60));
+        let mut cache = ListCache::new();
+        let began = cache.generation;
+        cache.generation += 1;
+        cache.remember(std::slice::from_ref(&tool), ttl, began);
+        assert!(cache.hit(Instant::now()).is_none(), "stale fetch must miss");
+
+        let began = cache.generation;
+        cache.remember(std::slice::from_ref(&tool), ttl, began);
+        assert_eq!(cache.hit(Instant::now()).map(|t| t.len()), Some(1));
+        cache.generation += 1;
+        assert!(
+            cache.hit(Instant::now()).is_none(),
+            "list_changed invalidates"
+        );
+
+        cache.remember(std::slice::from_ref(&tool), None, cache.generation);
+        assert!(cache.hit(Instant::now()).is_none(), "no ttlMs, no caching");
+    }
+
+    #[tokio::test]
+    async fn modern_relist_skips_while_ttl_valid() {
+        let (url, handle, hits) = spawn_counted(Mode::Modern).await;
+        let (stop_tx, stop_rx) = watch::channel(false);
+        let (listed, _rpc, relist) =
+            connect(&http_server(url), incoming::dummy_hooks("local"), stop_rx)
+                .await
+                .expect("connect");
+        assert_eq!(listed[0].public, "mcp_local__echo");
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "handshake tools/list");
+        let again = relist().await.expect("relist");
+        assert_eq!(again[0].public, "mcp_local__echo");
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "ttlMs still valid, skip tools/list"
+        );
+        drop(stop_tx);
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn modern_listen_relists_after_list_changed() {
+        let (url, handle, hits) = spawn_counted(Mode::ModernListen).await;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let hooks = LiveHooks {
+            server: "local".into(),
+            elicit: Elicitation::new(cordis::Context::new()),
+            tools_changed: tx,
+        };
+        let (stop_tx, stop_rx) = watch::channel(false);
+        let (listed, _rpc, relist) = connect(&http_server(url), hooks, stop_rx)
+            .await
+            .expect("connect");
+        assert_eq!(listed[0].public, "mcp_local__echo");
+        tokio::time::timeout(Duration::from_secs(3), rx.recv())
+            .await
+            .expect("list_changed")
+            .expect("channel");
+        let again = relist().await.expect("relist");
+        assert_eq!(again[0].public, "mcp_local__echo2");
+        assert_eq!(hits.load(Ordering::SeqCst) & 0xFFFF, 2);
         drop(stop_tx);
         handle.abort();
     }
