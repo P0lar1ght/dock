@@ -46,6 +46,9 @@ struct MetaFile {
     /// 工作区里的当前目录。和 `sandbox` 一起写；只有 `workdir` 没有 `sandbox` 是老写法，不认。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     workdir: Option<String>,
+    /// 沙箱开没开（`/sandbox on|off`）。恢复会话时切回来；老会话没有，按配置的默认。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sandbox_enabled: Option<bool>,
 }
 
 impl MetaFile {
@@ -204,6 +207,7 @@ pub fn save(item: &ArchivedSession, cwd: &Path) -> std::io::Result<()> {
             .place
             .as_ref()
             .map(|p| p.cwd.to_string_lossy().into_owned()),
+        sandbox_enabled: item.sandbox_enabled,
     };
     atomic_write(
         &dir.join(META),
@@ -311,6 +315,7 @@ pub fn save_child(
         preset_id: None,
         sampling: None,
         place: None,
+        sandbox_enabled: None,
     };
     save_compact(dir, &item);
     Ok(())
@@ -385,6 +390,7 @@ pub fn save_title(id: &str, title: &str, cwd: &Path) -> std::io::Result<()> {
             effort: None,
             sandbox: None,
             workdir: None,
+            sandbox_enabled: None,
         }),
         Err(_) => MetaFile {
             id: id.into(),
@@ -396,6 +402,7 @@ pub fn save_title(id: &str, title: &str, cwd: &Path) -> std::io::Result<()> {
             effort: None,
             sandbox: None,
             workdir: None,
+            sandbox_enabled: None,
         },
     };
     meta.title = title.into();
@@ -641,6 +648,7 @@ fn load_one(dir: &Path) -> Option<(u64, ArchivedSession)> {
             preset_id: meta.as_ref().and_then(|m| m.preset_id.clone()),
             sampling: meta.as_ref().and_then(MetaFile::sampling),
             place: meta.as_ref().and_then(MetaFile::place),
+            sandbox_enabled: meta.as_ref().and_then(|m| m.sandbox_enabled),
         },
     ))
 }
@@ -1185,6 +1193,7 @@ mod tests {
             preset_id: Some("warden".into()),
             sampling: None,
             place: None,
+            sandbox_enabled: None,
         };
         save(&item, cwd).unwrap();
         let loaded = load_cwd(cwd);
@@ -1234,6 +1243,7 @@ mod tests {
             preset_id: None,
             sampling: None,
             place: None,
+            sandbox_enabled: None,
         };
         save(&item, cwd).unwrap();
         let loaded = load_cwd(cwd);
@@ -1265,6 +1275,7 @@ mod tests {
             preset_id: None,
             sampling: None,
             place: None,
+            sandbox_enabled: None,
         };
         save(&item, cwd).unwrap();
         let loaded = load_cwd(cwd);
@@ -1364,6 +1375,7 @@ mod tests {
             preset_id: None,
             sampling: None,
             place: None,
+            sandbox_enabled: None,
         };
         save(&item, cwd).unwrap();
         assert_eq!(load_cwd(cwd)[0].events, item.events);
@@ -1400,6 +1412,7 @@ mod tests {
             preset_id: None,
             sampling: None,
             place: None,
+            sandbox_enabled: None,
         };
         save(&item, cwd).unwrap();
         let loaded = load_cwd(cwd);
@@ -1439,6 +1452,7 @@ mod tests {
             preset_id: None,
             sampling: None,
             place: None,
+            sandbox_enabled: None,
         };
         save(&item, cwd).unwrap();
         let loaded = load_cwd(cwd);
@@ -1475,6 +1489,7 @@ mod tests {
             preset_id: None,
             sampling: None,
             place: None,
+            sandbox_enabled: None,
         };
         save(&item, cwd).unwrap();
 
@@ -1548,6 +1563,7 @@ mod tests {
             preset_id: None,
             sampling: None,
             place: None,
+            sandbox_enabled: None,
         };
         save(&item, cwd).unwrap();
         // image_paths should land under DOCK_HOME/tool-images/
@@ -1660,6 +1676,71 @@ mod tests {
         let gone = open(&id);
         assert_eq!(gone.space(), dock_sandbox::space::Space::in_place(&proj));
         assert_eq!(gone.workspace_cwd(), Some(proj.clone()));
+    }
+
+    /// 回归：开着沙箱的会话，Dock 重启后打开还要开着。以前开关不落盘，重开就按配置默认
+    /// （默认关），审计和限制悄悄没了。关着的照样记关；老会话没记这个字段，按配置默认。
+    #[tokio::test]
+    async fn the_sandbox_switch_round_trips_through_meta() {
+        use crate::host::settings::AppSettings;
+        let _home = cordis_base::test_env::scoped().home();
+        let proj = tempfile::tempdir().unwrap();
+        let proj = proj.path().canonicalize().unwrap();
+        // 一页 = 带 `settings` 的上下文（沙箱开关在那里）+ 这一页的会话。
+        async fn page(proj: &Path) -> (std::sync::Arc<AppSettings>, crate::session::log::Sessions) {
+            let ctx = cordis::Context::new();
+            ctx.plugin(crate::host::settings::settings(), ())
+                .unwrap()
+                .wait()
+                .await
+                .unwrap();
+            let settings = ctx.require::<AppSettings>(crate::names::SETTINGS).unwrap();
+            let sessions = crate::session::log::Sessions::new(ctx);
+            sessions.pin_workspace_cwd(proj);
+            sessions.attach_disk();
+            (settings, sessions)
+        }
+        let meta_path = |sessions: &crate::session::log::Sessions| {
+            sessions.existing_session_dir().unwrap().join(META)
+        };
+
+        let (settings, sessions) = page(&proj).await;
+        sessions.append(LogEvent::User("hi".into()));
+        settings.set_sandbox(true);
+        sessions.persist_sandbox();
+        let raw = fs::read_to_string(meta_path(&sessions)).unwrap();
+        let meta: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(meta["sandbox_enabled"], true, "{meta}");
+        let id = sessions.live_session_id();
+
+        // 「重启」：新的一页，配置默认关。
+        let (settings, again) = page(&proj).await;
+        assert!(!settings.sandbox());
+        assert!(again.adopt_archived(&id));
+        assert!(settings.sandbox(), "开着沙箱的会话，重开还是开着");
+
+        // 关了也记：配置默认开时，关过的会话重开还是关。
+        std::fs::write(
+            dock_home().join("config.toml"),
+            "[sandbox]\nenabled = true\n",
+        )
+        .unwrap();
+        settings.set_sandbox(false);
+        again.persist_sandbox();
+        let (settings, third) = page(&proj).await;
+        settings.set_sandbox(true);
+        assert!(third.adopt_archived(&id));
+        assert!(!settings.sandbox(), "关过的会话不被配置默认打开");
+
+        // 老会话：meta.json 没有这个字段，按配置默认（这里是开）。
+        let mut meta: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(meta_path(&third)).unwrap()).unwrap();
+        meta.as_object_mut().unwrap().remove("sandbox_enabled");
+        fs::write(meta_path(&third), meta.to_string()).unwrap();
+        let (settings, old) = page(&proj).await;
+        assert!(!settings.sandbox());
+        assert!(old.adopt_archived(&id));
+        assert!(settings.sandbox(), "老会话按配置默认");
     }
 
     fn walk_files(dir: &Path) -> Vec<PathBuf> {

@@ -11,6 +11,7 @@ import {
   GitBranch,
   Globe,
   RefreshCw,
+  Settings2,
   ShieldCheck,
   SquareTerminal,
   Waypoints,
@@ -101,6 +102,8 @@ export function TracePanel({ sessionId, onClose, lead, controls }: PanelProps) {
     if (r?.kind === "notice") host.toast(r.body || r.title);
   };
 
+  // 沙箱关着、但这个会话之前记过（Dock 重启前、或关之前）：照样给看，只是不再接着记。
+  const hasHistory = (trace?.records ?? 0) > 0;
   const nodes = trace?.graph.nodes ?? [];
   const edges = trace?.graph.edges ?? [];
   const rows = trace?.timeline ?? [];
@@ -125,7 +128,7 @@ export function TracePanel({ sessionId, onClose, lead, controls }: PanelProps) {
             沙箱{status.enabled ? "开" : "关"}
           </span>
         )}
-        {status?.enabled && (
+        {(status?.enabled || hasHistory) && (
           <div className="flex shrink-0 rounded-md bg-fill p-0.5 text-[11.5px]">
             {(
               [
@@ -161,6 +164,13 @@ export function TracePanel({ sessionId, onClose, lead, controls }: PanelProps) {
           <IconButton icon={Download} label="导出审计报告（HTML + 原始记录）" size={13} onClick={() => void exportReport()} className="size-7 text-ink-4" />
         )}
         <IconButton icon={RefreshCw} label="刷新" size={13} onClick={() => setNonce((n) => n + 1)} className="size-7 text-ink-4" />
+        <IconButton
+          icon={Settings2}
+          label="沙箱设置（默认开不开、审计、限制、策略规则）"
+          size={13}
+          onClick={() => window.dispatchEvent(new CustomEvent("dock:open-settings", { detail: "sandbox" }))}
+          className="size-7 text-ink-4"
+        />
         {controls}
         <span className="mx-0.5 h-4 w-px bg-line" />
         <IconButton icon={X} label="关闭行为轨迹" size={14} onClick={onClose} className="size-7 text-ink-4" />
@@ -181,7 +191,8 @@ export function TracePanel({ sessionId, onClose, lead, controls }: PanelProps) {
         ) : (
           <>
             <StatusLine status={status} />
-            {!status.enabled ? (
+            {!status.enabled && hasHistory && <HistoryNote busy={busy} onTurnOn={toggle} />}
+            {!status.enabled && !hasHistory ? (
               <OffState busy={busy} onTurnOn={toggle} />
             ) : tab === "http" ? (
               <HttpHistory sessionId={sessionId} active={tab === "http"} />
@@ -228,6 +239,23 @@ function Empty({ text }: { text: string }) {
   return <div className="flex flex-1 items-center justify-center px-6 text-center text-[13px] leading-relaxed text-ink-4">{text}</div>;
 }
 
+/** 沙箱关着、但有之前的记录：一行说明 + 开沙箱，下面照常是链路图 / HTTP 历史。 */
+function HistoryNote({ busy, onTurnOn }: { busy: boolean; onTurnOn: () => void }) {
+  return (
+    <div className="enter-fade flex items-center gap-2 rounded-lg border border-line bg-white px-3 py-2 text-[12px] text-ink-3">
+      <span className="min-w-0 flex-1">这一页的沙箱现在关着：下面是之前记下的，新的不再记。</span>
+      <button
+        type="button"
+        disabled={busy}
+        onClick={onTurnOn}
+        className="motion-colors shrink-0 rounded-md px-2 py-0.5 text-[12px] font-medium text-accent hover:bg-hover disabled:opacity-50"
+      >
+        开沙箱
+      </button>
+    </div>
+  );
+}
+
 function OffState({ busy, onTurnOn }: { busy: boolean; onTurnOn: () => void }) {
   return (
     <div className="enter-up flex flex-col items-center gap-3 rounded-xl border border-line bg-white px-6 py-8 text-center">
@@ -254,11 +282,15 @@ function StatusLine({ status }: { status: SandboxStatus }) {
   const ws = status.workspace;
   const name = (p: string) => p.split(/[\\/]/).filter(Boolean).pop() ?? p;
   const chips: { text: string; tone?: "bad" | "warn"; title?: string }[] = [];
-  if (status.auditing) {
-    chips.push({ text: `${status.records} 条记录` });
+  if (status.records > 0) {
+    const runs = status.runs ?? 1;
+    chips.push({
+      text: `${status.records} 条记录${runs > 1 ? ` · ${runs} 次运行` : ""}`,
+      title: runs > 1 ? "Dock 每起一次、沙箱开着就各记一份；这里接起来看" : undefined,
+    });
     chips.push(status.intact ? { text: "哈希链完好", title: "日志只追加、每行带上一行的哈希，正文块也对得上" } : { text: "哈希链对不上", tone: "bad", title: "有记录被改过或删过，导出的 verify.txt 里有细节" });
-    chips.push({ text: status.decrypt ? "HTTPS 解密" : "HTTPS 不解密" });
   }
+  if (status.auditing) chips.push({ text: status.decrypt ? "HTTPS 解密" : "HTTPS 不解密" });
   if (status.confine) chips.push({ text: `命令在系统沙箱里${status.network === "proxy" ? " · 只经代理出网" : status.network === "off" ? " · 不联网" : ""}` });
   if (status.rules.length) chips.push({ text: `${status.rules.length} 条策略` });
   if (status.passthrough.length)

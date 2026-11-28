@@ -26,6 +26,8 @@ export interface SandboxStatus {
   /** 正在记（沙箱开着）。 */
   auditing: boolean;
   dir: string | null;
+  /** 这个会话记过几次（Dock 每起一次、沙箱开着各一份目录）；`records` / `intact` 算的是全部。 */
+  runs?: number;
   records: number;
   /** 哈希链和正文块都对得上。 */
   intact: boolean;
@@ -34,7 +36,11 @@ export interface SandboxStatus {
   /** 命令进系统沙箱（`[sandbox] confine`）。 */
   confine: boolean;
   network: "allow" | "proxy" | "off";
+  /** 系统沙箱后端（`seatbelt` / `landlock`）；本机用不了是 `null`，原因在 `backendReason`。 */
   backend: string | null;
+  backendReason?: string | null;
+  /** 这台机器上的后端做不到的保证（老 Dock 没有这两项）。 */
+  limits?: string[];
   rules: SandboxRule[];
   passthrough: { host: string; saved: boolean }[];
 }
@@ -90,7 +96,10 @@ export interface TraceTotals {
 }
 
 export interface SandboxTrace {
+  /** 沙箱现在开着、接着记。关着时照样给之前记下的。 */
   auditing: boolean;
+  /** 这个会话记过几次（跨 Dock 重启接起来；之前几次的 job id 后面带 `@<第几次>`）。 */
+  runs?: number;
   records?: number;
   graph: { nodes: TraceNode[]; edges: TraceEdge[] };
   totals: TraceTotals | null;
@@ -100,7 +109,9 @@ export interface SandboxTrace {
 /** 这个 Dock 认不认 `sandbox/*`（老版本没有）。 */
 export const canTrace = () => !!dock.capabilities.sandboxTrace;
 
-export const sandboxStatus = (threadId: string) => dock.call<SandboxStatus>("sandbox/status", { threadId });
+/** 不给 `threadId` 就是第 1 页（设置页只看后端和配置，不看某一页）。 */
+export const sandboxStatus = (threadId?: string) =>
+  dock.call<SandboxStatus>("sandbox/status", threadId ? { threadId } : {});
 
 export const sandboxTrace = (threadId: string, limit = 300) =>
   dock.call<SandboxTrace>("sandbox/trace", { threadId, limit });
@@ -129,6 +140,7 @@ export interface HttpRow extends TraceRow {
 
 export interface SandboxHttp {
   auditing: boolean;
+  runs?: number;
   records?: number;
   requests: HttpRow[];
 }

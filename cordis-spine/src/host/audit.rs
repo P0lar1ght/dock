@@ -47,6 +47,8 @@ const PASSTHROUGH: &str = "passthrough.json";
 pub struct Active {
     pub dir: PathBuf,
     pub(crate) log: Arc<AuditLog>,
+    /// 记的是哪个会话（目录名的后半截）。页换了会话就另开一份。
+    session: String,
 }
 
 /// 出口代理和 Dock 根证书（第一次有命令要用时才起）。
@@ -71,7 +73,8 @@ pub struct Audit {
     /// 页（`ui_page`）→ 这一页正在进行的审计（沙箱开着、第一次有东西要记时开）。
     pages: Mutex<HashMap<String, Arc<Active>>>,
     /// 页 → 这次任务里临时放行的规则（`/sandbox allow …`），排在配置的规则前面。
-    grants: Mutex<HashMap<String, Vec<Rule>>>,
+    /// 放行时那一页的会话一起记着：页换了会话（`/resume`）就不再生效。
+    grants: Mutex<HashMap<String, (String, Vec<Rule>)>>,
     egress: OnceLock<Result<Arc<Egress>, String>>,
     routes: Routes,
 }
@@ -96,18 +99,50 @@ impl Audit {
     }
 
     /// `ctx` 所在那一页正在进行的审计：沙箱没开就是 `None`；开着就第一次碰到时开一份。
+    ///
+    /// 这一页换了会话（`/resume`、恢复了别的会话）时，前一个会话的审计记一条「结束」，
+    /// 新会话另开一份：目录按会话命名，会话的历史（[`session_runs`]）才不会混进别人的记录。
+    /// 只在页自己的上下文里比对：子代理的会话 id 不是这一页的，沿用这一页正在记的那份。
     pub fn active(&self, ctx: &Context) -> Option<Arc<Active>> {
         if !crate::host::sandbox::enabled(ctx) {
             return None;
         }
         let (page, sessions) = Self::page_of(ctx)?;
+        let session = session_of(&page, &sessions);
         let mut pages = self.pages.lock().unwrap();
-        if let Some(active) = pages.get(&page) {
-            return Some(active.clone());
+        let switched = match pages.get(&page) {
+            Some(active) if !sessions.is_main() || active.session == session => {
+                return Some(active.clone());
+            }
+            Some(active) => {
+                active.log.record(
+                    "audit",
+                    json!({ "event": "结束", "reason": "这一页换了会话" }),
+                );
+                true
+            }
+            None => false,
+        };
+        let active = Arc::new(start(&page, &session, &sessions).ok()?);
+        pages.insert(page.clone(), active.clone());
+        drop(pages);
+        // 上一个会话的临时放行也到此为止（`rules_for` 本来就不认，这里顺手清掉）。
+        if switched {
+            self.grants.lock().unwrap().remove(&page);
         }
-        let active = Arc::new(start(&page, &sessions).ok()?);
-        pages.insert(page, active.clone());
         Some(active)
+    }
+
+    /// 这一页此刻在记的那份（不新开）：沙箱关着、还没记过、换了会话都是 `None`。
+    fn current(&self, page: &Context) -> Option<Arc<Active>> {
+        let (key, sessions) = Self::page_of(page)?;
+        let session = session_of(&key, &sessions);
+        self.pages
+            .lock()
+            .unwrap()
+            .get(&key)
+            .filter(|a| a.session == session)
+            .cloned()
     }
 
     /// 沙箱关了：结束这一页的审计（记一条「结束」），这次任务的临时放行也作废。返回目录。
@@ -121,28 +156,38 @@ impl Audit {
         })
     }
 
-    /// 这次任务里临时放行一条（`/sandbox allow`）：排在配置的规则前面，沙箱关掉就作废。
+    /// 这次任务里临时放行一条（`/sandbox allow`）：排在配置的规则前面，沙箱关掉、页换了会话
+    /// 就作废。
     pub fn grant(&self, ctx: &Context, rule: Rule) {
-        if let Some((page, _)) = Self::page_of(ctx) {
+        if let Some((page, sessions)) = Self::page_of(ctx) {
             if let Some(active) = self.active(ctx) {
                 active.log.record(
                     "audit",
                     json!({ "event": "临时放行", "host": rule.host, "command": rule.command }),
                 );
             }
-            self.grants
-                .lock()
-                .unwrap()
+            let session = session_of(&page, &sessions);
+            let mut grants = self.grants.lock().unwrap();
+            let entry = grants
                 .entry(page)
-                .or_default()
-                .push(rule);
+                .or_insert_with(|| (session.clone(), Vec::new()));
+            if sessions.is_main() && entry.0 != session {
+                *entry = (session, Vec::new());
+            }
+            entry.1.push(rule);
         }
     }
 
-    /// 这一页生效的规则：临时放行的在前，配置的（`[[sandbox.rules]]`）在后。
+    /// 这一页生效的规则：临时放行的在前，配置的（`[[sandbox.rules]]`）在后。临时放行只认放行时
+    /// 那个会话（子代理的上下文认不出这一页的会话，沿用这一页的，同 [`Self::active`]）。
     pub fn rules_for(&self, ctx: &Context) -> Vec<Rule> {
         let mut out = Self::page_of(ctx)
-            .and_then(|(page, _)| self.grants.lock().unwrap().get(&page).cloned())
+            .and_then(|(page, sessions)| {
+                let grants = self.grants.lock().unwrap();
+                let (session, rules) = grants.get(&page)?;
+                (!sessions.is_main() || *session == session_of(&page, &sessions))
+                    .then(|| rules.clone())
+            })
             .unwrap_or_default();
         out.extend(load_sandbox_config().rules.iter().map(to_rule));
         out
@@ -221,17 +266,59 @@ pub(crate) async fn check_host(page: &Context, host: &str, port: Option<u16>) ->
     }
 }
 
-/// 新开一份审计目录。
-fn start(page: &str, sessions: &Sessions) -> Result<Active, String> {
-    let session = match sessions.live_session_id() {
+/// 一页记在哪个会话名下：落盘的会话 id，还没有就是页名。
+fn session_of(page: &str, sessions: &Sessions) -> String {
+    match sessions.live_session_id() {
         id if id.is_empty() => page.to_string(),
         id => id,
+    }
+}
+
+/// 审计目录名的后半截（`<时间>-<会话>`）。
+fn dir_suffix(session: &str) -> String {
+    session.replace(|c: char| !c.is_ascii_alphanumeric() && c != '-', "_")
+}
+
+/// `YYYYMMDD-HHMMSS`（[`stamp`]）的长度。
+const STAMP_LEN: usize = 15;
+
+/// 一个会话记过的每一次（Dock 每起一次、沙箱开着就各开一份目录），按时间先后。
+/// Dock 重启后打开老会话，行为轨迹靠它把之前几次的记录接上。
+pub(crate) fn session_runs(session: &str) -> Vec<PathBuf> {
+    let suffix = format!("-{}", dir_suffix(session));
+    let is_stamp = |s: &str| {
+        s.len() == STAMP_LEN
+            && s.char_indices()
+                .all(|(i, c)| if i == 8 { c == '-' } else { c.is_ascii_digit() })
     };
-    let dir = dock_home().join("audit").join(format!(
-        "{}-{}",
-        stamp(),
-        session.replace(|c: char| !c.is_ascii_alphanumeric() && c != '-', "_")
-    ));
+    let mut dirs: Vec<PathBuf> = std::fs::read_dir(dock_home().join("audit"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        .filter(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            name.strip_suffix(&suffix).is_some_and(is_stamp)
+        })
+        .map(|e| e.path())
+        .collect();
+    dirs.sort();
+    dirs
+}
+
+/// 这一页的会话记过的每一次（见 [`session_runs`]）。
+fn page_runs(page: &Context) -> Vec<PathBuf> {
+    match Audit::page_of(page) {
+        Some((key, sessions)) => session_runs(&session_of(&key, &sessions)),
+        None => Vec::new(),
+    }
+}
+
+/// 新开一份审计目录。
+fn start(page: &str, session: &str, sessions: &Sessions) -> Result<Active, String> {
+    let dir = dock_home()
+        .join("audit")
+        .join(format!("{}-{}", stamp(), dir_suffix(session)));
     let log =
         AuditLog::open(&dir, EVENTS).map_err(|e| format!("开审计目录 {}：{e}", dir.display()))?;
     let cfg = load_sandbox_config();
@@ -250,6 +337,7 @@ fn start(page: &str, sessions: &Sessions) -> Result<Active, String> {
     Ok(Active {
         dir,
         log: Arc::new(log),
+        session: session.to_string(),
     })
 }
 
@@ -701,16 +789,20 @@ fn on_execute(result: &ToolResult) {
 pub fn sandbox_status(page: &Context) -> Value {
     let cfg = load_sandbox_config();
     let audit = page.get::<Audit>(AUDIT);
-    let active = audit.as_ref().and_then(|a| a.active(page));
-    let (records, intact) = match &active {
-        Some(a) => (
-            dock_sandbox::audit::store::read(&a.dir).len(),
-            dock_sandbox::audit::store::verify(&a.dir)
-                .iter()
-                .all(|v| v.intact()),
-        ),
-        None => (0, true),
-    };
+    let enabled = crate::host::sandbox::enabled(page);
+    // 这个会话记过的每一次都算：Dock 重启过，之前的记录照样在、照样验。
+    let runs = page_runs(page);
+    let records = dock_sandbox::audit::store::read_runs(&runs).len();
+    let intact = runs.iter().all(|dir| {
+        dock_sandbox::audit::store::verify(dir)
+            .iter()
+            .all(|v| v.intact())
+    });
+    let dir = audit
+        .as_ref()
+        .and_then(|a| a.current(page))
+        .map(|a| a.dir.clone())
+        .or_else(|| runs.last().cloned());
     let rules: Vec<Value> = audit
         .as_ref()
         .map(|a| a.rules_for(page))
@@ -740,16 +832,24 @@ pub fn sandbox_status(page: &Context) -> Value {
         Some(Err(_)) => "unavailable",
         None => "idle",
     };
-    let backend = match dock_sandbox::availability() {
-        dock_sandbox::Availability::Ready { backend, .. } => Some(backend.name()),
-        dock_sandbox::Availability::Unavailable { .. } => None,
+    // 系统沙箱后端（限制要靠它）：能用时还有这台机器上做不到的保证，不能用时有原因。
+    let (backend, backend_reason, limits) = match dock_sandbox::availability() {
+        dock_sandbox::Availability::Ready { backend, limits } => (
+            Some(backend.name()),
+            None,
+            limits.iter().map(|l| l.describe()).collect::<Vec<_>>(),
+        ),
+        dock_sandbox::Availability::Unavailable { reason } => {
+            (None, Some(reason.as_str()), Vec::new())
+        }
     };
     json!({
-        "enabled": crate::host::sandbox::enabled(page),
+        "enabled": enabled,
         "workspace": crate::session::cwd::session_space(page),
         "cwd": crate::session::cwd::session_cwd(page),
-        "auditing": active.is_some(),
-        "dir": active.as_ref().map(|a| a.dir.display().to_string()),
+        "auditing": enabled,
+        "dir": dir.map(|d| d.display().to_string()),
+        "runs": runs.len(),
         "records": records,
         "intact": intact,
         "decrypt": cfg.decrypt,
@@ -761,27 +861,34 @@ pub fn sandbox_status(page: &Context) -> Value {
             cordis_base::config::SandboxNetwork::Off => "off",
         },
         "backend": backend,
+        "backendReason": backend_reason,
+        "limits": limits,
         "rules": rules,
         "passthrough": passthrough,
     })
 }
 
-/// dock.1 `sandbox/trace`：这一页的行为链路图（会话 → 工具 → 程序 → 主机，带次数、流量、出错）、
-/// 概况和最近 `limit` 条时间线。沙箱没开（没在记）时 `auditing: false`、图和时间线是空的。
+/// dock.1 `sandbox/trace`：这一页的会话的行为链路图（会话 → 工具 → 程序 → 主机，带次数、流量、
+/// 出错）、概况和最近 `limit` 条时间线。会话记过的每一次都接上（Dock 重启之前的也在）；
+/// 沙箱现在关着也照样给之前记下的。`auditing` = 现在开着、接着记。
 pub fn sandbox_trace(page: &Context, limit: usize) -> Value {
-    let active = page.get::<Audit>(AUDIT).and_then(|a| a.active(page));
-    let Some(active) = active else {
+    let runs = page_runs(page);
+    let events = dock_sandbox::audit::store::read_runs(&runs);
+    let auditing = crate::host::sandbox::enabled(page);
+    if events.is_empty() {
         return json!({
-            "auditing": false,
+            "auditing": auditing,
+            "runs": runs.len(),
+            "records": 0,
             "graph": { "nodes": [], "edges": [] },
             "totals": Value::Null,
             "timeline": [],
         });
-    };
-    let events = dock_sandbox::audit::store::read(&active.dir);
+    }
     let summary = dock_sandbox::audit::graph::Summary::build(&events);
     json!({
-        "auditing": true,
+        "auditing": auditing,
+        "runs": runs.len(),
         "records": events.len(),
         "graph": summary.graph(),
         "totals": {
@@ -796,33 +903,48 @@ pub fn sandbox_trace(page: &Context, limit: usize) -> Value {
     })
 }
 
-/// dock.1 `sandbox/http`：这一页最近 `limit` 次出网（HTTP 历史），每条带 `id`（按它取完整的包）。
+/// dock.1 `sandbox/http`：这一页的会话最近 `limit` 次出网（HTTP 历史，跨 Dock 重启），
+/// 每条带 `id`（按它取完整的包）。
 pub fn sandbox_http(page: &Context, limit: usize) -> Value {
-    let Some(active) = page.get::<Audit>(AUDIT).and_then(|a| a.active(page)) else {
-        return json!({ "auditing": false, "requests": [] });
-    };
-    let events = dock_sandbox::audit::store::read(&active.dir);
+    let runs = page_runs(page);
+    let events = dock_sandbox::audit::store::read_runs(&runs);
     json!({
-        "auditing": true,
+        "auditing": crate::host::sandbox::enabled(page),
+        "runs": runs.len(),
         "records": events.len(),
         "requests": dock_sandbox::audit::graph::requests(&events, limit),
     })
 }
 
 /// dock.1 `sandbox/flow`：一次出网的请求包 / 响应包（首行、头、正文；压缩的解开）。
-/// 沙箱没开、没有这条是 `None`。
+/// `id` 是 `<目录名>/<文件>:<序号>`（[`dock_sandbox::audit::store::read_runs`]），目录只认
+/// 这一页的会话自己的那几份。老的 `<文件>:<序号>` 按最近一次找。没有这条是 `None`。
 pub fn sandbox_flow(page: &Context, id: &str) -> Option<Value> {
-    let active = page.get::<Audit>(AUDIT).and_then(|a| a.active(page))?;
-    dock_sandbox::audit::packet::flow_detail(&active.dir, id)
+    let runs = page_runs(page);
+    let (dir, rest) = match id.split_once('/') {
+        Some((name, rest)) => (
+            runs.iter()
+                .find(|d| d.file_name().is_some_and(|n| n == name))?,
+            rest,
+        ),
+        None => (runs.last()?, id),
+    };
+    let mut detail = dock_sandbox::audit::packet::flow_detail(dir, rest)?;
+    detail["id"] = json!(id);
+    Some(detail)
 }
 
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
-/// `/sandbox graph`：概况、终端里的链路树，后面附 Mermaid（桌面端画成图）。
-pub(crate) fn graph_text(active: &Active) -> String {
-    let events = dock_sandbox::audit::store::read(&active.dir);
+/// `/sandbox graph`：这一页的会话记过的（跨 Dock 重启）概况、终端里的链路树，后面附 Mermaid
+/// （桌面端画成图）。什么都没记过是 `None`。
+pub(crate) fn graph_text(page: &Context) -> Option<String> {
+    let events = dock_sandbox::audit::store::read_runs(&page_runs(page));
+    if events.is_empty() {
+        return None;
+    }
     let summary = dock_sandbox::audit::graph::Summary::build(&events);
-    format!(
+    Some(format!(
         "工具调用 {} · 命令 {} · 出网 {}（解密 {}）· 流量 {} · 失败 {}\n\n{}\n可视化报告：/sandbox export\n\n```mermaid\n{}```",
         summary.tool_calls,
         summary.commands,
@@ -832,7 +954,7 @@ pub(crate) fn graph_text(active: &Active) -> String {
         summary.errors,
         summary.tree(),
         summary.mermaid()
-    )
+    ))
 }
 
 /// `/sandbox export`：报告与原始记录，返回 `report.html` 的路径。
@@ -845,20 +967,31 @@ pub(crate) fn export(active: &Active) -> Result<PathBuf, String> {
 /// `/sandbox status` 里审计那几行。
 pub(crate) fn status_lines(audit: &Audit, page: &Context) -> Vec<String> {
     let mut out = Vec::new();
-    match audit.active(page) {
-        Some(active) => {
-            let events = dock_sandbox::audit::store::read(&active.dir);
-            let intact = dock_sandbox::audit::store::verify(&active.dir)
-                .iter()
-                .all(|v| v.intact());
-            out.push(format!(
-                "审计：{}（{} 条，哈希链{}）",
-                active.dir.display(),
-                events.len(),
-                if intact { "完好" } else { "对不上" }
-            ));
+    let runs = page_runs(page);
+    let records = dock_sandbox::audit::store::read_runs(&runs).len();
+    let intact = runs.iter().all(|dir| {
+        dock_sandbox::audit::store::verify(dir)
+            .iter()
+            .all(|v| v.intact())
+    });
+    let history = match runs.len() {
+        0 => String::new(),
+        1 => format!(
+            "（{records} 条，哈希链{}）",
+            if intact { "完好" } else { "对不上" }
+        ),
+        n => format!(
+            "（这个会话 {n} 次运行共 {records} 条，哈希链{}）",
+            if intact { "完好" } else { "对不上" }
+        ),
+    };
+    match (audit.current(page), crate::host::sandbox::enabled(page)) {
+        (Some(active), _) => out.push(format!("审计：{}{history}", active.dir.display())),
+        (None, true) => out.push(format!("审计：开着，有东西要记时开一份新目录{history}")),
+        (None, false) if !runs.is_empty() => {
+            out.push(format!("审计：没在记（沙箱关着）；之前记过{history}"))
         }
-        None => out.push("审计：没在记（沙箱开着才记）".into()),
+        (None, false) => out.push("审计：没在记（沙箱开着才记）".into()),
     }
     match audit.egress.get() {
         Some(Ok(e)) => out.push(format!(

@@ -239,7 +239,7 @@ prompt_cache = true
 # enabled = false          # 新开的页默认开不开（开 = 审计 + 策略，见 docs/SANDBOX.md）
 # decrypt = true           # 审计：命令的 HTTPS 在出口代理处解密（docs/AUDIT.md）
 # body_cap_kb = 256        # 审计：正文最多记多少 KB
-# redact_secrets = true    # 审计：遮住 Authorization / Cookie 这类凭据头
+# redact_secrets = false   # 审计：true = 遮住 Authorization / Cookie 这类凭据头（默认原样记）
 # confine = false          # 限制：命令进系统沙箱（只写工作区、读不到密钥），这时沙箱里的命令不弹框
 # network = "allow"        # 限制开着时命令的网络："allow" | "proxy"（只能经审计代理）| "off"
 # build_caches = true      # ~/.cargo/registry、~/.npm、~/.cache 等依赖缓存可不可写

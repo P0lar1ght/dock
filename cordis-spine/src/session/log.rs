@@ -92,6 +92,9 @@ pub struct ArchivedSession {
     /// 会话在哪干活（`meta.json` 的 `sandbox` / `workdir`）。`None` = 就在归档目录里，
     /// 也是老会话的样子。
     pub place: Option<Place>,
+    /// 这一页的沙箱开没开（`meta.json` 的 `sandbox_enabled`）。`None` = 老会话，或那一页
+    /// 没有 `settings`：恢复时按配置的默认（`[sandbox] enabled`）。
+    pub sandbox_enabled: Option<bool>,
 }
 
 /// 会话的位置：沙箱工作区，和工作区里的当前目录。
@@ -594,6 +597,27 @@ impl Sessions {
     /// 的会话，下次开还是切过的那一份。还没说过话的会话照旧不落盘。
     pub fn persist_sampling(&self) {
         self.persist_live();
+    }
+
+    /// 沙箱刚开 / 关：马上写进 `meta.json`（见 [`Self::persist_sampling`]）。
+    pub fn persist_sandbox(&self) {
+        self.persist_live();
+    }
+
+    /// 这一页的沙箱开关，落盘时盖进 `meta.json`。没有 `settings`（子代理、裸会话）不记。
+    fn sandbox_snapshot(&self) -> Option<bool> {
+        Some(self.ctx.get::<AppSettings>(SETTINGS)?.sandbox())
+    }
+
+    /// 恢复会话时把它的沙箱开关切回来：开着沙箱的会话，Dock 重启后接着审计、接着限制，
+    /// 不会悄悄变成没沙箱。老会话没记，按配置的默认（和新开的页一样）。
+    fn apply_sandbox(&self, enabled: Option<bool>) {
+        let Some(settings) = self.ctx.get::<AppSettings>(SETTINGS) else {
+            return;
+        };
+        settings.set_sandbox(
+            enabled.unwrap_or_else(|| cordis_base::config::load_sandbox_config().enabled),
+        );
     }
 
     /// 把会话记下的模型与推理强度切回这一页。fail-open：模型已经不在目录里就
@@ -2120,6 +2144,7 @@ impl Sessions {
             preset_id: self.live_preset_id.lock().unwrap().clone(),
             sampling: self.sampling_snapshot(),
             place: self.place_snapshot(),
+            sandbox_enabled: self.sandbox_snapshot(),
         };
         self.write_archived(&item);
         self.archive.lock().unwrap().insert(0, item.clone());
@@ -2172,6 +2197,7 @@ impl Sessions {
             self.apply_sampling(sampling);
         }
         self.apply_place(item.place.as_ref());
+        self.apply_sandbox(item.sandbox_enabled);
         self.bump_events_rev();
         *self.ledger.lock().unwrap() = UsageLedger::default();
         if let Some(event) = last {
@@ -2380,6 +2406,7 @@ impl Sessions {
             preset_id: self.live_preset_id.lock().unwrap().clone(),
             sampling: self.sampling_snapshot(),
             place: self.place_snapshot(),
+            sandbox_enabled: self.sandbox_snapshot(),
         };
         let _ = crate::session::persist::save(&item, &cwd);
     }

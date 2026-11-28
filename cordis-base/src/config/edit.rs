@@ -990,8 +990,16 @@ pub fn key_name_in_use(name: &str) -> bool {
 pub enum KeyKind {
     Bool,
     Int,
+    /// 有上限的整数：超了拒绝，不写一个读的时候会被悄悄截断的值。
+    IntMax(i64),
     Str,
     StrList,
+    /// 路径列表：每项是绝对路径或 `~/` 开头。相对路径没有明确的基准，沙箱会悄悄不认，所以写不进去。
+    PathList,
+    /// 几个固定取值之一（第一个是默认）。
+    Choice(&'static [&'static str]),
+    /// `[[sandbox.rules]]`：`{ host | command, action }` 的表数组，按顺序。
+    SandboxRules,
     /// 读的时候只说有没有，不回值。
     Secret,
 }
@@ -1017,7 +1025,25 @@ pub const SETTING_KEYS: &[(&str, KeyKind)] = &[
     ("memory.embedding.base", KeyKind::Str),
     ("memory.embedding.dimensions", KeyKind::Int),
     ("memory.embedding.api_key", KeyKind::Secret),
+    // `[sandbox]`（docs/SANDBOX.md「配置」）：只认用户级配置，正好是这里写的那份。
+    ("sandbox.enabled", KeyKind::Bool),
+    ("sandbox.decrypt", KeyKind::Bool),
+    ("sandbox.body_cap_kb", KeyKind::IntMax(64 * 1024)),
+    ("sandbox.redact_secrets", KeyKind::Bool),
+    ("sandbox.confine", KeyKind::Bool),
+    (
+        "sandbox.network",
+        KeyKind::Choice(&["allow", "proxy", "off"]),
+    ),
+    ("sandbox.build_caches", KeyKind::Bool),
+    ("sandbox.writable_roots", KeyKind::PathList),
+    ("sandbox.deny_read", KeyKind::PathList),
+    ("sandbox.keep_env", KeyKind::StrList),
+    ("sandbox.rules", KeyKind::SandboxRules),
 ];
+
+/// 规则的 `action`。
+const RULE_ACTIONS: &[&str] = &["allow", "ask", "deny"];
 
 fn key_kind(key: &str) -> Option<KeyKind> {
     SETTING_KEYS
@@ -1044,12 +1070,22 @@ pub fn read_settings_in(path: &Path) -> Value {
         let value = match (kind, item) {
             (_, None) => Value::Null,
             (KeyKind::Bool, Some(i)) => i.as_bool().map(Value::from).unwrap_or(Value::Null),
-            (KeyKind::Int, Some(i)) => i.as_integer().map(Value::from).unwrap_or(Value::Null),
+            (KeyKind::Int | KeyKind::IntMax(_), Some(i)) => {
+                i.as_integer().map(Value::from).unwrap_or(Value::Null)
+            }
             (KeyKind::Str, Some(i)) => i.as_str().map(Value::from).unwrap_or(Value::Null),
-            (KeyKind::StrList, Some(i)) => i
+            (KeyKind::StrList | KeyKind::PathList, Some(i)) => i
                 .as_array()
                 .map(|a| json!(a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>()))
                 .unwrap_or(Value::Null),
+            (KeyKind::Choice(options), Some(i)) => match (i.as_str(), i.as_bool()) {
+                (Some(s), _) if options.contains(&s.trim()) => Value::from(s.trim()),
+                // `network = true / false` 的老写法：true = 照常（第一个），false = off。
+                (_, Some(true)) => Value::from(options[0]),
+                (_, Some(false)) if options.contains(&"off") => Value::from("off"),
+                _ => Value::Null,
+            },
+            (KeyKind::SandboxRules, Some(i)) => read_rules(i),
             (KeyKind::Secret, Some(i)) => {
                 if i.as_str().is_some_and(|s| !s.is_empty()) {
                     Value::Bool(true)
@@ -1067,14 +1103,77 @@ pub fn read_settings() -> Value {
     read_settings_in(&user_config_path())
 }
 
-fn to_toml(kind: KeyKind, key: &str, value: &Value) -> Result<toml_edit::Value, String> {
+/// 文件里的规则原样回（写错的也回，界面标出来让人删）：`[{ host, command, action }]`。
+fn read_rules(item: &toml_edit::Item) -> Value {
+    let row = |t: &dyn toml_edit::TableLike| {
+        let field = |k: &str| t.get(k).and_then(|v| v.as_str()).map(Value::from);
+        json!({
+            "host": field("host").unwrap_or(Value::Null),
+            "command": field("command").unwrap_or(Value::Null),
+            "action": field("action").unwrap_or(Value::Null),
+        })
+    };
+    let rows: Vec<Value> = if let Some(aot) = item.as_array_of_tables() {
+        aot.iter().map(|t| row(t)).collect()
+    } else if let Some(arr) = item.as_array() {
+        arr.iter()
+            .filter_map(|v| v.as_inline_table())
+            .map(|t| row(t))
+            .collect()
+    } else {
+        return Value::Null;
+    };
+    Value::Array(rows)
+}
+
+/// 界面交来的规则 → `[[sandbox.rules]]`。和读配置时一样严：`host` / `command` 恰好一个、
+/// `action` 认得；不对就整次不写，说清是第几条。
+fn rules_to_toml(key: &str, value: &Value) -> Result<toml_edit::Item, String> {
+    let rows = value
+        .as_array()
+        .ok_or_else(|| format!("{key} 的值类型不对"))?;
+    let mut aot = toml_edit::ArrayOfTables::new();
+    for (i, row) in rows.iter().enumerate() {
+        let n = i + 1;
+        let field = |k: &str| {
+            row.get(k)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+        };
+        let mut t = toml_edit::Table::new();
+        match (field("host"), field("command")) {
+            (Some(h), None) => t["host"] = toml_edit::value(h),
+            (None, Some(c)) => t["command"] = toml_edit::value(c),
+            (Some(_), Some(_)) => return Err(format!("第 {n} 条规则：目的地和命令只能写一个")),
+            (None, None) => return Err(format!("第 {n} 条规则：要写目的地或命令")),
+        }
+        let action = field("action").unwrap_or("");
+        if !RULE_ACTIONS.contains(&action) {
+            return Err(format!(
+                "第 {n} 条规则：action 只能是 {}",
+                RULE_ACTIONS.join(" / ")
+            ));
+        }
+        t["action"] = toml_edit::value(action);
+        aot.push(t);
+    }
+    Ok(toml_edit::Item::ArrayOfTables(aot))
+}
+
+fn to_toml(kind: KeyKind, key: &str, value: &Value) -> Result<toml_edit::Item, String> {
     let bad = || format!("{key} 的值类型不对");
-    Ok(match kind {
+    Ok(toml_edit::Item::Value(match kind {
         KeyKind::Bool => toml_edit::Value::from(value.as_bool().ok_or_else(bad)?),
-        KeyKind::Int => {
+        KeyKind::Int | KeyKind::IntMax(_) => {
             let n = value.as_i64().ok_or_else(bad)?;
             if n < 0 {
                 return Err(format!("{key} 不能是负数"));
+            }
+            if let KeyKind::IntMax(max) = kind {
+                if n > max {
+                    return Err(format!("{key} 最多 {max}"));
+                }
             }
             toml_edit::Value::from(n)
         }
@@ -1091,13 +1190,39 @@ fn to_toml(kind: KeyKind, key: &str, value: &Value) -> Result<toml_edit::Value, 
                 .collect::<Result<_, _>>()?;
             str_array(&items)
         }
-    })
+        KeyKind::PathList => {
+            let items: Vec<String> = value
+                .as_array()
+                .ok_or_else(bad)?
+                .iter()
+                .map(|v| v.as_str().map(str::trim).ok_or_else(bad))
+                .filter(|s| !matches!(s, Ok("")))
+                .map(|s| {
+                    let s = s?;
+                    let ok = s == "~" || s.starts_with("~/") || Path::new(s).is_absolute();
+                    ok.then(|| s.to_string())
+                        .ok_or_else(|| format!("{s} 不是绝对路径（也可以 ~/ 开头）"))
+                })
+                .collect::<Result<_, _>>()?;
+            str_array(&items)
+        }
+        KeyKind::Choice(options) => {
+            let s = value.as_str().ok_or_else(bad)?.trim();
+            if !options.contains(&s) {
+                return Err(format!("{key} 只能是 {}", options.join(" / ")));
+            }
+            toml_edit::Value::from(s)
+        }
+        KeyKind::SandboxRules => return rules_to_toml(key, value),
+    }))
 }
 
 /// 写一个白名单键；`value` 为 `null`（或空字符串）= 删掉这个键，回到默认。
 pub fn write_setting_in(path: &Path, key: &str, value: &Value) -> Result<(), String> {
     let kind = key_kind(key).ok_or_else(|| format!("设置页不能改 {key}"))?;
-    let remove = value.is_null() || value.as_str().is_some_and(|s| s.trim().is_empty());
+    // 没有规则 = 全部放行，和不写这个键一样：空表就删掉，不留一个空的 `rules = []`。
+    let no_rules = kind == KeyKind::SandboxRules && value.as_array().is_some_and(|a| a.is_empty());
+    let remove = value.is_null() || no_rules || value.as_str().is_some_and(|s| s.trim().is_empty());
     let new = if remove {
         None
     } else {
@@ -1123,8 +1248,8 @@ pub fn write_setting_in(path: &Path, key: &str, value: &Value) -> Result<(), Str
                 .ok_or_else(|| format!("config.toml 里的 {part} 不是表"))?;
         }
         match new {
-            Some(v) => {
-                table.insert(leaf, toml_edit::Item::Value(v));
+            Some(item) => {
+                table.insert(leaf, item);
             }
             None => {
                 table.remove(leaf);
@@ -1682,6 +1807,121 @@ mod tests {
         );
         assert!(write_setting_in(&path, "models.default", &json!("x")).is_err());
         assert!(write_setting_in(&path, "memory.enabled", &json!("yes")).is_err());
+    }
+
+    /// 设置页写的 `[sandbox]`，沙箱自己读出来是同一个意思（规则按顺序、路径和档位校验过）。
+    #[test]
+    fn sandbox_settings_round_trip_through_the_loader() {
+        use super::super::{load_sandbox_config_from, RuleAction, SandboxNetwork, SandboxRule};
+        let (_d, path) = tmp("# 我的配置\n[sandbox]\nenabled = true # 默认开\n");
+        write_setting_in(&path, "sandbox.confine", &json!(true)).unwrap();
+        write_setting_in(&path, "sandbox.network", &json!("proxy")).unwrap();
+        write_setting_in(&path, "sandbox.body_cap_kb", &json!(512)).unwrap();
+        write_setting_in(
+            &path,
+            "sandbox.writable_roots",
+            &json!(["~/build", " /opt/x ", ""]),
+        )
+        .unwrap();
+        write_setting_in(&path, "sandbox.keep_env", &json!(["GITHUB_TOKEN"])).unwrap();
+        let rules = json!([
+            { "host": "*.corp.example", "action": "deny" },
+            { "command": " git push* ", "action": "ask" },
+        ]);
+        write_setting_in(&path, "sandbox.rules", &rules).unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("# 我的配置") && text.contains("# 默认开"),
+            "注释留着：{text}"
+        );
+        assert!(text.contains("[[sandbox.rules]]"), "{text}");
+
+        let cfg = load_sandbox_config_from(&path);
+        assert!(cfg.enabled && cfg.confine);
+        assert_eq!(cfg.network, SandboxNetwork::Proxy);
+        assert_eq!(cfg.body_cap_kb, 512);
+        assert_eq!(
+            cfg.writable_roots,
+            vec!["~/build".to_string(), "/opt/x".to_string()]
+        );
+        assert_eq!(cfg.keep_env, vec!["GITHUB_TOKEN".to_string()]);
+        assert_eq!(
+            cfg.rules,
+            vec![
+                SandboxRule {
+                    host: Some("*.corp.example".into()),
+                    command: None,
+                    action: RuleAction::Deny
+                },
+                SandboxRule {
+                    host: None,
+                    command: Some("git push*".into()),
+                    action: RuleAction::Ask
+                },
+            ]
+        );
+
+        let values = read_settings_in(&path);
+        assert_eq!(values["sandbox.network"], json!("proxy"));
+        assert_eq!(
+            values["sandbox.rules"],
+            json!([
+                { "host": "*.corp.example", "command": null, "action": "deny" },
+                { "host": null, "command": "git push*", "action": "ask" },
+            ])
+        );
+
+        // 换顺序：第一条命中的算，顺序就是语义。
+        write_setting_in(&path, "sandbox.rules", &json!([rules[1], rules[0]])).unwrap();
+        assert_eq!(
+            load_sandbox_config_from(&path).rules[0].command.as_deref(),
+            Some("git push*")
+        );
+        // 没有规则 = 全部放行：键删掉，不留空数组。
+        write_setting_in(&path, "sandbox.rules", &json!([])).unwrap();
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("rules"));
+        assert_eq!(read_settings_in(&path)["sandbox.rules"], Value::Null);
+    }
+
+    #[test]
+    fn sandbox_settings_reject_what_the_sandbox_would_silently_ignore() {
+        let (_d, path) = tmp("");
+        let err = |key: &str, v: Value| write_setting_in(&path, key, &v).unwrap_err();
+        assert!(err("sandbox.writable_roots", json!(["build"])).contains("不是绝对路径"));
+        assert!(err("sandbox.network", json!("maybe")).contains("allow / proxy / off"));
+        // 上限和沙箱读配置时一样：超了拒绝，文件里不留一个读的时候会被截断的值。
+        assert!(err("sandbox.body_cap_kb", json!(64 * 1024 + 1)).contains("最多 65536"));
+        assert!(err(
+            "sandbox.rules",
+            json!([{ "host": "a", "command": "b", "action": "deny" }])
+        )
+        .contains("第 1 条规则：目的地和命令只能写一个"));
+        assert!(err(
+            "sandbox.rules",
+            json!([{ "host": "a", "action": "deny" }, { "action": "deny" }])
+        )
+        .contains("第 2 条规则：要写目的地或命令"));
+        assert!(
+            err("sandbox.rules", json!([{ "host": "a", "action": "maybe" }]))
+                .contains("action 只能是")
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "", "整次不写");
+
+        // 手写的老写法也读得出：`network = false`、行内表的规则。
+        let (_d2, hand) = tmp(
+            "[sandbox]\nnetwork = false\nrules = [{ host = \"x\", action = \"allow\" }, { host = \"y\" }]\n",
+        );
+        let values = read_settings_in(&hand);
+        assert_eq!(values["sandbox.network"], json!("off"));
+        assert_eq!(
+            values["sandbox.rules"],
+            json!([
+                { "host": "x", "command": null, "action": "allow" },
+                { "host": "y", "command": null, "action": null },
+            ]),
+            "写错的那条也回，界面标出来"
+        );
     }
 
     #[test]

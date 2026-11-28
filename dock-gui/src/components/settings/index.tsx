@@ -17,6 +17,7 @@ import {
   Search,
   Server,
   Settings as Gear,
+  ShieldCheck,
   Sparkles,
   User,
   type LucideIcon,
@@ -35,6 +36,7 @@ import { McpPane } from "./Mcp";
 import { PluginsPane } from "./Plugins";
 import { CuaPane } from "./Cua";
 import { BrowserPane } from "./Browser";
+import { SandboxPane } from "./Sandbox";
 import { GatewayPane } from "./Gateway";
 import { AboutPane } from "./About";
 import { PersonalizationPane } from "./Personalization";
@@ -53,6 +55,7 @@ export type SettingsSection =
   | "plugins"
   | "cua"
   | "browser"
+  | "sandbox"
   | "gateway"
   | "about";
 
@@ -94,6 +97,12 @@ const GROUPS: { label: string; items: NavItem[] }[] = [
       { id: "plugins", label: "插件与技能", icon: Puzzle, keys: ["插件", "技能", "插件密钥", "secrets"] },
       { id: "cua", label: "电脑操控 (CUA)", icon: Monitor, keys: ["cua-driver", "辅助功能", "屏幕录制", "agent 光标"] },
       { id: "browser", label: "浏览器与联网", icon: Globe, keys: ["有头", "网页抓取", "超时", "域名", "转发代理", "localhost"] },
+      {
+        id: "sandbox",
+        label: "沙箱",
+        icon: ShieldCheck,
+        keys: ["审计", "解密", "HTTPS", "凭据", "系统沙箱", "限制", "网络", "可写目录", "读不到", "环境变量", "策略规则", "放行", "阻断", "依赖缓存"],
+      },
     ],
   },
   {
@@ -185,6 +194,8 @@ export function Settings({
         return <CuaPane onStatus={setCua} onOpenGeneral={() => onSection("general")} />;
       case "browser":
         return <BrowserPane />;
+      case "sandbox":
+        return <SandboxPane />;
       case "gateway":
         return <GatewayPane />;
       case "about":

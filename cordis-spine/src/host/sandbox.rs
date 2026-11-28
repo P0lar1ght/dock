@@ -581,6 +581,10 @@ fn sandbox_command(page: &Context, args: &str) -> SlashOutcome {
                 audit.close(page);
             }
         }
+        // 记进 meta.json：Dock 重启后打开这个会话，沙箱还是这个状态。
+        if let Some(sessions) = page.get::<crate::session::log::Sessions>(crate::names::SESSIONS) {
+            sessions.persist_sandbox();
+        }
     };
     match sub {
         "" => turn(!settings.sandbox()),
@@ -596,9 +600,9 @@ fn sandbox_command(page: &Context, args: &str) -> SlashOutcome {
         "worktree" | "工作树" => return SlashOutcome::Applied(enter_worktree(page)),
         "inplace" | "原地" => return SlashOutcome::Applied(leave_worktree(page)),
         "graph" | "图" => {
-            return match audit.as_ref().and_then(|a| a.active(page)) {
-                Some(active) => SlashOutcome::notice("沙箱链路图", crate::host::audit::graph_text(&active)),
-                None => SlashOutcome::Applied("这一页的沙箱没开（/sandbox on）".into()),
+            return match crate::host::audit::graph_text(page) {
+                Some(text) => SlashOutcome::notice("沙箱链路图", text),
+                None => SlashOutcome::Applied("这一页的会话还没有审计记录（/sandbox on 之后开始记）".into()),
             }
         }
         "export" | "导出" => {
@@ -784,6 +788,13 @@ action = "deny"
         assert_eq!(status["workspace"]["mode"], "in_place");
         assert_eq!(status["rules"].as_array().unwrap().len(), 3, "{status}");
         assert_eq!(status["rules"][0]["action"], "ask");
+        // 后端要么能用（带做不到的保证），要么不能用（带原因），设置页照着写。
+        assert_ne!(
+            status["backend"].is_null(),
+            status["backendReason"].is_null(),
+            "{status}"
+        );
+        assert!(status["limits"].is_array(), "{status}");
 
         let audit = ctx.get::<Audit>(AUDIT).unwrap();
         let active = audit.active(&ctx).expect("沙箱开着就在记");
@@ -882,6 +893,192 @@ action = "deny"
             crate::host::audit::sandbox_trace(&ctx, 50)["auditing"],
             false
         );
+    }
+
+    /// 回归：Dock 重启后打开老会话，之前几次运行记下的要照样在行为轨迹 / HTTP 历史里、
+    /// 按 id 取得回包。以前只读这一次运行新开的目录，重启前的全看不到。
+    /// 两次运行都有 `job-1`：前一次的出网不能算到这一次的命令头上。别的会话的目录不混进来，
+    /// id 里的目录名也只认这个会话自己的。
+    #[tokio::test]
+    async fn history_spans_dock_restarts_of_the_same_session() {
+        use dock_sandbox::audit::record::{Captured, Flow, Message};
+        use dock_sandbox::audit::store::AuditLog;
+        let (_env, ctx) = policy_page(RULES).await;
+        let audit = ctx.get::<Audit>(AUDIT).unwrap();
+        // 这一次运行：先开出来，好知道这一页的会话在目录名里叫什么。
+        let now = audit.active(&ctx).expect("沙箱开着就在记");
+        let name = now.dir.file_name().unwrap().to_string_lossy().into_owned();
+        let suffix = &name[15..]; // `-<会话>`
+        let root = cordis_base::config::dock_home().join("audit");
+
+        // 上一次运行（Dock 重启前）：同一个会话，job-1 = curl，发过一次出网。
+        let old = root.join(format!("20200101-000000{suffix}"));
+        let log = AuditLog::open(&old, "events.jsonl").unwrap();
+        log.record(
+            "command",
+            serde_json::json!({ "job": "job-1", "tool": "bash", "program": "curl", "command": "curl https://old.example" }),
+        );
+        log.flow(Flow {
+            tag: "job-1".into(),
+            kind: "http",
+            scheme: "https",
+            host: "old.example".into(),
+            port: 443,
+            method: Some("GET".into()),
+            path: Some("/before-restart".into()),
+            status: Some(200),
+            request: Some(Message {
+                headers: vec![],
+                body: Captured::default(),
+            }),
+            response: Some(Message {
+                headers: vec![],
+                body: Captured::default(),
+            }),
+            bytes_up: 1,
+            bytes_down: 1,
+            started_ms: 1,
+            duration_ms: 1,
+            decrypted: true,
+            note: None,
+            error: None,
+        });
+        drop(log); // 写盘线程收尾
+                   // 别的会话的目录：不该混进来。
+        let other = root.join("20200101-000000-someone_else");
+        let log = AuditLog::open(&other, "events.jsonl").unwrap();
+        log.record(
+            "tool_call",
+            serde_json::json!({ "tool": "rm", "call_id": "x" }),
+        );
+        drop(log);
+
+        // 这一次：job-1 是 git。
+        now.log.record(
+            "command",
+            serde_json::json!({ "job": "job-1", "tool": "bash", "program": "git", "command": "git status" }),
+        );
+        let mut trace = Value::Null;
+        for _ in 0..100 {
+            trace = crate::host::audit::sandbox_trace(&ctx, 50);
+            if trace["timeline"]
+                .as_array()
+                .is_some_and(|t| t.iter().any(|r| r["title"] == "git"))
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(trace["runs"], 2, "{trace}");
+        let rows = trace["timeline"].as_array().unwrap();
+        let jobs: Vec<(String, String)> = rows
+            .iter()
+            .filter(|r| r["kind"] == "command")
+            .map(|r| {
+                (
+                    r["title"].as_str().unwrap().into(),
+                    r["job"].as_str().unwrap().into(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            jobs,
+            [
+                ("curl".into(), "job-1@1".into()),
+                ("git".into(), "job-1".into())
+            ],
+            "{trace}"
+        );
+        assert!(
+            !trace.to_string().contains("\"rm\""),
+            "别的会话混进来了：{trace}"
+        );
+
+        // HTTP 历史里有重启前的那次，按 id 取得回包。
+        let http = crate::host::audit::sandbox_http(&ctx, 100);
+        let req = http["requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["host"] == "old.example")
+            .cloned()
+            .unwrap_or_else(|| panic!("{http}"));
+        assert_eq!(req["tag"], "job-1@1");
+        let id = req["id"].as_str().unwrap();
+        assert!(id.starts_with("20200101-000000"), "{id}");
+        let flow = crate::host::audit::sandbox_flow(&ctx, id).expect("重启前的包取得回");
+        assert_eq!(flow["request"]["line"], "GET /before-restart HTTP/1.1");
+        assert_eq!(flow["id"], id);
+        for bad in [
+            "20200101-000000-someone_else/events.jsonl:1",
+            "../x/events.jsonl:1",
+        ] {
+            assert!(
+                crate::host::audit::sandbox_flow(&ctx, bad).is_none(),
+                "{bad}"
+            );
+        }
+
+        // 沙箱关了：之前记的照样看得到，只是不再接着记。
+        sandbox_command(&ctx, "off");
+        let trace = crate::host::audit::sandbox_trace(&ctx, 50);
+        assert_eq!(trace["auditing"], false);
+        assert_eq!(trace["runs"], 2);
+        assert!(trace["records"].as_u64().unwrap() >= 3, "{trace}");
+    }
+
+    /// 一页换了会话（`/resume`、开了别的）：前一个会话的审计记「结束」，新会话另开一份目录，
+    /// 前一个会话的临时放行（`/sandbox allow`）也不再生效。以前都按页缓存：换了会话还往前一个
+    /// 会话的目录里记，放行也带了过去。
+    #[tokio::test]
+    async fn a_page_that_switches_sessions_starts_a_new_audit() {
+        let (_env, ctx) = policy_page(RULES).await;
+        let audit = ctx.get::<Audit>(AUDIT).unwrap();
+        let first = audit.active(&ctx).unwrap();
+        // 这个会话里临时放行一类命令。
+        sandbox_command(&ctx, "allow-cmd git push*");
+        let granted = |rules: Vec<Rule>| {
+            rules
+                .iter()
+                .any(|r| r.command.as_deref() == Some("git push*") && r.action == Action::Allow)
+        };
+        assert!(granted(audit.rules_for(&ctx)));
+        // 这一页落盘、有了会话 id：算换了一个会话。
+        let sessions = ctx
+            .require::<crate::session::log::Sessions>(crate::names::SESSIONS)
+            .unwrap();
+        sessions.attach_disk();
+        sessions.append(cordis_base::types::LogEvent::User("hi".into()));
+        let id = sessions.live_session_id();
+        assert!(!id.is_empty());
+        // 换了会话：上一个会话的临时放行不再生效（不管审计这边先没先发现换了会话）。
+        assert!(
+            !granted(audit.rules_for(&ctx)),
+            "上一个会话的 /sandbox allow 不该带到新会话"
+        );
+        let second = audit.active(&ctx).unwrap();
+        assert_ne!(first.dir, second.dir);
+        assert!(
+            second.dir.to_string_lossy().ends_with(&id),
+            "{}",
+            second.dir.display()
+        );
+        assert!(
+            std::sync::Arc::ptr_eq(&second, &audit.active(&ctx).unwrap()),
+            "同一个会话沿用"
+        );
+        let first_dir = first.dir.clone();
+        drop(first);
+        let mut ended = false;
+        for _ in 0..100 {
+            let events = dock_sandbox::audit::store::read(&first_dir);
+            if events.iter().any(|e| e["event"] == "结束") {
+                ended = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(ended, "前一个会话的审计要记「结束」");
     }
 
     /// 这次任务临时放行的排在配置规则前面；沙箱关了就作废。沙箱关着时策略不落。

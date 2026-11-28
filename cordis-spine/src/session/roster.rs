@@ -145,6 +145,7 @@ mod tests {
             preset_id: None,
             sampling: None,
             place: None,
+            sandbox_enabled: None,
         }
     }
 

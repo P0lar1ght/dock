@@ -2,7 +2,7 @@
 //!
 //! 正文在记录里只有 sha256，内容在 `bodies/<sha256>`（最多 `body_cap_kb`）。按 `Content-Encoding`
 //! 解开 gzip / deflate / br 再给（解开后最多 [`DECODED_MAX`]）；不是 UTF-8 的按二进制给 base64。
-//! 凭据类的头在记录时就遮住了，这里原样给。
+//! 凭据类的头遮不遮在记录时就定了（`[sandbox] redact_secrets`，默认不遮），这里原样给。
 
 use std::io::Read;
 use std::path::Path;
