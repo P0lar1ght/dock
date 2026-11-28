@@ -160,20 +160,29 @@ Codex 那套是闭源插件，这里用开源的 playwright-core 自己实现。
   - 每次调用前和 Chrome 对一遍，收进来、插在打开它的页右边并成为活动页（和真浏览器一样）。
   - 所以点了新开标签页的链接之后，下一步就在新页上；`browser_tabs` 列得到它。
   - 别的会话的页开的不收。
-- 最后一组关掉时，自己拉起的 Chromium 也关。
+- **Chromium 不归任何一个 Dock**：谁最后一个走谁关。
+  - 本进程最后一组关掉（或 stdin 关了）时看名册：别的 Dock 进程还有页开在这个 Chromium 里，就只断开自己的连接；没有了才发 `Browser.close`。
+  - 名册里的页要在 Chromium 里真有才算（别的进程可能还记着上一个 Chromium 的页），进程已经不在的那份不算（`kill -9` 留下的）。
+  - 所以先开的 TUI 关了，GUI 里会话的标签页还在；最后一个也走了，不留孤儿 Chromium。
+  - 关的时候先经 `SystemInfo.getProcessInfo` 记下浏览器进程的 pid，等它真退了才返回（最多 10 秒）：不然紧跟着的 `browser_open` 会按还没删的 `DevToolsActivePort` 连上正在退出的那个，开页报 `Failed to open a new tab`。
+  - hub 没走 `shutdown` 就被丢掉（测试中途 panic、服务读 stdin 出错提前返回）：自己拉起的、名册里也没人在用就直接杀掉（以前 `kill_on_drop` 管的就是这个），别人在用的照样留着。
 - **会话身份**：Dock 在 `tools/call` 的 `_meta["dock/sessionId"]` 里带。
   - 取发起调用那一页的落盘会话 id（GUI 的 threadId）。
   - 还没落盘的用页身份（`main` / `main#2`）；子代理用自己的身份，所以有自己的标签页。
   - 别的 MCP 客户端不带这个键，全部归到默认组。
 - **连已有的 Chromium**：先读 user-data 下的 `DevToolsActivePort`。
-  - 连得上就直接用（比如 TUI 和 GUI 各起了一个 Dock）；连上的一方不关别人的进程。
+  - 连得上就直接用（比如 TUI 和 GUI 各起了一个 Dock）。
   - 连不上（文件过期）才自己拉起。
+- **拉起的是脱开的进程**：不用 chromiumoxide 的 `Browser::launch`（它的子进程带 `kill_on_drop`，拉起方一丢句柄 Chromium 就被杀，连别人的页一起）。
+  - 用 std `Command` 拉起，unix 上自成一个进程组（拉起它的终端挂断、Ctrl-C 不波及）；从 stderr 读出 `DevTools listening on ws://…`，再像连别人的一样连上去。
+  - 一条线程把 stderr 读完（别让管道写满卡住 Chromium），另一条线程轮询 `try_wait` 收尸，不留僵尸进程。
+  - 参数和以前交给 `BrowserConfig` 拼出来的一样（`launch_args`），视口同样不模拟。
 - 拉起时不带 `--enable-automation`、关掉 `AutomationControlled`（`navigator.webdriver` 为 false）；
   无头时 UA 换成同版本普通 Chrome（不写 `HeadlessChrome`）。
   - 以前两样都露着，Google 搜索一直弹人机验证，人在面板里也过不去。
   - 只管自己拉起的；连上已有的 Chromium 时沿用它启动时的参数。
 - Chromium 被关掉或崩了：下一次调用把各组作废，提示先 `browser_open`。
-- stdin 关闭（Dock 退出）：关掉全部标签页和自己拉起的 Chromium。
+- stdin 关闭（Dock 退出）：关掉本进程的全部标签页，再按上面的规则离开 Chromium。
 
 ## 审计
 
@@ -187,7 +196,8 @@ Codex 那套是闭源插件，这里用开源的 playwright-core 自己实现。
 
 - MCP 服务把「会话 → 标签页」写到 `$DOCK_HOME/browser/sessions/<pid>.json`。
   - 标签页变了（开、关、切）就整份重写，先写临时文件再改名；都关了就删掉。
-  - 一个进程一份，多个 Dock 共用 Chromium 时互不覆盖。
+  - 一个 hub 一份（产品里一个进程一个 hub；测试里同进程的第二个 hub 写 `<pid>-<n>.json`），多个 Dock 共用 Chromium 时互不覆盖。
+  - 离开 Chromium 时也读它，看别的 Dock 进程还在不在用（见上「会话与进程」）。
   - 运行时状态，不是会话数据。
 - 网关 `browser/view/*` 按它找到会话的活动标签页，另开一条 CDP 连接推画面（`cordis_browser::view`）。
   - 协议见 `cordis-gateway/README.md`「浏览器画面」。
@@ -219,8 +229,8 @@ Codex 那套是闭源插件，这里用开源的 playwright-core 自己实现。
 - 同域 iframe：`frame` / `frame_selector`（CSS 选 iframe）。
   - 跨域或找不到直接报错，不静默落回主文档。
   - framed snapshot 的 refs 只对该 frame 有效。
-- chromiumoxide 的 `.arg` 不要带前导 `--`（库会再加一遍）。
-- 有头启动用 `with_head().viewport(None)` + 初始窗口大小，避免默认 800×600 只画一角。
+- `LAUNCH_ARGS` 不带前导 `--`（`launch_args` 补上）。
+- 有头启动给初始窗口大小、不模拟视口，避免默认 800×600 只画一角。
 - CUA 像素点击不做；桌面操作走 cua-driver（见 [computer](computer.md)）。
 
 ## 测试
@@ -228,5 +238,5 @@ Codex 那套是闭源插件，这里用开源的 playwright-core 自己实现。
 - `cargo test -p cordis-browser`：工具清单、协议（两代握手、isError、未知方法、坏行）。
 - `cargo test -p cordis-app --test browser_mcp`：真起 `dock mcp browser`，经 `search_tool` / `use_tool`。
 - 真 Chrome 冒烟（`#[ignore]`）：`cargo test -p cordis-browser --test real_chrome -- --ignored --test-threads=1`。
-  - 覆盖按会话分页、第二个进程连上已有 Chromium、P0–P2、画面与用户输入。
+  - 覆盖按会话分页、第二个进程连上已有 Chromium、拉起方先走不带走别人的页、hub 被丢掉不留孤儿 Chromium、P0–P2、画面与用户输入。
 - 网关画面端到端（`#[ignore]`）：`cargo test -p cordis-gateway --test gateway -- --ignored browser_view_streams`。

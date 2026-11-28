@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use chromiumoxide::browser::{Browser, BrowserConfig};
+use chromiumoxide::browser::Browser;
 use chromiumoxide::cdp::browser_protocol::accessibility::{
     EnableParams as AxEnableParams, GetFullAxTreeParams,
 };
@@ -29,6 +29,7 @@ use chromiumoxide::cdp::browser_protocol::page::{
     EventLifecycleEvent, FrameId, FrameTree, GetFrameTreeParams, GetNavigationHistoryParams,
     HandleJavaScriptDialogParams, NavigateToHistoryEntryParams,
 };
+use chromiumoxide::cdp::browser_protocol::system_info::GetProcessInfoParams;
 use chromiumoxide::cdp::browser_protocol::target::{
     ActivateTargetParams, CloseTargetParams, GetTargetsParams, TargetId,
 };
@@ -57,6 +58,10 @@ const NAV_TIMEOUT: Duration = Duration::from_secs(45);
 /// 页面早就能读能点了（本地测：DOM 立刻就绪、一张图 4 秒，以前 navigate 陪着等满 4 秒）。
 const LOAD_GRACE: Duration = Duration::from_secs(1);
 const ACTION_TIMEOUT: Duration = Duration::from_secs(15);
+/// 关浏览器后最多等它的进程退出这么久（见 [`Chromium::close`]）。
+const CLOSE_WAIT: Duration = Duration::from_secs(10);
+/// 自己拉起的 Chromium 多久看一次退没退（收尸）。
+const REAP_POLL: Duration = Duration::from_millis(200);
 
 #[derive(Clone, Debug)]
 pub struct PendingDialog {
@@ -186,11 +191,14 @@ fn remote_object_text(obj: &RemoteObject) -> String {
 /// 一个 Chromium 进程，所有会话共用（共用 profile，登录态共享）。
 ///
 /// 先按 user-data 下的 `DevToolsActivePort` 连已经在跑的那个（另一个 Dock 进程拉起的，
-/// 或者 GUI 正开着看的）；连不上才自己拉起。只有自己拉起的才归自己关。
+/// 或者 GUI 正开着看的）；连不上才自己拉起。进程不归任何一个 Dock：自己拉起的也是脱开的
+/// 进程（见 [`spawn_detached`]），拉起后同样只是连上去。关不关由离开的那一方看还有没有
+/// 别人在用（[`crate::hub`]），谁最后一个走谁关。
 pub struct Chromium {
     browser: Arc<Browser>,
     handler: JoinHandle<()>,
-    launched: bool,
+    /// 自己拉起的才有：hub 没好好离开就被丢掉时用它收拾（[`Chromium::kill_launched`]）。
+    launched: Option<Launched>,
 }
 
 impl Chromium {
@@ -208,7 +216,7 @@ impl Chromium {
                 return Ok(Self {
                     browser: Arc::new(browser),
                     handler: spawn_handler(handler),
-                    launched: false,
+                    launched: None,
                 });
             }
         }
@@ -217,57 +225,43 @@ impl Chromium {
 
     async fn launch(user_data_dir: &Path, headed: bool) -> Result<Self, String> {
         let exe = discover_chrome()?;
-        let mut builder = BrowserConfig::builder()
-            .chrome_executable(&exe)
-            .user_data_dir(user_data_dir)
-            .no_sandbox()
-            .launch_timeout(LAUNCH_TIMEOUT)
-            // 不自报「被自动化控制」：chromiumoxide 默认带 `--enable-automation`
-            // （`navigator.webdriver = true`、顶上一条提示栏），Google 搜索这类站点见了就一直
-            // 弹人机验证，人在面板里也过不去。默认参数照抄、去掉这一条（见 LAUNCH_ARGS）。
-            .disable_default_args()
-            .hide();
-
-        for raw in LAUNCH_ARGS {
-            builder = match raw.split_once('=') {
-                Some(pair) => builder.arg(pair),
-                None => builder.arg(*raw),
-            };
-        }
-
-        // Headless by default (CI / servers). Prefer with_head when cockpit/env says so.
-        // Default Viewport 800×600 Emulation-overrides layout; headed windows then paint
-        // only a corner on grey chrome. Clear viewport so the OS window drives layout.
-        if headed {
-            builder = builder.with_head().viewport(None).window_size(1280, 900);
-        } else if let Some(ua) = chrome_version(&exe)
+        // 无头的 UA 写着 `HeadlessChrome`：换成同版本的普通 Chrome（agent 和用户在面板里
+        // 用的就是这个浏览器，网站看到的应该和真 Chrome 一样）。
+        let ua = if headed {
+            None
+        } else {
+            chrome_version(&exe)
+                .await
+                .and_then(|v| desktop_user_agent(&v))
+        };
+        let args = launch_args(user_data_dir, headed, ua.as_deref());
+        let launched = spawn_detached(&exe, &args)
             .await
-            .and_then(|v| desktop_user_agent(&v))
-        {
-            // 无头的 UA 写着 `HeadlessChrome`：换成同版本的普通 Chrome（agent 和用户在面板里
-            // 用的就是这个浏览器，网站看到的应该和真 Chrome 一样）。
-            builder = builder.arg(("user-agent", ua.as_str()));
-        }
-
-        let config = builder.build().map_err(|e| format!("BrowserConfig: {e}"))?;
-
-        let (browser, handler) = with_timeout(
-            LAUNCH_TIMEOUT,
+            .map_err(|e| format!("launch Chromium ({exe}): {e}"))?;
+        // 视口不模拟（chromiumoxide 的 `HandlerConfig` 默认就是 `None`，和连上别人拉起的
+        // 那个一样）：有头时窗口说了算，无头时就是窗口大小。
+        let connected = with_timeout(
+            ATTACH_TIMEOUT,
             async {
-                Browser::launch(config)
+                Browser::connect(launched.ws.clone())
                     .await
-                    .map_err(|e| format!("launch: {e}"))
+                    .map_err(|e| format!("connect: {e}"))
             },
-            || "timed out launching Chromium".into(),
+            || "timed out connecting to the Chromium it launched".into(),
         )
-        .await
-        .map_err(|e| format!("launch Chromium ({exe}): {e}"))?;
-
-        Ok(Self {
-            browser: Arc::new(browser),
-            handler: spawn_handler(handler),
-            launched: true,
-        })
+        .await;
+        match connected {
+            Ok((browser, handler)) => Ok(Self {
+                browser: Arc::new(browser),
+                handler: spawn_handler(handler),
+                launched: Some(launched),
+            }),
+            Err(e) => {
+                // 拉起来了却连不上：别留一个谁也不认的进程。
+                launched.kill();
+                Err(format!("launch Chromium ({exe}): {e}"))
+            }
+        }
     }
 
     /// 浏览器级 CDP 的 ws 地址（`browser_js` 的执行器用它另连一条）。
@@ -280,27 +274,245 @@ impl Chromium {
         !self.handler.is_finished()
     }
 
-    /// 自己拉起的才关进程；连上的只断开，不关别人的浏览器。
-    pub async fn shutdown(self) {
+    /// Chromium 里现在的全部 target id（页、iframe、worker…）。
+    pub async fn live_targets(&self) -> Result<Vec<String>, String> {
+        Ok(self
+            .browser
+            .execute(GetTargetsParams::default())
+            .await
+            .map_err(|e| format!("getTargets: {e}"))?
+            .result
+            .target_infos
+            .iter()
+            .map(|t| t.target_id.inner().to_string())
+            .collect())
+    }
+
+    /// 关掉整个浏览器（CDP `Browser.close`）：没有别人在用它的时候。
+    ///
+    /// 等到浏览器进程真退了才返回（最多 [`CLOSE_WAIT`]）：`Browser.close` 一回话就返回的话，
+    /// 紧跟着的 `browser_open` 会按还没删的 `DevToolsActivePort` 连上这个正在退出的 Chromium，
+    /// 开页报 `Failed to open a new tab`；拉起的新进程也可能撞上还没放开的 profile。
+    pub async fn close(self) {
+        let pid = self.browser_pid().await;
         let Self {
-            browser,
-            handler,
-            launched,
+            browser, handler, ..
         } = self;
-        if launched {
-            match Arc::try_unwrap(browser) {
-                Ok(mut browser) => {
-                    let _ = browser.close().await;
-                    let _ = browser.wait().await;
-                }
-                // 还有标签页组攥着句柄：发 CDP Browser.close，进程退出后 kill_on_drop 兜底。
-                Err(shared) => {
-                    let _ = shared.execute(BrowserCloseParams::default()).await;
-                }
+        match Arc::try_unwrap(browser) {
+            Ok(mut browser) => {
+                let _ = browser.close().await;
+            }
+            // 还有标签页组攥着句柄：直接发同一条命令。
+            Err(shared) => {
+                let _ = shared.execute(BrowserCloseParams::default()).await;
             }
         }
         handler.abort();
+        wait_until_exited(pid).await;
     }
+
+    /// 浏览器主进程的 pid（`SystemInfo.getProcessInfo` 里 `type` 是 `browser` 的那个）。
+    /// 连上别人拉起的也拿得到；问不到就是 `None`。
+    async fn browser_pid(&self) -> Option<u32> {
+        let r = self
+            .browser
+            .execute(GetProcessInfoParams::default())
+            .await
+            .ok()?;
+        r.result
+            .process_info
+            .iter()
+            .find(|p| p.r#type == "browser")
+            .and_then(|p| u32::try_from(p.id).ok())
+    }
+
+    /// 只断开自己这条 CDP 连接，浏览器留给还在用它的人。
+    pub fn disconnect(self) {
+        self.handler.abort();
+    }
+
+    /// 自己拉起的就直接杀掉进程（同步，不经 CDP）；连上别人的什么也不做。只给 hub 没走
+    /// `shutdown` 就被丢掉时兜底，好好离开走 [`Chromium::close`] / [`Chromium::disconnect`]。
+    pub fn kill_launched(&self) {
+        if let Some(launched) = &self.launched {
+            launched.kill();
+        }
+    }
+}
+
+/// 等 `pid` 退出，最多 [`CLOSE_WAIT`]；等不到也返回（不让收尾挂住）。
+#[cfg(unix)]
+async fn wait_until_exited(pid: Option<u32>) {
+    let Some(pid) = pid else {
+        return;
+    };
+    let _ = poll_until(CLOSE_WAIT, Duration::from_millis(50), || async move {
+        Ok(!crate::registry::pid_alive(pid))
+    })
+    .await;
+}
+
+/// 非 unix 上查不了进程在不在，不等。
+#[cfg(not(unix))]
+async fn wait_until_exited(_pid: Option<u32>) {}
+
+/// 自己拉起、还没连上的 Chromium：CDP 地址，和连不上时收拾它用的进程句柄。
+struct Launched {
+    ws: String,
+    child: Arc<std::sync::Mutex<std::process::Child>>,
+}
+
+impl Launched {
+    fn kill(&self) {
+        if let Ok(mut child) = self.child.lock() {
+            let _ = child.kill();
+        }
+    }
+}
+
+/// 拉起一个脱开的 Chromium，从 stderr 读出它的 CDP 地址（`DevTools listening on ws://…`）。
+///
+/// 不用 chromiumoxide 的 `Browser::launch`：它拉起的子进程带 `kill_on_drop`，句柄一丢
+/// Chromium 就被杀，拉起它的 Dock 一走（`browser_close` 掉最后一组、进程退出），别的 Dock
+/// 进程连在上面的标签页全没了。这里用 std 的 `Command`（丢句柄不杀），在 unix 上自成一个
+/// 进程组（拉起它的终端挂断、按 Ctrl-C 都不波及）。一条线程读 stderr：读到地址后接着读完，
+/// 别让管道写满卡住 Chromium。另一条线程收尸，不留僵尸进程。
+async fn spawn_detached(exe: &str, args: &[String]) -> Result<Launched, String> {
+    use std::io::BufRead;
+    use std::process::{Command, Stdio};
+
+    let mut cmd = Command::new(exe);
+    cmd.args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    let mut child = cmd.spawn().map_err(|e| format!("spawn: {e}"))?;
+    let stderr = child.stderr.take().ok_or("spawn: no stderr pipe")?;
+    let child = Arc::new(std::sync::Mutex::new(child));
+    // 收尸：轮询 `try_wait`。不阻塞在 `wait` 上攥着锁（等地址超时时这边还要 kill），也不等
+    // stderr 读到头（Chromium 的子进程也拿着 stderr，可能比它晚退；[`Chromium::close`] 等的
+    // 就是主进程退出，僵尸也算没退）。
+    let reaper = child.clone();
+    std::thread::Builder::new()
+        .name("chromium-reaper".into())
+        .spawn(move || loop {
+            let running = reaper
+                .lock()
+                .map(|mut c| matches!(c.try_wait(), Ok(None)))
+                .unwrap_or(false);
+            if !running {
+                break;
+            }
+            std::thread::sleep(REAP_POLL);
+        })
+        .map_err(|e| {
+            if let Ok(mut c) = child.lock() {
+                let _ = c.kill();
+            }
+            format!("spawn reaper: {e}")
+        })?;
+    let (tx, rx) = tokio::sync::oneshot::channel::<Result<String, String>>();
+    std::thread::Builder::new()
+        .name("chromium-stderr".into())
+        .spawn(move || {
+            let mut tx = Some(tx);
+            // 没等到地址就退出时，报错带上最后几行 stderr。
+            let mut tail: std::collections::VecDeque<String> = Default::default();
+            let mut reader = std::io::BufReader::new(stderr);
+            let mut buf = Vec::new();
+            loop {
+                buf.clear();
+                match reader.read_until(b'\n', &mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+                if tx.is_none() {
+                    continue;
+                }
+                let line = String::from_utf8_lossy(&buf);
+                if let Some(ws) = devtools_listening_url(&line) {
+                    if let Some(tx) = tx.take() {
+                        let _ = tx.send(Ok(ws));
+                    }
+                } else {
+                    tail.push_back(line.trim_end().to_string());
+                    if tail.len() > 5 {
+                        tail.pop_front();
+                    }
+                }
+            }
+            if let Some(tx) = tx.take() {
+                let tail = Vec::from(tail).join(" | ");
+                let _ = tx.send(Err(format!(
+                    "Chromium exited before printing its DevTools address: {tail}"
+                )));
+            }
+        })
+        .map_err(|e| {
+            if let Ok(mut c) = child.lock() {
+                let _ = c.kill();
+            }
+            format!("spawn stderr reader: {e}")
+        })?;
+    let launched = |ws| Launched {
+        ws,
+        child: child.clone(),
+    };
+    match tokio::time::timeout(LAUNCH_TIMEOUT, rx).await {
+        Ok(Ok(Ok(ws))) => Ok(launched(ws)),
+        Ok(Ok(Err(e))) => Err(e),
+        Ok(Err(_)) => Err("stderr reader stopped without an answer".into()),
+        Err(_) => {
+            launched(String::new()).kill();
+            Err(format!(
+                "timed out after {}s waiting for Chromium's DevTools address",
+                LAUNCH_TIMEOUT.as_secs()
+            ))
+        }
+    }
+}
+
+/// stderr 里报 CDP 地址的那一行：`DevTools listening on ws://127.0.0.1:<port>/devtools/browser/<id>`。
+pub fn devtools_listening_url(line: &str) -> Option<String> {
+    let (_, ws) = line.rsplit_once("listening on ")?;
+    let ws = ws.trim();
+    (ws.starts_with("ws") && ws.contains("devtools/browser")).then(|| ws.to_string())
+}
+
+/// 拉起 Chromium 的完整参数（带 `--`）。和以前交给 chromiumoxide `BrowserConfig` 拼出来的
+/// 一样：[`LAUNCH_ARGS`] 加上它自己补的那几条（调试端口、profile、关扩展、关沙箱、无头三件套、
+/// 不报 `AutomationControlled`），有头再给窗口大小，无头再换 UA。
+///
+/// 不带 `--enable-automation`（`navigator.webdriver = true`、顶上一条提示栏）：Google 搜索
+/// 这类站点见了就一直弹人机验证，人在面板里也过不去。有头时不模拟视口（窗口说了算），
+/// 不然默认 800×600 只画窗口一角。
+fn launch_args(user_data_dir: &Path, headed: bool, user_agent: Option<&str>) -> Vec<String> {
+    let mut args: Vec<String> = LAUNCH_ARGS.iter().map(|a| format!("--{a}")).collect();
+    args.extend(
+        [
+            "--remote-debugging-port=0",
+            "--disable-extensions",
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-blink-features=AutomationControlled",
+        ]
+        .map(String::from),
+    );
+    args.push(format!("--user-data-dir={}", user_data_dir.display()));
+    if headed {
+        args.push("--window-size=1280,900".into());
+    } else {
+        args.extend(["--headless", "--hide-scrollbars", "--mute-audio"].map(String::from));
+    }
+    if let Some(ua) = user_agent {
+        args.push(format!("--user-agent={ua}"));
+    }
+    args
 }
 
 fn spawn_handler(mut handler: chromiumoxide::Handler) -> JoinHandle<()> {
@@ -354,8 +566,7 @@ pub fn opened_by(
 }
 
 /// 拉起 Chromium 的参数：chromiumoxide 的默认参数（照抄 puppeteer）去掉 `enable-automation`。
-/// `key` 或 `key=value`（多个值用逗号连）；不带前导 `--`（chromiumoxide 会再补一遍，
-/// `--force-…` 变成 `----force-…` 就不生效了）。
+/// `key` 或 `key=value`（多个值用逗号连）；不带前导 `--`，由 [`launch_args`] 补上。
 const LAUNCH_ARGS: &[&str] = &[
     "disable-background-networking",
     "enable-features=NetworkService,NetworkServiceInProcess",
@@ -2425,6 +2636,49 @@ fn normalize_modifier(p: &str) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launch_args_match_what_chromiumoxide_used_to_build() {
+        let dir = Path::new("/tmp/dock-ud");
+        let headless = launch_args(dir, false, Some("Mozilla/5.0 X"));
+        for want in [
+            "--remote-debugging-port=0",
+            "--user-data-dir=/tmp/dock-ud",
+            "--no-sandbox",
+            "--disable-extensions",
+            "--disable-blink-features=AutomationControlled",
+            "--headless",
+            "--hide-scrollbars",
+            "--mute-audio",
+            "--user-agent=Mozilla/5.0 X",
+            "--enable-features=NetworkService,NetworkServiceInProcess",
+        ] {
+            assert!(headless.iter().any(|a| a == want), "missing {want}");
+        }
+        assert!(headless
+            .iter()
+            .all(|a| a.starts_with("--") && !a.starts_with("---")));
+        assert!(!headless.iter().any(|a| a.contains("enable-automation")));
+        assert!(!headless.iter().any(|a| a.starts_with("--window-size")));
+
+        let headed = launch_args(dir, true, None);
+        assert!(headed.iter().any(|a| a == "--window-size=1280,900"));
+        assert!(!headed.iter().any(|a| a == "--headless"));
+        assert!(!headed.iter().any(|a| a.starts_with("--user-agent")));
+    }
+
+    #[test]
+    fn devtools_address_is_read_from_its_stderr_line() {
+        assert_eq!(
+            devtools_listening_url(
+                "\nDevTools listening on ws://127.0.0.1:53111/devtools/browser/ab-cd\n"
+            )
+            .as_deref(),
+            Some("ws://127.0.0.1:53111/devtools/browser/ab-cd")
+        );
+        assert!(devtools_listening_url("[1128/120000.1:ERROR] something").is_none());
+        assert!(devtools_listening_url("listening on http://127.0.0.1:1/").is_none());
+    }
 
     #[test]
     fn host_rules_become_block_patterns_in_order() {

@@ -20,6 +20,10 @@
   - **协议**：`thread/approval/set`、`subagent/approval/set` 收 `smart`，`approval.options` 多了它；新推送 `item/tool_approval`（能力 `smartApproval`）；`schedule/*` 的任务多 `approval` / `approvalTimeoutSecs`，运行记录多 `approvalTimeouts`。
   - **落盘**：`schedules.json` 的任务多两个可选键 `approval`（默认智能授权时不写）和 `approvalTimeoutSecs`，运行记录多 `approvalTimeouts`；会话的 `chat_history.jsonl` 多一种 `notice` 行（`kind: "approval"`）。旧版本读到这些键忽略、读到这种通知当普通通知。**升级后已有的定时任务按智能授权跑**（以前是跟那一页的档位）。
 
+### 修复
+
+- **先开的那个 Dock 关了，另一个 Dock 里的浏览器标签页不再跟着没**：几个 Dock 进程（比如终端一个、桌面端一个）共用一个 Chromium，以前它归先拉起它的那个进程——那边的会话 `browser_close` 掉最后一组、或者整个 Dock 退出，Chromium 就被关掉，另一边正在用的页全没了，下一次调用报「先 `browser_open`」。现在 Chromium 不归任何一个进程，谁最后一个走谁关：离开时看还有没有别的 Dock 进程在上面开着页，有就只断开自己。最后一个也走了照样关掉，不留后台的无头 Chromium。
+
 ## [0.3.0] - 2026-11-23
 
 ### 变更

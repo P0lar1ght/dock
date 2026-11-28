@@ -100,6 +100,105 @@ async fn second_hub_attaches_to_running_chromium() {
     first.shutdown().await;
 }
 
+/// 反过来：拉起 Chromium 的那个先走（比如先开的 TUI 关了，GUI 还在用浏览器）。
+/// 别人还开着标签页，Chromium 不能跟着关；最后一个用的走了才关，不留孤儿进程。
+#[tokio::test]
+#[ignore = "needs a real Chrome; page text and snapshots differ by Chrome version/locale"]
+async fn launcher_leaving_keeps_chromium_for_other_processes() {
+    let dock_home = tempfile::tempdir().unwrap();
+    let _env = cordis_base::test_env::scoped().set("DOCK_HOME", dock_home.path());
+    if !chrome_or_skip("launcher leaves") {
+        return;
+    }
+    let first = BrowserHub::new();
+    ok(&first, "a", "browser_open", json!({"url": "about:blank"})).await;
+    let ws = cordis_browser::devtools_ws_url(&cordis_browser::browser_user_data_dir())
+        .expect("first hub launched Chromium");
+    let second = BrowserHub::new();
+    ok(
+        &second,
+        "b",
+        "browser_open",
+        json!({"url": "data:text/html,<p>Second</p>"}),
+    )
+    .await;
+
+    // 拉起方关掉自己最后一组（那边的 agent 调了 browser_close）。
+    ok(&first, "a", "browser_close", json!({})).await;
+    ok(
+        &second,
+        "b",
+        "browser_wait_for",
+        json!({"text": "Second", "timeout_ms": 5000}),
+    )
+    .await;
+
+    // 拉起方又开一页再整个退出（Dock 退出、stdin 关了）：同样不能带走别人的页。
+    ok(&first, "a", "browser_open", json!({"url": "about:blank"})).await;
+    first.shutdown().await;
+    ok(
+        &second,
+        "b",
+        "browser_wait_for",
+        json!({"text": "Second", "timeout_ms": 5000}),
+    )
+    .await;
+
+    // 最后一个用的走了：Chromium 关掉，CDP 端口连不上。
+    second.shutdown().await;
+    let mut gone = false;
+    for _ in 0..50 {
+        let probe = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            chromiumoxide::Browser::connect(ws.clone()),
+        )
+        .await;
+        if !matches!(probe, Ok(Ok(_))) {
+            gone = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(gone, "Chromium should exit once its last user leaves");
+}
+
+/// CDP 端口还连不连得上：最多看 5 秒，等它关掉。
+async fn chromium_gone(ws: &str) -> bool {
+    for _ in 0..50 {
+        let probe = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            chromiumoxide::Browser::connect(ws.to_string()),
+        )
+        .await;
+        if !matches!(probe, Ok(Ok(_))) {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    false
+}
+
+/// hub 没走 `shutdown` 就被丢掉（测试中途 panic、服务读 stdin 出错提前返回）：自己拉起的
+/// Chromium 没人在用就跟着关，不留一个谁也不认的后台进程。
+#[tokio::test]
+#[ignore = "needs a real Chrome; page text and snapshots differ by Chrome version/locale"]
+async fn dropped_hub_does_not_leave_its_chromium_behind() {
+    let dock_home = tempfile::tempdir().unwrap();
+    let _env = cordis_base::test_env::scoped().set("DOCK_HOME", dock_home.path());
+    if !chrome_or_skip("dropped hub") {
+        return;
+    }
+    let hub = BrowserHub::new();
+    ok(&hub, "a", "browser_open", json!({"url": "about:blank"})).await;
+    let ws = cordis_browser::devtools_ws_url(&cordis_browser::browser_user_data_dir())
+        .expect("hub launched Chromium");
+    drop(hub);
+    assert!(
+        chromium_gone(&ws).await,
+        "a dropped hub must not orphan the Chromium it launched"
+    );
+}
+
 #[tokio::test]
 #[ignore = "needs a real Chrome; page text and snapshots differ by Chrome version/locale"]
 async fn p0_navigate_press_wait() {
