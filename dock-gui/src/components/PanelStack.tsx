@@ -230,7 +230,7 @@ export function PanelStack({
   return (
     <div
       ref={box}
-      className="relative min-w-0 flex-1 overflow-hidden"
+      className={`relative min-w-0 flex-1 overflow-hidden ${book ? "stack-book" : ""}`}
       style={book ? { perspective: perspectiveFor(width) } : undefined}
     >
       {kinds.map((kind, i) => {

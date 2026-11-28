@@ -119,7 +119,7 @@ export function ToolPanel({
         <span className="text-[13px] font-medium text-ink-3">工具</span>
         {sideToggle}
       </div>
-      {/* 条目多（内置 + 插件面板 + MCP 应用 + 沙箱）、底部终端又把这一栏压矮时，靠滚动够到最后几行，不能被外层裁掉。 */}
+      {/* 条目多（内置 + 插件面板 + MCP 应用 + 沙箱）、窗口又矮时，靠滚动够到最后几行，不能被外层裁掉。 */}
       <div className="thin-scroll flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto p-3">
         {tools.map(({ icon: Icon, label, shortcut, onClick, active, badge, dot }) => (
           <button

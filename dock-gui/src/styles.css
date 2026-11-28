@@ -1095,6 +1095,7 @@ body {
 /* 玻璃材质：书签是平的浮签（不在 3D 转开的那层里），走玻璃块的色系 + 模糊，压在书页内容上也读得清。 */
 [data-material="glass"] .stack-tag {
   background-color: oklch(1 0 0 / calc(var(--glass-alpha) * 110% + 23%));
+  -webkit-backdrop-filter: var(--glass-blur);
   backdrop-filter: var(--glass-blur);
   box-shadow:
     inset 0 1px 0 var(--glass-rim),
@@ -1120,6 +1121,7 @@ body {
 }
 [data-material="glass"] .stack-layer {
   background-color: var(--glass-sidebar);
+  -webkit-backdrop-filter: var(--glass-blur);
   backdrop-filter: var(--glass-blur);
   box-shadow:
     inset 0 1px 0 var(--glass-rim),
@@ -1128,11 +1130,19 @@ body {
 }
 [data-material="glass"] .stack-layer-front {
   background-color: transparent;
+  -webkit-backdrop-filter: none;
   backdrop-filter: none;
 }
 /* 3D 转开的页不做背景模糊（WebKit 里 3D 变换层上的 backdrop-filter 不可靠，也贵），铺不透明的页面色。 */
 [data-material="glass"] .stack-layer-book {
   background-color: var(--glass-page);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+/* 3D 书里悬停翻开看的那页也是转着的：同样不做背景模糊，铺近乎不透的浮层色。 */
+[data-material="glass"] .stack-book .stack-layer-peek {
+  background-color: var(--glass-popover-solid);
+  -webkit-backdrop-filter: none;
   backdrop-filter: none;
 }
 [data-material="glass"] .stack-layer-peek {
@@ -1142,7 +1152,7 @@ body {
     0 24px 60px -12px var(--glass-shade);
 }
 
-/* 面板头栏（components/PanelChrome.tsx 的 PanelHeader）：任何宽度都摆得下，放不下的按顺序收进「⋯」。 */
+/* 面板头栏（components/PanelHeader.tsx）：任何宽度都摆得下，放不下的按顺序收进「⋯」。 */
 .panel-header > * {
   white-space: nowrap;
 }
