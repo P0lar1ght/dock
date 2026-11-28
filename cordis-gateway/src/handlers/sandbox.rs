@@ -3,7 +3,8 @@
 //! - `sandbox/status { threadId }` → 开没开、工作区、审计记了多少条 / 哈希链完不完好、出口代理、
 //!   限制、策略规则、直通名单（[`cordis_spine::sandbox_status`]）。会验一遍日志，别每秒调。
 //! - `sandbox/trace { threadId, limit? }` → `{ auditing, records, graph: { nodes, edges }, totals,
-//!   timeline }`（[`cordis_spine::sandbox_trace`]）。面板开着时轮询它；没开沙箱时是空的。
+//!   timeline }`（[`cordis_spine::sandbox_trace`]）。面板开着时轮询它。这个会话记过的每一次都接上
+//!   （跨 Dock 重启），沙箱现在关着也照样给之前的。
 //!
 //! - `sandbox/http { threadId, limit? }` → `{ auditing, records, requests }`：最近的出网（HTTP 历史）。
 //! - `sandbox/flow { threadId, id }` → 一次出网的请求包 / 响应包（首行、头、正文，压缩的解开）。
@@ -112,7 +113,7 @@ fn flow(gateway: &GatewayHandle, params: Value) -> Result<Value, RpcError> {
     cordis_spine::sandbox_flow(&page.ctx, id).ok_or_else(|| {
         RpcError::app(
             "not_found",
-            format!("没有这次出网：{id}（沙箱关了就看不到了）"),
+            format!("没有这次出网：{id}（不是这个会话的，或审计目录被删了）"),
         )
     })
 }

@@ -1027,13 +1027,22 @@ action = "deny"
         assert!(trace["records"].as_u64().unwrap() >= 3, "{trace}");
     }
 
-    /// 一页换了会话（`/resume`、开了别的）：前一个会话的审计记「结束」，新会话另开一份目录。
-    /// 以前审计按页缓存，换了会话还往前一个会话的目录里记，历史就混在一起了。
+    /// 一页换了会话（`/resume`、开了别的）：前一个会话的审计记「结束」，新会话另开一份目录，
+    /// 前一个会话的临时放行（`/sandbox allow`）也不再生效。以前都按页缓存：换了会话还往前一个
+    /// 会话的目录里记，放行也带了过去。
     #[tokio::test]
     async fn a_page_that_switches_sessions_starts_a_new_audit() {
         let (_env, ctx) = policy_page(RULES).await;
         let audit = ctx.get::<Audit>(AUDIT).unwrap();
         let first = audit.active(&ctx).unwrap();
+        // 这个会话里临时放行一类命令。
+        sandbox_command(&ctx, "allow-cmd git push*");
+        let granted = |rules: Vec<Rule>| {
+            rules
+                .iter()
+                .any(|r| r.command.as_deref() == Some("git push*") && r.action == Action::Allow)
+        };
+        assert!(granted(audit.rules_for(&ctx)));
         // 这一页落盘、有了会话 id：算换了一个会话。
         let sessions = ctx
             .require::<crate::session::log::Sessions>(crate::names::SESSIONS)
@@ -1042,6 +1051,11 @@ action = "deny"
         sessions.append(cordis_base::types::LogEvent::User("hi".into()));
         let id = sessions.live_session_id();
         assert!(!id.is_empty());
+        // 换了会话：上一个会话的临时放行不再生效（不管审计这边先没先发现换了会话）。
+        assert!(
+            !granted(audit.rules_for(&ctx)),
+            "上一个会话的 /sandbox allow 不该带到新会话"
+        );
         let second = audit.active(&ctx).unwrap();
         assert_ne!(first.dir, second.dir);
         assert!(

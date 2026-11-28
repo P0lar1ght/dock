@@ -224,9 +224,9 @@ pub fn read(dir: &Path) -> Vec<Value> {
 /// 同一个会话的好几次运行（Dock 每起一次，开了沙箱的会话各开一份目录）接起来读，按时间排。
 ///
 /// - `source` 写成 `<目录名>/<文件名>`：按它找得回是哪一份目录（[`crate::audit::packet::record_id`]）。
-/// - 命令的 job id 每次运行都从 `job-1` 数起。除了最后一次，其余运行的 `job` 和命令出网的
-///   `tag` 后面接 `@<第几次>`：不然前一次的出网会算到后一次同名的命令头上。浏览器的 `tag`
-///   （`browser:…`）不动，它按前缀认。
+/// - 命令的 job id 每次运行都从 `job-1` 数起。除了最后一次，其余运行的 `job` 和 `tag`
+///   后面都接 `@<第几次>`：不然前一次的出网会算到后一次同名的命令头上。浏览器的 `tag`
+///   （`browser:<标签页>`）一样改，它按前缀认，改了照样认得出。
 pub fn read_runs(dirs: &[PathBuf]) -> Vec<Value> {
     let last = dirs.len().saturating_sub(1);
     let mut out = Vec::new();
@@ -243,11 +243,7 @@ pub fn read_runs(dirs: &[PathBuf]) -> Vec<Value> {
                 if let Some(job) = v["job"].as_str().map(str::to_string) {
                     v["job"] = json!(format!("{job}@{run}"));
                 }
-                if let Some(tag) = v["tag"]
-                    .as_str()
-                    .filter(|t| !t.starts_with("browser"))
-                    .map(str::to_string)
-                {
+                if let Some(tag) = v["tag"].as_str().map(str::to_string) {
                     v["tag"] = json!(format!("{tag}@{run}"));
                 }
             }
@@ -350,7 +346,8 @@ fn logs(dir: &Path) -> Vec<(String, Vec<String>)> {
 mod tests {
     use super::*;
 
-    /// 两次运行都有 `job-1`：接起来以后前一次的改名，出网仍跟着自己那次的命令走。
+    /// 两次运行都有 `job-1`（和同一个标签页名）：接起来以后前一次的改名，出网仍跟着自己那次的
+    /// 命令走。
     #[test]
     fn runs_are_stitched_in_order_and_job_ids_do_not_collide() {
         let root = tempfile::tempdir().unwrap();
@@ -389,7 +386,7 @@ mod tests {
             vec![
                 (src1.clone(), "job-1@1".into(), "curl".into()),
                 (src1.clone(), "job-1@1".into(), "curl.example".into()),
-                (src1, "browser:T1".into(), "b.example".into()),
+                (src1, "browser:T1@1".into(), "b.example".into()),
                 (src2.clone(), "job-1".into(), "git".into()),
                 (src2.clone(), "job-1".into(), "git.example".into()),
                 (src2, "browser:T1".into(), "b.example".into()),

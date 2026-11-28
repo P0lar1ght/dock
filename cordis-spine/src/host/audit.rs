@@ -73,7 +73,8 @@ pub struct Audit {
     /// 页（`ui_page`）→ 这一页正在进行的审计（沙箱开着、第一次有东西要记时开）。
     pages: Mutex<HashMap<String, Arc<Active>>>,
     /// 页 → 这次任务里临时放行的规则（`/sandbox allow …`），排在配置的规则前面。
-    grants: Mutex<HashMap<String, Vec<Rule>>>,
+    /// 放行时那一页的会话一起记着：页换了会话（`/resume`）就不再生效。
+    grants: Mutex<HashMap<String, (String, Vec<Rule>)>>,
     egress: OnceLock<Result<Arc<Egress>, String>>,
     routes: Routes,
 }
@@ -109,17 +110,26 @@ impl Audit {
         let (page, sessions) = Self::page_of(ctx)?;
         let session = session_of(&page, &sessions);
         let mut pages = self.pages.lock().unwrap();
-        if let Some(active) = pages.get(&page) {
-            if !sessions.is_main() || active.session == session {
+        let switched = match pages.get(&page) {
+            Some(active) if !sessions.is_main() || active.session == session => {
                 return Some(active.clone());
             }
-            active.log.record(
-                "audit",
-                json!({ "event": "结束", "reason": "这一页换了会话" }),
-            );
-        }
+            Some(active) => {
+                active.log.record(
+                    "audit",
+                    json!({ "event": "结束", "reason": "这一页换了会话" }),
+                );
+                true
+            }
+            None => false,
+        };
         let active = Arc::new(start(&page, &session, &sessions).ok()?);
-        pages.insert(page, active.clone());
+        pages.insert(page.clone(), active.clone());
+        drop(pages);
+        // 上一个会话的临时放行也到此为止（`rules_for` 本来就不认，这里顺手清掉）。
+        if switched {
+            self.grants.lock().unwrap().remove(&page);
+        }
         Some(active)
     }
 
@@ -146,28 +156,38 @@ impl Audit {
         })
     }
 
-    /// 这次任务里临时放行一条（`/sandbox allow`）：排在配置的规则前面，沙箱关掉就作废。
+    /// 这次任务里临时放行一条（`/sandbox allow`）：排在配置的规则前面，沙箱关掉、页换了会话
+    /// 就作废。
     pub fn grant(&self, ctx: &Context, rule: Rule) {
-        if let Some((page, _)) = Self::page_of(ctx) {
+        if let Some((page, sessions)) = Self::page_of(ctx) {
             if let Some(active) = self.active(ctx) {
                 active.log.record(
                     "audit",
                     json!({ "event": "临时放行", "host": rule.host, "command": rule.command }),
                 );
             }
-            self.grants
-                .lock()
-                .unwrap()
+            let session = session_of(&page, &sessions);
+            let mut grants = self.grants.lock().unwrap();
+            let entry = grants
                 .entry(page)
-                .or_default()
-                .push(rule);
+                .or_insert_with(|| (session.clone(), Vec::new()));
+            if sessions.is_main() && entry.0 != session {
+                *entry = (session, Vec::new());
+            }
+            entry.1.push(rule);
         }
     }
 
-    /// 这一页生效的规则：临时放行的在前，配置的（`[[sandbox.rules]]`）在后。
+    /// 这一页生效的规则：临时放行的在前，配置的（`[[sandbox.rules]]`）在后。临时放行只认放行时
+    /// 那个会话（子代理的上下文认不出这一页的会话，沿用这一页的，同 [`Self::active`]）。
     pub fn rules_for(&self, ctx: &Context) -> Vec<Rule> {
         let mut out = Self::page_of(ctx)
-            .and_then(|(page, _)| self.grants.lock().unwrap().get(&page).cloned())
+            .and_then(|(page, sessions)| {
+                let grants = self.grants.lock().unwrap();
+                let (session, rules) = grants.get(&page)?;
+                (!sessions.is_main() || *session == session_of(&page, &sessions))
+                    .then(|| rules.clone())
+            })
             .unwrap_or_default();
         out.extend(load_sandbox_config().rules.iter().map(to_rule));
         out

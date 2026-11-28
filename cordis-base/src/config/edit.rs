@@ -990,6 +990,8 @@ pub fn key_name_in_use(name: &str) -> bool {
 pub enum KeyKind {
     Bool,
     Int,
+    /// 有上限的整数：超了拒绝，不写一个读的时候会被悄悄截断的值。
+    IntMax(i64),
     Str,
     StrList,
     /// 路径列表：每项是绝对路径或 `~/` 开头。相对路径没有明确的基准，沙箱会悄悄不认，所以写不进去。
@@ -1026,7 +1028,7 @@ pub const SETTING_KEYS: &[(&str, KeyKind)] = &[
     // `[sandbox]`（docs/SANDBOX.md「配置」）：只认用户级配置，正好是这里写的那份。
     ("sandbox.enabled", KeyKind::Bool),
     ("sandbox.decrypt", KeyKind::Bool),
-    ("sandbox.body_cap_kb", KeyKind::Int),
+    ("sandbox.body_cap_kb", KeyKind::IntMax(64 * 1024)),
     ("sandbox.redact_secrets", KeyKind::Bool),
     ("sandbox.confine", KeyKind::Bool),
     (
@@ -1068,7 +1070,9 @@ pub fn read_settings_in(path: &Path) -> Value {
         let value = match (kind, item) {
             (_, None) => Value::Null,
             (KeyKind::Bool, Some(i)) => i.as_bool().map(Value::from).unwrap_or(Value::Null),
-            (KeyKind::Int, Some(i)) => i.as_integer().map(Value::from).unwrap_or(Value::Null),
+            (KeyKind::Int | KeyKind::IntMax(_), Some(i)) => {
+                i.as_integer().map(Value::from).unwrap_or(Value::Null)
+            }
             (KeyKind::Str, Some(i)) => i.as_str().map(Value::from).unwrap_or(Value::Null),
             (KeyKind::StrList | KeyKind::PathList, Some(i)) => i
                 .as_array()
@@ -1161,10 +1165,15 @@ fn to_toml(kind: KeyKind, key: &str, value: &Value) -> Result<toml_edit::Item, S
     let bad = || format!("{key} 的值类型不对");
     Ok(toml_edit::Item::Value(match kind {
         KeyKind::Bool => toml_edit::Value::from(value.as_bool().ok_or_else(bad)?),
-        KeyKind::Int => {
+        KeyKind::Int | KeyKind::IntMax(_) => {
             let n = value.as_i64().ok_or_else(bad)?;
             if n < 0 {
                 return Err(format!("{key} 不能是负数"));
+            }
+            if let KeyKind::IntMax(max) = kind {
+                if n > max {
+                    return Err(format!("{key} 最多 {max}"));
+                }
             }
             toml_edit::Value::from(n)
         }
@@ -1881,6 +1890,8 @@ mod tests {
         let err = |key: &str, v: Value| write_setting_in(&path, key, &v).unwrap_err();
         assert!(err("sandbox.writable_roots", json!(["build"])).contains("不是绝对路径"));
         assert!(err("sandbox.network", json!("maybe")).contains("allow / proxy / off"));
+        // 上限和沙箱读配置时一样：超了拒绝，文件里不留一个读的时候会被截断的值。
+        assert!(err("sandbox.body_cap_kb", json!(64 * 1024 + 1)).contains("最多 65536"));
         assert!(err(
             "sandbox.rules",
             json!([{ "host": "a", "command": "b", "action": "deny" }])
