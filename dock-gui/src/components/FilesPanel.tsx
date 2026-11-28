@@ -49,6 +49,7 @@ import type { ThreadState, Turn, TurnChangesState, TurnItem } from "dock-core";
 import { dock } from "../dock/client";
 import { sameItems, store, useApp, useThreadSelector, useTurnChanges } from "../dock/store";
 import { IconButton } from "./chrome";
+import { PanelHeader } from "./PanelHeader";
 import { Markdown } from "./Markdown";
 import { imeComposing } from "../dock/ime";
 import type { PathTarget } from "./markdown/pathLink";
@@ -458,12 +459,12 @@ export function FilesPanel({
 
   return (
     <aside className="glass-pane enter-fade relative flex min-h-0 min-w-0 flex-1 flex-col bg-white">
-      <header className="flex h-11 shrink-0 items-center gap-2.5 border-b border-line-soft px-4" data-tauri-drag-region>
+      <PanelHeader className="flex h-11 shrink-0 items-center gap-2.5 border-b border-line-soft px-4">
         {lead}
-        <Folder size={16} className="shrink-0 text-ink-3" />
-        <span className="shrink-0 text-[13px] font-semibold text-ink">文件</span>
+        <Folder data-fold="title" size={16} className="shrink-0 text-ink-3" />
+        <span data-fold="title" className="shrink-0 text-[13px] font-semibold text-ink">文件</span>
         {sessionId && root && (
-          <span className="flex h-6 min-w-0 items-center truncate rounded-full bg-fill px-2.5 font-mono text-xs text-ink-3" title={root}>
+          <span data-fold="shrink" data-min="44" className="h-6 min-w-0 truncate rounded-full bg-fill px-2.5 font-mono text-xs leading-6 text-ink-3" title={root}>
             {tildify(root)}
           </span>
         )}
@@ -495,13 +496,13 @@ export function FilesPanel({
               onClick={() => setHidden((v) => !v)}
               className="size-7 text-ink-4"
             />
-            <IconButton icon={RotateCw} label="刷新" size={14} onClick={refresh} className="size-7 text-ink-4" />
+            <IconButton icon={RotateCw} label="刷新" fold="late" size={14} onClick={refresh} className="size-7 text-ink-4" />
           </>
         )}
         {controls}
-        {(sessionId || controls) && <div className="h-4 w-px shrink-0 bg-line-strong" />}
-        <IconButton icon={X} label="关闭文件面板" size={14} onClick={() => guarded(onClose)} className="size-7 text-ink-4" />
-      </header>
+        {(sessionId || controls) && <div data-fold="end" className="h-4 w-px shrink-0 bg-line-strong" />}
+        <IconButton icon={X} label="关闭文件面板" fold="end" size={14} onClick={() => guarded(onClose)} className="size-7 text-ink-4" />
+      </PanelHeader>
 
       {!sessionId ? (
         <Empty icon={MessageSquare} title="先选一个会话" text="文件面板显示当前会话的工作目录。新对话选好目录后这里就有内容。" />

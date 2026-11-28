@@ -50,6 +50,44 @@ fn resolve_cwd(cwd: &str) -> PathBuf {
     }
 }
 
+/// 宿主终端的身份变量：从 Terminal.app / iTerm 里起 GUI（`tauri dev`）时会漏进来。
+/// 留着的话 `/etc/zshrc` 会按 `TERM_PROGRAM` 加载 `zshrc_Apple_Terminal`，
+/// 每个标签都拿宿主窗口的 `TERM_SESSION_ID` 恢复 / 覆盖它的历史（开头那行「Restored session」）。
+const HOST_TERMINAL_ENV: &[&str] = &[
+    "TERM_PROGRAM",
+    "TERM_PROGRAM_VERSION",
+    "TERM_SESSION_ID",
+    "ITERM_SESSION_ID",
+    "LC_TERMINAL",
+    "LC_TERMINAL_VERSION",
+];
+
+/// 登录 shell：继承 GUI 的环境，但去掉宿主终端的身份，换成 xterm.js 的能力声明。
+fn shell_command(shell: &str, cwd: &str) -> CommandBuilder {
+    shell_command_over(shell, cwd, [])
+}
+
+/// 同 `shell_command`，先在继承来的环境上再叠几项再清洗。
+/// 测试用它模拟「从 Terminal.app 起 GUI」，不去改真的进程环境（`cargo test` 多线程，改环境不安全）。
+fn shell_command_over<'a>(
+    shell: &str,
+    cwd: &str,
+    inherited: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> CommandBuilder {
+    let mut cmd = CommandBuilder::new(shell);
+    for (key, value) in inherited {
+        cmd.env(key, value);
+    }
+    cmd.arg("-l");
+    cmd.cwd(resolve_cwd(cwd));
+    for key in HOST_TERMINAL_ENV {
+        cmd.env_remove(key);
+    }
+    cmd.env("TERM", "xterm-256color");
+    cmd.env("COLORTERM", "truecolor");
+    cmd
+}
+
 impl Terminals {
     pub fn spawn(
         &self,
@@ -63,11 +101,7 @@ impl Terminals {
             .openpty(size(cols, rows))
             .map_err(|e| format!("打开终端失败：{e}"))?;
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
-        let mut cmd = CommandBuilder::new(&shell);
-        cmd.arg("-l");
-        cmd.cwd(resolve_cwd(cwd));
-        cmd.env("TERM", "xterm-256color");
-        cmd.env("COLORTERM", "truecolor");
+        let cmd = shell_command(&shell, cwd);
         let child = pair
             .slave
             .spawn_command(cmd)
@@ -150,5 +184,31 @@ impl Terminals {
         for term in self.terms.lock().unwrap().values_mut() {
             let _ = term.child.kill();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shell_drops_host_terminal_identity() {
+        // 模拟从 Terminal.app 里起 GUI：这些变量是继承来的（不改真的进程环境）。
+        let cmd = shell_command_over(
+            "/bin/zsh",
+            "~",
+            [
+                ("TERM_PROGRAM", "Apple_Terminal"),
+                ("TERM_SESSION_ID", "w0t0p0:TEST"),
+            ],
+        );
+        assert_eq!(cmd.get_env("TERM_PROGRAM"), None);
+        assert_eq!(cmd.get_env("TERM_SESSION_ID"), None);
+        assert_eq!(
+            cmd.get_env("TERM"),
+            Some(std::ffi::OsStr::new("xterm-256color"))
+        );
+        // 其余环境照常继承。
+        assert!(cmd.get_env("HOME").is_some());
     }
 }

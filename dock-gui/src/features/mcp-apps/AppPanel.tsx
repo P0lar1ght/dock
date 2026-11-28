@@ -9,6 +9,7 @@ import { lazy, Suspense, useEffect, useMemo, useState, useSyncExternalStore } fr
 import { AppWindow, X } from "lucide-react";
 import { appKey, type McpAppTool } from "dock-core";
 import { IconButton } from "../../components/chrome";
+import { PanelHeader } from "../../components/PanelHeader";
 import { ToolRow } from "../../components/ToolPanel";
 import { store } from "../../dock/store";
 import type { PanelProps, PanelEntryGroupProps, SplitGroupProps } from "../registry";
@@ -27,16 +28,16 @@ export function AppPanel({ kind, sessionId, onClose, lead, controls, detached }:
   const waiting = detached && !!sessionId && !cwd;
   return (
     <aside className="glass-pane enter-fade relative flex min-h-0 min-w-0 flex-1 flex-col bg-[#fafafa]">
-      <header className="flex h-11 shrink-0 items-center gap-2 border-b border-[#ececf0] px-3" data-tauri-drag-region>
+      <PanelHeader className="flex h-11 shrink-0 items-center gap-2 border-b border-[#ececf0] px-3">
         {lead}
-        <AppWindow size={16} className="shrink-0 text-ink-3" />
-        <span className="min-w-0 truncate text-[13px] font-semibold text-ink">{target.server}</span>
-        <span className="min-w-0 truncate text-[11px] text-ink-4">{cwd ? cwd.split("/").pop() : ""}</span>
+        <AppWindow data-fold="title" size={16} className="shrink-0 text-ink-3" />
+        <span data-fold="title" className="shrink-0 text-[13px] font-semibold text-ink">{target.server}</span>
+        <span data-fold="shrink" data-min="32" className="min-w-0 truncate text-[11px] text-ink-4">{cwd ? cwd.split("/").pop() : ""}</span>
         <div className="min-w-2 flex-1" data-tauri-drag-region />
         {controls}
-        <span className="mx-0.5 h-4 w-px bg-line" />
-        <IconButton icon={X} label={`关闭${target.server}`} size={14} onClick={onClose} className="size-7 text-ink-4" />
-      </header>
+        <span data-fold="end" className="mx-0.5 h-4 w-px bg-line" />
+        <IconButton icon={X} label={`关闭${target.server}`} fold="end" size={14} onClick={onClose} className="size-7 text-ink-4" />
+      </PanelHeader>
       {/* 换项目 = 换一份界面。 */}
       {waiting ? (
         <div className="m-4 h-24 animate-pulse rounded-lg bg-fill" />

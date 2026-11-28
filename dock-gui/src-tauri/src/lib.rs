@@ -283,6 +283,9 @@ async fn open_chat_window(
 ///
 /// MCP App 常驻面板（`mcp-app:<server>:<uri>`，两段各自 encodeURIComponent）跟着拖出时的会话
 /// （项目也就定了）：label 是 `panel-mcpapp-<kind 的哈希>-<会话 id>`。kind 原样转进 URL 要再编码一层。
+///
+/// 跟会话的功能面板（SESSION_FEATURE_PANELS，如行为轨迹 `sandbox:trace`）同内置面板：
+/// label 是 `panel-<kind 把 : 换成 ->-<会话 id>`，同一会话只开一扇。
 #[tauri::command]
 async fn open_panel_window(
     app: tauri::AppHandle,
@@ -329,26 +332,41 @@ async fn open_panel_window(
         let url = with_gateway(format!("index.html?panel=plugin:{id}"), &gateway);
         return open_detached(&app, &label, url, (440.0, 680.0), x, y);
     }
-    if !matches!(
-        panel.as_str(),
-        "browser" | "files" | "desktop" | "canvas" | "subagents"
-    ) {
-        return Err(format!("未知面板：{panel}"));
-    }
-    let label = match gateway.as_deref().filter(|id| !id.is_empty()) {
-        Some(id) => format!(
-            "panel-{panel}-{}-{}",
-            safe_label(id),
-            safe_label(&session_id)
-        ),
-        None => format!("panel-{panel}-{}", safe_label(&session_id)),
-    };
-    let url = with_gateway(
-        format!("index.html?session={session_id}&panel={panel}"),
-        &gateway,
-    );
+    let (label, url) = session_panel_window(&panel, &session_id, &gateway)?;
     open_detached(&app, &label, url, (900.0, 760.0), x, y)
 }
+
+/// 跟会话的面板（内置面板、SESSION_FEATURE_PANELS）的独立窗：窗口 label 和 URL。不认的 kind 报错。
+fn session_panel_window(
+    panel: &str,
+    session_id: &str,
+    gateway: &Option<String>,
+) -> Result<(String, String), String> {
+    if !matches!(
+        panel,
+        "browser" | "files" | "desktop" | "canvas" | "subagents"
+    ) && !SESSION_FEATURE_PANELS.contains(&panel)
+    {
+        return Err(format!("未知面板：{panel}"));
+    }
+    let name = panel.replace(':', "-");
+    let label = match gateway.as_deref().filter(|id| !id.is_empty()) {
+        Some(id) => format!("panel-{name}-{}-{}", safe_label(id), safe_label(session_id)),
+        None => format!("panel-{name}-{}", safe_label(session_id)),
+    };
+    let url = with_gateway(
+        format!(
+            "index.html?session={session_id}&panel={}",
+            url_component(panel)
+        ),
+        gateway,
+    );
+    Ok((label, url))
+}
+
+/// 能拖出成独立窗、跟着会话的功能面板（前端 registerPanel 时 `poppable` + `perSession`）。
+/// 只认这几个固定的 kind：它们原样进窗口 label 和 URL。
+const SESSION_FEATURE_PANELS: &[&str] = &["sandbox:trace"];
 
 /// 插件面板已经开成独立窗了就把它提到前面，回 `true`；没开回 `false`（调用方在主窗口右侧打开）。
 /// 点状态项时用：别在主窗口再开一份。
@@ -715,6 +733,21 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_panels_include_sandbox_trace() {
+        // 行为轨迹能开成独立窗：label 里冒号换成横杠，URL 里 kind 编码一层。
+        let (label, url) = session_panel_window("sandbox:trace", "s1", &None).unwrap();
+        assert_eq!(label, "panel-sandbox-trace-s1");
+        assert_eq!(url, "index.html?session=s1&panel=sandbox%3Atrace");
+        // 内置面板照旧。
+        let (label, url) = session_panel_window("files", "s1", &None).unwrap();
+        assert_eq!(label, "panel-files-s1");
+        assert_eq!(url, "index.html?session=s1&panel=files");
+        // 别的功能 kind 不认（各自要先登记）。
+        assert!(session_panel_window("sandbox:other", "s1", &None).is_err());
+        assert!(session_panel_window("changes:worktree", "s1", &None).is_err());
+    }
 
     #[test]
     fn app_panel_kinds_are_checked_and_encoded() {

@@ -31,6 +31,7 @@ import { dock } from "../dock/client";
 import { currentStore, sameItems, store, useApp, useCanvas, useThreadSelector } from "../dock/store";
 import type { SessionSummary } from "../model";
 import { IconButton } from "./chrome";
+import { PanelHeader } from "./PanelHeader";
 import { Popover } from "./Popover";
 import { buildDoc, canvasEvents, fixPrompt, sendPrompt, unknownLibs, type FromCanvas } from "./canvasDoc";
 
@@ -230,15 +231,17 @@ export function CanvasPanel({
   const dot = error ? "bg-[#ff3b30]" : updating || generating ? "bg-[#af52de]" : shown ? "bg-[#34c759]" : "bg-ink-5";
 
   return (
-    // 容器查询：面板窄时顶栏先收「导出」字样和刷新，标题让出宽度（关闭按钮总在）。
+    // 头栏放不下的收进「⋯」（PanelHeader）；容器查询只管「导出」字样、画布 / 源码切换换成单个图标。
     <aside className="glass-pane @container enter-fade relative flex min-h-0 min-w-0 flex-1 flex-col bg-white">
-      <header className="flex h-11 shrink-0 items-center gap-1.5 border-b border-line-soft px-3" data-tauri-drag-region>
+      <PanelHeader className="flex h-11 shrink-0 items-center gap-1.5 border-b border-line-soft px-3">
         {lead}
-        <span className={`ml-1 size-2 shrink-0 rounded-full ${dot}`} />
+        <span data-fold="keep" className={`ml-1 size-2 shrink-0 rounded-full ${dot}`} />
         {list && list.length > 0 ? (
-          <Switcher list={list} currentId={currentId} onPick={(id) => (setCurrentId(id), setPinned(null))} />
+          <span data-fold="late" className="flex min-w-0 shrink-0">
+            <Switcher list={list} currentId={currentId} onPick={(id) => (setCurrentId(id), setPinned(null))} />
+          </span>
         ) : (
-          <span className="shrink-0 text-[13px] font-semibold text-ink">画布</span>
+          <span data-fold="title" className="shrink-0 text-[13px] font-semibold text-ink">画布</span>
         )}
         {current && shown && (
           <VersionMenu
@@ -270,20 +273,14 @@ export function CanvasPanel({
               onClick={() => setView(view === "canvas" ? "source" : "canvas")}
               className="size-7 @[440px]:hidden"
             />
-            <IconButton
-              icon={RefreshCw}
-              label="重新加载"
-              size={14}
-              onClick={() => setReloads((n) => n + 1)}
-              className="hidden size-7 @[460px]:flex"
-            />
+            <IconButton icon={RefreshCw} label="重新加载" size={14} onClick={() => setReloads((n) => n + 1)} className="size-7" />
             <ExportMenu loaded={shown} />
           </>
         )}
         {controls}
-        <span className="mx-0.5 h-4 w-px bg-line" />
-        <IconButton icon={X} label="关闭画布面板" size={14} onClick={onClose} className="size-7 text-ink-4" />
-      </header>
+        <span data-fold="end" className="mx-0.5 h-4 w-px bg-line" />
+        <IconButton icon={X} label="关闭画布面板" fold="end" size={14} onClick={onClose} className="size-7 text-ink-4" />
+      </PanelHeader>
 
       {error && view === "canvas" && (
         <Banner tone="red" icon={CircleAlert} title={error.message} hint={error.line ? `v${error.version}.html 第 ${error.line} 行` : null}>
@@ -726,6 +723,7 @@ function Segmented({ value, onChange }: { value: "canvas" | "source"; onChange: 
   const item = (v: "canvas" | "source", label: string) => (
     <button
       type="button"
+      aria-pressed={value === v}
       onClick={() => onChange(v)}
       className={`motion-colors h-[22px] rounded-[5px] px-2 text-xs ${
         value === v ? "bg-white font-medium text-accent shadow-sm" : "text-ink-3 hover:text-ink"

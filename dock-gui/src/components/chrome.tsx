@@ -20,9 +20,18 @@ export function TrafficLights() {
   );
 }
 
+/**
+ * 面板头栏（PanelHeader）里放不下时怎么收：
+ * `keep` 不收；`end` 不收、排在「⋯」后面（关闭）；`title` 最先藏、不进菜单（标签上有名字）；
+ * `shrink` 不收、先压窄（上下文：路径、地址）；`early` 早收（窗口动作）；`late` 最后收；不标 = 中间。
+ */
+export type FoldRole = "keep" | "end" | "title" | "shrink" | "early" | "late";
+
 interface IconButtonProps {
   icon: LucideIcon;
   label: string;
+  /** 在面板头栏里放不下时怎么收（见 FoldRole）。 */
+  fold?: FoldRole;
   onClick?: () => void;
   disabled?: boolean;
   size?: number;
@@ -38,10 +47,12 @@ export function IconButton({
   size = 16,
   className = "",
   children,
+  fold,
 }: IconButtonProps) {
   return (
     <button
       type="button"
+      data-fold={fold}
       title={label}
       aria-label={label}
       onClick={onClick}

@@ -8,6 +8,7 @@ import { ChevronDown, GitCompareArrows, RefreshCw, Sparkles, X } from "lucide-re
 import { codeReviewOf, turnChangesOf, type ReviewFinding, type ThreadState, type Turn } from "dock-core";
 import { store, useThreadSelector, useTurnChanges, useWorkflows } from "../../dock/store";
 import { IconButton } from "../../components/chrome";
+import { PanelHeader } from "../../components/PanelHeader";
 import { MenuButton } from "../../components/Popover";
 import { ReviewDiff, type DiffFocus } from "../../components/review/ReviewDiff";
 import { useFeatureHost, type PanelProps } from "../registry";
@@ -112,10 +113,10 @@ export function ChangesPanel({ kind, sessionId, onClose, lead, controls }: Panel
 
   return (
     <aside className="glass-pane enter-fade relative flex min-h-0 min-w-0 flex-1 flex-col bg-[#fafafa]">
-      <header className="flex h-11 shrink-0 items-center gap-2 border-b border-[#ececf0] px-3" data-tauri-drag-region>
+      <PanelHeader className="flex h-11 shrink-0 items-center gap-2 border-b border-[#ececf0] px-3">
         {lead}
-        <GitCompareArrows size={16} className="shrink-0 text-[#636366]" />
-        <span className="shrink-0 text-[13px] font-semibold text-ink">审查</span>
+        <GitCompareArrows data-fold="title" size={16} className="shrink-0 text-[#636366]" />
+        <span data-fold="title" className="shrink-0 text-[13px] font-semibold text-ink">审查</span>
         <MenuButton
           title="看哪份改动"
           align="left"
@@ -143,11 +144,11 @@ export function ChangesPanel({ kind, sessionId, onClose, lead, controls }: Panel
           <Sparkles size={12} />
           {reviewing ? "审查中…" : "让 Agent 审查"}
         </button>
-        <IconButton icon={RefreshCw} label="重新取改动" size={13} onClick={() => setNonce((n) => n + 1)} className="size-7 text-ink-4" />
+        <IconButton icon={RefreshCw} label="重新取改动" fold="late" size={13} onClick={() => setNonce((n) => n + 1)} className="size-7 text-ink-4" />
         {controls}
-        <span className="mx-0.5 h-4 w-px bg-line" />
-        <IconButton icon={X} label="关闭审查" size={14} onClick={onClose} className="size-7 text-ink-4" />
-      </header>
+        <span data-fold="end" className="mx-0.5 h-4 w-px bg-line" />
+        <IconButton icon={X} label="关闭审查" fold="end" size={14} onClick={onClose} className="size-7 text-ink-4" />
+      </PanelHeader>
       <div className="thin-scroll flex min-h-0 flex-1 flex-col overflow-auto p-3">
         {!sessionId ? (
           <div className="flex flex-1 items-center justify-center text-[13px] text-ink-4">先打开一个会话</div>

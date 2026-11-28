@@ -20,6 +20,7 @@ import {
 } from "lucide-react";
 import { store } from "../../dock/store";
 import { IconButton } from "../../components/chrome";
+import { PanelHeader } from "../../components/PanelHeader";
 import { useFeatureHost, type PanelProps } from "../registry";
 import {
   canTrace,
@@ -39,7 +40,7 @@ import { HttpHistory } from "./HttpHistory";
 const POLL_MS = 2500;
 const STATUS_MS = 15000;
 
-export function TracePanel({ sessionId, onClose, lead, controls }: PanelProps) {
+export function TracePanel({ sessionId, onClose, lead, controls, detached }: PanelProps) {
   const host = useFeatureHost();
   const [status, setStatus] = useState<SandboxStatus | null>(null);
   const [trace, setTrace] = useState<SandboxTrace | null>(null);
@@ -115,12 +116,13 @@ export function TracePanel({ sessionId, onClose, lead, controls }: PanelProps) {
 
   return (
     <aside className="glass-pane enter-fade relative flex min-h-0 min-w-0 flex-1 flex-col bg-[#fafafa]">
-      <header className="flex h-11 shrink-0 items-center gap-2 border-b border-[#ececf0] px-3" data-tauri-drag-region>
+      <PanelHeader className="flex h-11 shrink-0 items-center gap-2 border-b border-[#ececf0] px-3">
         {lead}
-        <Waypoints size={16} className="shrink-0 text-[#636366]" />
-        <span className="shrink-0 text-[13px] font-semibold text-ink">行为轨迹</span>
+        <Waypoints data-fold="title" size={16} className="shrink-0 text-[#636366]" />
+        <span data-fold="title" className="shrink-0 text-[13px] font-semibold text-ink">行为轨迹</span>
         {status && (
           <span
+            data-fold="title"
             className={`motion-colors shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium ${
               status.enabled ? "bg-[#e8f5ec] text-[#1f7a3d]" : "bg-fill text-ink-4"
             }`}
@@ -129,7 +131,7 @@ export function TracePanel({ sessionId, onClose, lead, controls }: PanelProps) {
           </span>
         )}
         {(status?.enabled || hasHistory) && (
-          <div className="flex shrink-0 rounded-md bg-fill p-0.5 text-[11.5px]">
+          <div data-fold="late" className="flex shrink-0 rounded-md bg-fill p-0.5 text-[11.5px]">
             {(
               [
                 ["trace", "轨迹"],
@@ -139,6 +141,7 @@ export function TracePanel({ sessionId, onClose, lead, controls }: PanelProps) {
               <button
                 key={id}
                 type="button"
+                aria-pressed={tab === id}
                 onClick={() => setTab(id)}
                 className={`motion-colors rounded px-2 py-0.5 font-medium ${tab === id ? "bg-white text-ink shadow-[0_0_0_0.5px_rgba(0,0,0,0.08),0_1px_2px_rgba(0,0,0,0.06)]" : "text-ink-4 hover:text-ink-2"}`}
               >
@@ -163,18 +166,21 @@ export function TracePanel({ sessionId, onClose, lead, controls }: PanelProps) {
         {trace?.auditing && (
           <IconButton icon={Download} label="导出审计报告（HTML + 原始记录）" size={13} onClick={() => void exportReport()} className="size-7 text-ink-4" />
         )}
-        <IconButton icon={RefreshCw} label="刷新" size={13} onClick={() => setNonce((n) => n + 1)} className="size-7 text-ink-4" />
-        <IconButton
-          icon={Settings2}
-          label="沙箱设置（默认开不开、审计、限制、策略规则）"
-          size={13}
-          onClick={() => window.dispatchEvent(new CustomEvent("dock:open-settings", { detail: "sandbox" }))}
-          className="size-7 text-ink-4"
-        />
+        <IconButton icon={RefreshCw} label="刷新" fold="late" size={13} onClick={() => setNonce((n) => n + 1)} className="size-7 text-ink-4" />
+        {/* 设置页在主窗口里：独立窗没有它，不给这个入口。 */}
+        {!detached && (
+          <IconButton
+            icon={Settings2}
+            label="沙箱设置（默认开不开、审计、限制、策略规则）"
+            size={13}
+            onClick={() => window.dispatchEvent(new CustomEvent("dock:open-settings", { detail: "sandbox" }))}
+            className="size-7 text-ink-4"
+          />
+        )}
         {controls}
-        <span className="mx-0.5 h-4 w-px bg-line" />
-        <IconButton icon={X} label="关闭行为轨迹" size={14} onClick={onClose} className="size-7 text-ink-4" />
-      </header>
+        <span data-fold="end" className="mx-0.5 h-4 w-px bg-line" />
+        <IconButton icon={X} label="关闭行为轨迹" fold="end" size={14} onClick={onClose} className="size-7 text-ink-4" />
+      </PanelHeader>
       <div className="thin-scroll flex min-h-0 flex-1 flex-col gap-3 overflow-auto p-3">
         {!sessionId ? (
           <Empty text="先打开一个会话" />

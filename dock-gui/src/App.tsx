@@ -76,7 +76,7 @@ interface WorkspaceSnap {
   bench: string[];
   benchOpen: boolean;
   split: string | null;
-  panes: { kinds: SidePanel[]; weights: number[] };
+  panes: Panes;
   panelOpen: boolean;
   finding: boolean;
   canvasTarget: { canvasId: string | null; seq: number } | null;
@@ -98,7 +98,7 @@ function freshWorkspace(gw: string): WorkspaceSnap {
     bench: [],
     benchOpen: false,
     split: null,
-    panes: { kinds: [], weights: [] },
+    panes: NO_PANES,
     panelOpen: true,
     finding: false,
     canvasTarget: null,
@@ -191,11 +191,14 @@ export default function App() {
     return () => ro.disconnect();
   }, []);
   /**
-   * 和会话区并排的大面板，左→右一排（设计 SidePanelsSplit）；每种最多一个，开着时替掉右侧快捷面板。
-   * `weights` 是各栏宽度权重（和为 1）；增减面板就均分。
+   * 右侧打开的面板（叠成一本书，见 PanelStack）；每种最多一个，开着时替掉右侧快捷面板。
+   * `kinds` 是标签 / 书页顺序（开的先后，翻页不挪位），`active` 是翻到的那页。
    */
-  const [panes, setPanes] = useState<{ kinds: SidePanel[]; weights: number[] }>({ kinds: [], weights: [] });
+  const [panes, setPanes] = useState<Panes>(NO_PANES);
   const sidePanels = panes.kinds;
+  const activePanel = panes.active ?? sidePanels[sidePanels.length - 1];
+  /** 悬停在哪一页上（标签行和书页共用）：标签亮起、那一页翻开一半给看一眼。 */
+  const [hoveredPanel, setHoveredPanel] = useState<SidePanel | null>(null);
   /** 正在拖出窗口的那一栏（描蓝 + 提示）。 */
   const [poppingPanel, setPoppingPanel] = useState<SidePanel | null>(null);
   /** 对话流里的画布卡点进来要看哪块。 */
@@ -499,7 +502,7 @@ export default function App() {
   };
   const closePanel = (kind: SidePanel) => {
     if (kind === "files") setFinding(false);
-    setPanes((p) => (p.kinds.includes(kind) ? evenPanes(p.kinds.filter((k) => k !== kind)) : p));
+    setPanes((p) => closePane(p, kind));
   };
   // 功能（插件面板等）的轻提示：会话区顶部居中，2 秒淡出。
   const [toast, setToast] = useState<{ text: string; key: number } | null>(null);
@@ -574,7 +577,25 @@ export default function App() {
     [panelOpen],
   );
 
-  /** 右侧一栏：面板本身 + 头栏的拖手（拖出窗口）、分屏菜单、在新窗口打开。 */
+  /** 这一页能不能开成独立窗口：内置面板都能，功能面板要 Rust 侧认这种 kind（登记时说了 poppable）。 */
+  const canPopOut = (kind: SidePanel) => !!activeSession && (PANELS.some((p) => p.kind === kind) || !!panelFor(kind)?.poppable);
+  /**
+   * 「再叠一页」和「在新窗口打开」统一放在顶上标签行右边（折叠按钮左边），对着翻到的那页；
+   * 各面板头栏里不再各放一份（头栏只放面板自己的动作，放不下的进「⋯」）。
+   */
+  const tabActions = activePanel && (
+    <PanelControls
+      open={sidePanels}
+      onSplit={addPanel}
+      onPopOut={
+        canPopOut(activePanel)
+          ? () => void openPanelWindow(activePanel, activeSession!.id).then((ok) => ok && closePanel(activePanel))
+          : null
+      }
+    />
+  );
+
+  /** 右侧一栏：面板本身 + 头栏的拖手（拖出窗口）。窗口动作在标签行（tabActions）。 */
   const renderPanel = (kind: SidePanel) => {
     const sessionId = activeSession?.id ?? null;
     const onClose = () => closePanel(kind);
@@ -586,13 +607,7 @@ export default function App() {
         onPopOut={onClose}
       />
     );
-    const controls = (
-      <PanelControls
-        open={sidePanels}
-        onSplit={addPanel}
-        onPopOut={sessionId ? () => void openPanelWindow(kind, sessionId).then((ok) => ok && onClose()) : null}
-      />
-    );
+    const controls = null;
     if (kind === "browser")
       return <BrowserPanel sessionId={sessionId} onClose={onClose} lead={lead} controls={controls} />;
     if (kind === "desktop")
@@ -611,7 +626,7 @@ export default function App() {
           sessionId={sessionId}
           onClose={onClose}
           lead={feature.poppable ? lead : null}
-          controls={feature.poppable ? controls : <PanelControls open={sidePanels} onSplit={addPanel} onPopOut={null} />}
+          controls={controls}
         />
       );
     }
@@ -710,6 +725,10 @@ export default function App() {
 
   // 功能登记的整页（记忆图谱）：宿主只按 key 找，不认识具体是哪一页。
   const FeaturePage = navPageFor(navPage);
+  // 整页（Pull Request、定时任务、记忆图谱）只盖会话列：开着时右侧那一栏收起，整页照旧占满到窗口右边，
+  // 底部终端照旧露在下面。进整页直接收（整页自己淡入），回会话时右栏照常展开。
+  const fullPage = navPage === "pull-requests" || navPage === "schedules" || !!FeaturePage;
+  const sideShown = panelOpen && !fullPage;
 
   return (
     <FeatureHostContext.Provider value={featureHost}>
@@ -803,33 +822,12 @@ export default function App() {
           }}
         />
       )}
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <div ref={rowRef} className="relative flex min-h-0 min-w-0 flex-1">
+      {/* 右侧那一栏以外是会话列：上面是会话区 / 整页 / 工作台，下面是底部终端。终端只在这一列下面，
+          不横穿右侧那一栏（右栏整列高）。终端在 gw 的 Fragment 外面：换网关、开关工作台都不卸载，shell 不断。 */}
+      <div ref={rowRef} className="relative flex min-h-0 min-w-0 flex-1">
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+          <div className="relative flex min-h-0 min-w-0 flex-1">
           <Fragment key={gw}>
-          {presetEditor && (
-            <PresetEditor
-              presets={dock.presets}
-              defaultBase={newChatPreset}
-              onClose={() => setPresetEditor(false)}
-              onCreated={(id) => {
-                setPresetEditor(false);
-                // 新预设设成新对话默认，回到新对话页就是选中它。
-                pickNewChatPreset(id);
-                navigate(null);
-                // 建好直接进编辑器配人设、工具和子代理。
-                setStudio({ id });
-              }}
-              onDrafted={(draft, description) => {
-                // AI 起草的还没写盘：进编辑器审，保存时才建。
-                setPresetEditor(false);
-                setStudio({ id: null, ai: { draft, description } });
-              }}
-              onOpenModels={() => {
-                setPresetEditor(false);
-                setSettings("models");
-              }}
-            />
-          )}
           {navPage === "pull-requests" && (
             <PullRequestsPage
               projects={prProjects}
@@ -939,14 +937,50 @@ export default function App() {
               )}
             </div>
           )}
+          </Fragment>
+          </div>
+          <TerminalDock
+            open={terminalOpen && !dock.remote}
+            cwd={activeSession?.cwd ?? lastCwd ?? "~"}
+            onClose={() => setTerminalOpen(false)}
+          />
+        </div>
+        {/* 盖在整行上的对话框（新建预设），和右侧那一栏一起跟着网关换。 */}
+        <Fragment key={gw}>
+          {presetEditor && (
+            <PresetEditor
+              presets={dock.presets}
+              defaultBase={newChatPreset}
+              onClose={() => setPresetEditor(false)}
+              onCreated={(id) => {
+                setPresetEditor(false);
+                // 新预设设成新对话默认，回到新对话页就是选中它。
+                pickNewChatPreset(id);
+                navigate(null);
+                // 建好直接进编辑器配人设、工具和子代理。
+                setStudio({ id });
+              }}
+              onDrafted={(draft, description) => {
+                // AI 起草的还没写盘：进编辑器审，保存时才建。
+                setPresetEditor(false);
+                setStudio({ id: null, ai: { draft, description } });
+              }}
+              onOpenModels={() => {
+                setPresetEditor(false);
+                setSettings("models");
+              }}
+            />
+          )}
           {/* 右侧区域：没开具体面板时是快捷面板，开了是面板栈。收起 = 这一栏宽度过渡到 0、
               内容淡出（窗口右上角那个「侧边面板」按钮统一管，见 docs/MOTION.md「面板」）。 */}
           {!benchOpen && (
             <div
-              inert={!panelOpen}
-              aria-hidden={!panelOpen || undefined}
-              className="flex min-w-0 shrink-0 overflow-hidden transition-[width] duration-[var(--dur-slow)] ease-[var(--ease-out)]"
-              style={{ width: panelOpen ? (sidePanels.length ? Math.round(rowWidth * (1 - sideRatio)) : TOOL_PANEL_WIDTH) : 0 }}
+              inert={!sideShown}
+              aria-hidden={!sideShown || undefined}
+              className={`flex min-w-0 shrink-0 overflow-hidden ${
+                fullPage ? "" : "transition-[width] duration-[var(--dur-slow)] ease-[var(--ease-out)]"
+              }`}
+              style={{ width: sideShown ? (sidePanels.length ? Math.round(rowWidth * (1 - sideRatio)) : TOOL_PANEL_WIDTH) : 0 }}
             >
               {sidePanels.length > 0 ? (
                 <>
@@ -960,14 +994,20 @@ export default function App() {
                   <div className="side-stack flex min-w-0 w-full flex-1 flex-col border-l border-line-soft">
                     <SideTabs
                       kinds={sidePanels}
-                      active={sidePanels[sidePanels.length - 1]}
+                      active={activePanel}
                       meta={panelMeta}
                       badge={(kind) => (kind === "subagents" ? subagentsRunning : 0)}
+                      hovered={hoveredPanel}
+                      onHover={setHoveredPanel}
                       onPick={addPanel}
+                      actions={tabActions}
                       sideToggle={sideToggle}
                     />
                     <PanelStack
                       kinds={sidePanels}
+                      active={activePanel}
+                      hovered={hoveredPanel}
+                      onHover={setHoveredPanel}
                       render={renderPanel}
                       meta={panelMeta}
                       badge={(kind) => (kind === "subagents" ? subagentsRunning : 0)}
@@ -991,49 +1031,65 @@ export default function App() {
                   // 入口行（插件面板、MCP 应用）：在右侧开一页，不弹独立窗。
                   onOpenFeature={(kind) => addPanel(kind as SidePanel)}
                   sideChatActive={!!activeSession && dock.asides.has(activeSession.id)}
-                  open={panelOpen}
+                  open={sideShown}
                   sideToggle={sideToggle}
                 />
               )}
             </div>
           )}
-          </Fragment>
-        </div>
-        <TerminalDock
-          open={terminalOpen && !dock.remote}
-          cwd={activeSession?.cwd ?? lastCwd ?? "~"}
-          onClose={() => setTerminalOpen(false)}
-        />
+        </Fragment>
       </div>
     </div>
     </FeatureHostContext.Provider>
   );
 }
 
-/** 各栏等宽。 */
-function evenPanes(kinds: SidePanel[]): { kinds: SidePanel[]; weights: number[] } {
-  return { kinds, weights: kinds.map(() => 1 / kinds.length) };
+/** 右侧打开的面板：`kinds` 是标签 / 书页顺序（开的先后，翻页不挪位），`active` 是翻到的那页。 */
+type Panes = { kinds: SidePanel[]; active: SidePanel | null };
+
+const NO_PANES: Panes = { kinds: [], active: null };
+
+/** 和 kind 算同一种：登记成 `single` 的功能面板同前缀只留一页（两个「审查」合成一页，用面板里的下拉切）。 */
+function samePane(kind: SidePanel): (k: SidePanel) => boolean {
+  const prefix = kind.includes(":") ? kind.slice(0, kind.indexOf(":")) : null;
+  const single = prefix !== null && !!panelFor(kind)?.single;
+  return (k) => k === kind || (single && k.startsWith(`${prefix}:`));
+}
+
+/** 去掉几页：翻到的那页被去掉就翻到它左边那页（左边是翻过的，多半刚看过），左边没有就右边。 */
+function dropPanes(p: Panes, gone: (k: SidePanel) => boolean): Panes {
+  const kinds = p.kinds.filter((k) => !gone(k));
+  if (!kinds.length) return NO_PANES;
+  if (p.active !== null && !gone(p.active)) return { kinds, active: p.active };
+  const at = p.active === null ? p.kinds.length : p.kinds.indexOf(p.active);
+  const left = p.kinds.slice(0, at).filter((k) => !gone(k)).pop();
+  const right = p.kinds.slice(at + 1).find((k) => !gone(k));
+  return { kinds, active: left ?? right ?? kinds[kinds.length - 1] };
 }
 
 /**
- * 翻到这一页（右侧面板叠成一摞，最后一个是摊开的那页）：开着的挪到最前，没开的加进来。
- * 登记成 `single` 的功能面板同前缀只留一页（两个「审查」合成一页，用面板里的下拉切）。
+ * 翻到这一页：开着就翻过去（标签不挪位），没开就加在最后。
+ * 同前缀只留一页的功能面板就地换掉那一页，位置不变。
  */
-function frontPane(p: { kinds: SidePanel[] }, kind: SidePanel) {
-  const prefix = kind.includes(":") ? kind.slice(0, kind.indexOf(":")) : null;
-  const single = prefix !== null && panelFor(kind)?.single;
-  const rest = p.kinds.filter((k) => k !== kind && !(single && k.startsWith(`${prefix}:`)));
-  return evenPanes([...rest, kind]);
+function frontPane(p: Panes, kind: SidePanel): Panes {
+  if (p.kinds.includes(kind)) return { kinds: p.kinds, active: kind };
+  const same = samePane(kind);
+  const at = p.kinds.findIndex(same);
+  if (at < 0) return { kinds: [...p.kinds, kind], active: kind };
+  return { kinds: p.kinds.flatMap((k, i) => (i === at ? [kind] : same(k) ? [] : [k])), active: kind };
 }
 
-/** 快捷键 / 快捷面板：每种面板一个开关。摊开着就合上，压在下面就翻到最前，没开就打开。 */
-function togglePane(p: { kinds: SidePanel[] }, kind: SidePanel) {
-  const prefix = kind.includes(":") ? kind.slice(0, kind.indexOf(":")) : null;
-  const single = prefix !== null && panelFor(kind)?.single;
-  const same = (k: SidePanel) => k === kind || (single && k.startsWith(`${prefix}:`));
+/** 快捷键 / 快捷面板：每种面板一个开关。翻到的就是它就合上，开着没翻到就翻过去，没开就打开。 */
+function togglePane(p: Panes, kind: SidePanel): Panes {
+  const same = samePane(kind);
+  if (p.active !== null && same(p.active)) return dropPanes(p, same);
   const open = p.kinds.filter(same);
-  if (open.length && same(p.kinds[p.kinds.length - 1])) return evenPanes(p.kinds.filter((k) => !same(k)));
   return frontPane(p, open[open.length - 1] ?? kind);
+}
+
+/** 关掉这一页。 */
+function closePane(p: Panes, kind: SidePanel): Panes {
+  return p.kinds.includes(kind) ? dropPanes(p, (k) => k === kind) : p;
 }
 
 /** 拖出窗口时盖在那一栏上：描蓝 + 提示（同工作台的格子）。 */

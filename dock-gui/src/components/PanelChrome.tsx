@@ -58,6 +58,7 @@ export function PanelGrip({
       type="button"
       title="拖到窗口外开成独立窗口"
       aria-label="拖出"
+      data-fold="keep"
       onPointerDown={down}
       className="motion-colors -ml-1.5 flex size-6 shrink-0 cursor-grab touch-none select-none items-center justify-center rounded text-ink-5 hover:bg-hover hover:text-ink-3 active:cursor-grabbing"
     >
@@ -82,7 +83,8 @@ export function PanelControls({
   // 功能面板（「侧边聊天」「审查」这些）：自己登记的一行，跟内置面板一起列。
   const menuItems = usePanelMenuItems();
   return (
-    <>
+    // 窗口动作：头栏放不下时最先收进「⋯」（data-fold="early"）。
+    <span data-fold="early" className="flex shrink-0 items-center gap-0.5">
       <Popover
         title="再开一页"
         side="bottom"
@@ -143,6 +145,6 @@ export function PanelControls({
         )}
       </Popover>
       {onPopOut && <IconButton icon={ExternalLink} label="在新窗口打开" size={14} onClick={onPopOut} className="size-7" />}
-    </>
+    </span>
   );
 }
