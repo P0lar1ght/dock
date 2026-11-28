@@ -20,6 +20,7 @@ import {
 import { firstPending, store, useEnv, useSubagents, useThreadSelector } from "../dock/store";
 import { ContextArc } from "./ContextRing";
 import { IconButton } from "./chrome";
+import { PanelHeader } from "./PanelHeader";
 import { Markdown } from "./Markdown";
 import { Reasoning } from "./Reasoning";
 import { PathLinkContext } from "./markdown/pathLink";
@@ -59,7 +60,7 @@ export function SubagentPanel({
   const sub = agentId ? state.byId[agentId] ?? null : null;
   const close = (
     <>
-      <IconButton icon={X} label="关闭子代理面板" size={14} onClick={onClose} className="size-7 text-ink-4" />
+      <IconButton icon={X} label="关闭子代理面板" fold="end" size={14} onClick={onClose} className="size-7 text-ink-4" />
     </>
   );
   // 子代理和主会话同一个目录：回复里的文件路径照样能点开。
@@ -102,15 +103,15 @@ function List({
   const now = useNow(subs.some((s) => s.info.status === "running"));
   return (
     <>
-      <header className="flex h-11 shrink-0 items-center gap-2 border-b border-[#ececf0] px-3" data-tauri-drag-region>
+      <PanelHeader className="flex h-11 shrink-0 items-center gap-2 border-b border-[#ececf0] px-3">
         {lead}
-        <Bot size={16} className="shrink-0 text-[#636366]" />
-        <span className="text-[13px] font-semibold text-ink">子代理</span>
+        <Bot data-fold="title" size={16} className="shrink-0 text-[#636366]" />
+        <span data-fold="title" className="shrink-0 text-[13px] font-semibold text-ink">子代理</span>
         <div className="min-w-2 flex-1" data-tauri-drag-region />
         {controls}
-        <span className="mx-0.5 h-4 w-px bg-line" />
+        <span data-fold="end" className="mx-0.5 h-4 w-px bg-line" />
         {close}
-      </header>
+      </PanelHeader>
       {subs.length === 0 ? (
         <div className="flex flex-1 items-center justify-center text-[13px] text-[#8e8e93]">这个会话还没有派出子代理</div>
       ) : (
@@ -220,17 +221,19 @@ function Detail({
   return (
     <>
       <header className="flex shrink-0 flex-col gap-2 border-b border-[#ececf0] px-3 py-2.5" data-tauri-drag-region>
-        <div className="flex items-center gap-2">
+        <PanelHeader as="div" className="flex items-center gap-2">
           {lead}
-          <IconButton icon={ArrowLeft} label="回到子代理列表" size={14} onClick={onBack} className="size-7 text-[#636366]" />
-          <RolePill text={info.role} />
-          <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-ink" title={info.description}>
+          <IconButton icon={ArrowLeft} label="回到子代理列表" fold="keep" size={14} onClick={onBack} className="size-7 text-[#636366]" />
+          <span data-fold="title" className="flex shrink-0">
+            <RolePill text={info.role} />
+          </span>
+          <span data-fold="shrink" data-min="40" className="min-w-0 flex-1 truncate text-[13px] font-medium text-ink" title={info.description}>
             {info.description}
           </span>
           {controls}
-          <span className="mx-0.5 h-4 w-px bg-line" />
+          <span data-fold="end" className="mx-0.5 h-4 w-px bg-line" />
           {close}
-        </div>
+        </PanelHeader>
         <div className="flex items-center justify-between gap-2 pl-9">
           <span className="flex items-center gap-1.5">
             <span className={`size-1.5 rounded-full ${status.dot} ${running ? "breathe" : ""}`} />

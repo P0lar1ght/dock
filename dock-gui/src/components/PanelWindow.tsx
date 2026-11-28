@@ -40,7 +40,7 @@ function FeaturePanelWindow({ kind }: { kind: string }) {
     // 插件自己关了面板：窗口直接关，提示没有意义。
     toast: () => {},
   };
-  const lead = <span className="w-[62px] shrink-0" data-tauri-drag-region />;
+  const lead = <span data-fold="keep" className="w-[62px] shrink-0" data-tauri-drag-region />;
   const controls = (
     <IconButton
       icon={onTop ? PinOff : Pin}
@@ -76,9 +76,9 @@ function SessionFeaturePanelWindow({ kind, sessionId }: { kind: string; sessionI
   }, [sessionId]);
   const onClose = () => void getCurrentWindow().close();
   const host: FeatureHost = { openPanel: () => {}, closePanel: onClose, toast: () => {} };
-  const lead = <span className="w-[62px] shrink-0" data-tauri-drag-region />;
+  const lead = <span data-fold="keep" className="w-[62px] shrink-0" data-tauri-drag-region />;
   const controls = session && (
-    <span className="max-w-[200px] shrink truncate rounded-md bg-fill px-1.5 py-0.5 text-[11px] text-ink-4" title={session.title}>
+    <span data-fold="shrink" data-min="0" className="min-w-0 max-w-[200px] shrink truncate rounded-md bg-fill px-1.5 py-0.5 text-[11px] text-ink-4" title={session.title}>
       {session.title}
     </span>
   );
@@ -116,10 +116,10 @@ function SessionPanelWindow({ kind, sessionId }: { kind: SidePanel; sessionId: s
   }, [kind]);
 
   // 红绿灯（titleBarStyle: Overlay）占住头栏左边。
-  const lead = <span className="w-[62px] shrink-0" data-tauri-drag-region />;
+  const lead = <span data-fold="keep" className="w-[62px] shrink-0" data-tauri-drag-region />;
   // 哪个会话的面板：标题栏旁边写会话名。
   const controls = session && (
-    <span className="max-w-[200px] shrink truncate rounded-md bg-fill px-1.5 py-0.5 text-[11px] text-ink-4" title={session.title}>
+    <span data-fold="shrink" data-min="0" className="min-w-0 max-w-[200px] shrink truncate rounded-md bg-fill px-1.5 py-0.5 text-[11px] text-ink-4" title={session.title}>
       {session.title}
     </span>
   );

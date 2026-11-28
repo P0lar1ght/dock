@@ -12,6 +12,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { AlertTriangle, Puzzle, X } from "lucide-react";
 import { splitPanelFooter, type Surface } from "dock-core";
 import { IconButton } from "../../components/chrome";
+import { PanelHeader } from "../../components/PanelHeader";
 import { ToolRow } from "../../components/ToolPanel";
 import { useFeatureHost, type PanelProps, type PanelEntryGroupProps, type SplitGroupProps } from "../registry";
 import { onPluginPush, surfaceAction, surfaceGet } from "./api";
@@ -106,15 +107,15 @@ export function PluginPanel({ kind, sessionId, onClose, lead, controls, detached
 
   return (
     <aside className="glass-pane enter-fade relative flex min-h-0 min-w-0 flex-1 flex-col bg-[#fafafa]">
-      <header className="flex h-11 shrink-0 items-center gap-2 border-b border-[#ececf0] px-3" data-tauri-drag-region>
+      <PanelHeader className="flex h-11 shrink-0 items-center gap-2 border-b border-[#ececf0] px-3">
         {lead}
-        <Puzzle size={16} className="shrink-0 text-ink-3" />
-        <span className="min-w-0 truncate text-[13px] font-semibold text-ink">{name}</span>
+        <Puzzle data-fold="title" size={16} className="shrink-0 text-ink-3" />
+        <span data-fold="title" className="shrink-0 text-[13px] font-semibold text-ink">{name}</span>
         <div className="min-w-2 flex-1" data-tauri-drag-region />
         {controls}
-        <span className="mx-0.5 h-4 w-px bg-line" />
-        <IconButton icon={X} label={`关闭${name}`} size={14} onClick={onClose} className="size-7 text-ink-4" />
-      </header>
+        <span data-fold="end" className="mx-0.5 h-4 w-px bg-line" />
+        <IconButton icon={X} label={`关闭${name}`} fold="end" size={14} onClick={onClose} className="size-7 text-ink-4" />
+      </PanelHeader>
       {surface?.web ? (
         // 插件自带 web 界面：整块交给沙箱 iframe（终端那边照旧画视图 / 正文）。
         <WebPanel surfaceId={id} activeThread={sessionId} detached={detached} onClosed={closedByPlugin} />

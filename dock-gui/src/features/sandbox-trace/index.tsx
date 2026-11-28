@@ -7,8 +7,8 @@ import { registerPanel, registerPanelEntryGroup, registerPanelMenuItem, type Pan
 import { canTrace } from "./api";
 import { TracePanel } from "./TracePanel";
 
-// 右侧面板 `sandbox:trace`，跟着会话走。
-registerPanel({ prefix: "sandbox", Panel: TracePanel, poppable: false, single: true, label: "行为轨迹", icon: Waypoints });
+// 右侧面板 `sandbox:trace`，跟着会话走；能拖出 / 开成独立窗（跟着拖出时的会话，Rust 侧 open_panel_window 认这个 kind）。
+registerPanel({ prefix: "sandbox", Panel: TracePanel, poppable: true, perSession: true, single: true, label: "行为轨迹", icon: Waypoints });
 // 「再叠一页」菜单里列一行。
 registerPanelMenuItem({ kind: "sandbox:trace", prefix: "sandbox", label: "行为轨迹", icon: Waypoints });
 // 工具面板（右侧一个面板都没开时）里也有一行。老 Dock 不认 `sandbox/*` 就不列。

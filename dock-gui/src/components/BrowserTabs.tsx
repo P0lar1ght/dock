@@ -12,6 +12,7 @@
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Globe, Plus, X } from "lucide-react";
+import { PanelHeader } from "./PanelHeader";
 
 export interface BrowserTab {
   targetId: string;
@@ -62,15 +63,19 @@ export function BrowserTabs({
 
   const closable = !locked;
   return (
-    <header className="flex h-11 shrink-0 items-end gap-1 border-b border-line-soft bg-[#f2f2f4] pl-2 pr-3" data-tauri-drag-region>
-      {lead && <div className="flex shrink-0 self-center">{lead}</div>}
+    <PanelHeader className="flex h-11 shrink-0 items-end gap-1 border-b border-line-soft bg-[#f2f2f4] pl-2 pr-3">
+      {lead && (
+        <div data-fold="keep" className="flex shrink-0 self-center">
+          {lead}
+        </div>
+      )}
       {tabs.length === 0 ? (
-        <div className="flex h-[34px] min-w-0 items-center gap-2 px-2.5 text-ink" data-tauri-drag-region>
+        <div data-fold="title" className="flex h-[34px] min-w-0 items-center gap-2 px-2.5 text-ink" data-tauri-drag-region>
           <Globe size={15} className="shrink-0 text-ink-3" />
           <span className="truncate text-[13px] font-semibold">{fallback}</span>
         </div>
       ) : (
-        <div ref={strip} role="tablist" className="tab-strip flex min-w-0 items-end gap-0.5 overflow-x-auto">
+        <div ref={strip} role="tablist" data-fold="shrink" data-min="72" className="tab-strip flex min-w-0 items-end gap-0.5 overflow-x-auto">
           {tabs.map((tab) => (
             <Tab
               key={tab.targetId}
@@ -90,6 +95,7 @@ export function BrowserTabs({
           type="button"
           title={locked ? "Agent 在操作，先接手" : "新标签页"}
           aria-label="新标签页"
+          data-fold="late"
           disabled={locked}
           onClick={onNew}
           className="motion-colors mb-[3px] flex size-7 shrink-0 items-center justify-center rounded-[7px] text-ink-3 hover:bg-black/5 hover:text-ink disabled:text-ink-5 disabled:hover:bg-transparent"
@@ -98,20 +104,23 @@ export function BrowserTabs({
         </button>
       )}
       <div className="h-full min-w-4 flex-1" data-tauri-drag-region />
-      <div className="flex shrink-0 items-center gap-2 self-center">
-        {controls}
-        {controls && <div className="h-4 w-px shrink-0 bg-line-strong" />}
-        <button
-          type="button"
-          aria-label="关闭浏览器面板"
-          title="关闭浏览器面板"
-          onClick={onClosePanel}
-          className="motion-colors flex size-7 items-center justify-center rounded-[7px] text-ink-4 hover:bg-black/5 hover:text-ink"
-        >
-          <X size={14} />
-        </button>
-      </div>
-    </header>
+      {controls && (
+        <div data-fold="early" className="flex shrink-0 items-center self-center">
+          {controls}
+        </div>
+      )}
+      {controls && <div data-fold="end" className="mx-1 h-4 w-px shrink-0 self-center bg-line-strong" />}
+      <button
+        type="button"
+        aria-label="关闭浏览器面板"
+        title="关闭浏览器面板"
+        data-fold="end"
+        onClick={onClosePanel}
+        className="motion-colors flex size-7 shrink-0 items-center justify-center self-center rounded-[7px] text-ink-4 hover:bg-black/5 hover:text-ink"
+      >
+        <X size={14} />
+      </button>
+    </PanelHeader>
   );
 }
 

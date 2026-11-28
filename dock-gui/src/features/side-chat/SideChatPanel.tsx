@@ -13,6 +13,7 @@ import { isRunning, pendingItems, type ThreadState } from "dock-core";
 import { store, useApp, useThread, useThreadSelector } from "../../dock/store";
 import { imeComposing } from "../../dock/ime";
 import { IconButton } from "../../components/chrome";
+import { PanelHeader } from "../../components/PanelHeader";
 import { Pending } from "../../components/Pending";
 import { Transcript, TranscriptOptionsContext } from "../../components/Transcript";
 import { useFeatureHost, type PanelProps } from "../registry";
@@ -128,10 +129,10 @@ export function SideChatPanel({ sessionId, onClose, lead, controls }: PanelProps
 
   const header = (
     <div className="flex shrink-0 flex-col border-b border-[#ececf0]">
-      <div className="flex h-11 items-center gap-2 px-3" data-tauri-drag-region>
+      <PanelHeader as="div" className="flex h-11 items-center gap-2 px-3">
         {lead}
-        <MessageSquare size={16} className="shrink-0 text-ink-3" />
-        <span className="shrink-0 text-[13px] font-semibold text-ink">侧边聊天</span>
+        <MessageSquare data-fold="title" size={16} className="shrink-0 text-ink-3" />
+        <span data-fold="title" className="shrink-0 text-[13px] font-semibold text-ink">侧边聊天</span>
         <span className="min-w-2 flex-1" />
         {asideId && !ended && (
           <button
@@ -150,9 +151,9 @@ export function SideChatPanel({ sessionId, onClose, lead, controls }: PanelProps
           </button>
         )}
         {controls}
-        <span className="mx-0.5 h-4 w-px shrink-0 bg-[#e8e8ec]" />
-        <IconButton icon={X} label="结束侧边聊天" size={14} onClick={close} className="size-7 text-ink-4" />
-      </div>
+        <span data-fold="end" className="mx-0.5 h-4 w-px shrink-0 bg-[#e8e8ec]" />
+        <IconButton icon={X} label="结束侧边聊天" fold="end" size={14} onClick={close} className="size-7 text-ink-4" />
+      </PanelHeader>
       <div className="-mt-1.5 truncate pb-2 pl-[62px] pr-3 text-[11px] text-ink-4">
         分叉自 {parentTitle} · {ended ? "已结束" : "只读"}
       </div>

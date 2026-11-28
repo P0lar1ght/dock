@@ -40,6 +40,7 @@ import { sameItems, store, useApp, useThreadSelector, type McpServerInfo } from 
 import { usePrefs } from "../dock/prefs";
 import { AgentCursor, type CursorEvent } from "./AgentCursor";
 import { IconButton } from "./chrome";
+import { PanelHeader } from "./PanelHeader";
 import { calledTool } from "./toolCall";
 
 const SERVER = "cua-driver";
@@ -148,21 +149,23 @@ export function DesktopPanel({
 
   return (
     <aside className="glass-pane enter-fade relative flex min-h-0 min-w-0 flex-1 flex-col bg-white">
-      <header className="flex h-11 shrink-0 items-center gap-2.5 border-b border-line-soft px-4" data-tauri-drag-region>
+      <PanelHeader className="flex h-11 shrink-0 items-center gap-2.5 border-b border-line-soft px-4">
         {lead}
-        <Monitor size={16} className="shrink-0 text-ink-3" />
-        <span className="shrink-0 text-[13px] font-semibold text-ink">桌面</span>
-        <StatusChip driver={driver} running={running && steps.length > 0} />
-        {ok && <span className="truncate text-xs text-ink-4">cua-driver 已连接</span>}
+        <Monitor data-fold="title" size={16} className="shrink-0 text-ink-3" />
+        <span data-fold="title" className="shrink-0 text-[13px] font-semibold text-ink">桌面</span>
+        <span data-fold="late" className="flex shrink-0">
+          <StatusChip driver={driver} running={running && steps.length > 0} />
+        </span>
+        {ok && <span data-fold="shrink" data-min="0" className="min-w-0 truncate text-xs text-ink-4">cua-driver 已连接</span>}
         <div className="flex-1" data-tauri-drag-region />
         {controls && (
           <>
             {controls}
-            <div className="h-4 w-px shrink-0 bg-line-strong" />
+            <div data-fold="end" className="h-4 w-px shrink-0 bg-line-strong" />
           </>
         )}
-        <IconButton icon={X} label="关闭桌面面板" size={14} onClick={onClose} className="size-7 text-ink-4" />
-      </header>
+        <IconButton icon={X} label="关闭桌面面板" fold="end" size={14} onClick={onClose} className="size-7 text-ink-4" />
+      </PanelHeader>
 
       {!sessionId ? (
         <Empty icon={Monitor} title="先选一个会话" text="桌面面板列出当前会话里 agent 操作桌面的每一步。" />
