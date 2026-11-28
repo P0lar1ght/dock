@@ -64,7 +64,20 @@ const HOST_TERMINAL_ENV: &[&str] = &[
 
 /// 登录 shell：继承 GUI 的环境，但去掉宿主终端的身份，换成 xterm.js 的能力声明。
 fn shell_command(shell: &str, cwd: &str) -> CommandBuilder {
+    shell_command_over(shell, cwd, [])
+}
+
+/// 同 `shell_command`，先在继承来的环境上再叠几项再清洗。
+/// 测试用它模拟「从 Terminal.app 起 GUI」，不去改真的进程环境（`cargo test` 多线程，改环境不安全）。
+fn shell_command_over<'a>(
+    shell: &str,
+    cwd: &str,
+    inherited: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> CommandBuilder {
     let mut cmd = CommandBuilder::new(shell);
+    for (key, value) in inherited {
+        cmd.env(key, value);
+    }
     cmd.arg("-l");
     cmd.cwd(resolve_cwd(cwd));
     for key in HOST_TERMINAL_ENV {
@@ -180,10 +193,15 @@ mod tests {
 
     #[test]
     fn shell_drops_host_terminal_identity() {
-        // 模拟从 Terminal.app 里起 GUI：这些变量在父进程环境里。
-        std::env::set_var("TERM_PROGRAM", "Apple_Terminal");
-        std::env::set_var("TERM_SESSION_ID", "w0t0p0:TEST");
-        let cmd = shell_command("/bin/zsh", "~");
+        // 模拟从 Terminal.app 里起 GUI：这些变量是继承来的（不改真的进程环境）。
+        let cmd = shell_command_over(
+            "/bin/zsh",
+            "~",
+            [
+                ("TERM_PROGRAM", "Apple_Terminal"),
+                ("TERM_SESSION_ID", "w0t0p0:TEST"),
+            ],
+        );
         assert_eq!(cmd.get_env("TERM_PROGRAM"), None);
         assert_eq!(cmd.get_env("TERM_SESSION_ID"), None);
         assert_eq!(
