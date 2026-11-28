@@ -867,6 +867,7 @@ action = "deny"
             decrypted: true,
             note: None,
             error: None,
+            ws: None,
         });
         let mut http = Value::Null;
         for _ in 0..100 {
@@ -942,6 +943,7 @@ action = "deny"
             decrypted: true,
             note: None,
             error: None,
+            ws: None,
         });
         drop(log); // 写盘线程收尾
                    // 别的会话的目录：不该混进来。

@@ -1914,6 +1914,237 @@ async fn audited_sessions_record_their_tabs_network() {
     hub.shutdown().await;
 }
 
+/// 页面里的 WebSocket（CDP 单独报 `webSocket*`，不走普通请求那几个事件）：握手记一条
+/// `ws`、101 的 `net`，只记一条；之后两个方向的消息和关闭按段记在 `kind = "ws"` 里，
+/// 握手一回来就发的那几条也不丢。
+#[tokio::test]
+#[ignore = "needs a real Chrome; page text and snapshots differ by Chrome version/locale"]
+async fn audited_sessions_record_websocket_messages() {
+    let dock_home = tempfile::tempdir().unwrap();
+    let _env = cordis_base::test_env::scoped().set("DOCK_HOME", dock_home.path());
+    if !chrome_or_skip("browser websocket audit") {
+        return;
+    }
+    let port = slow_site();
+    let ws_port = ws_echo_site();
+    let audit = tempfile::tempdir().unwrap();
+    let hub = BrowserHub::new();
+    hub.set_audit("s", Some(audit.path().to_path_buf())).await;
+    ok(
+        &hub,
+        "s",
+        "browser_open",
+        json!({"url": format!("http://127.0.0.1:{port}/other")}),
+    )
+    .await;
+    // 连开 ROUNDS 条，每条握手一回来就连发三条：帧的事件和握手的事件走不同的通道，以前同时
+    // 就绪时随机取，先处理了帧就找不到连接、丢掉（一条大约一半的机会撞上）。
+    const ROUNDS: usize = 4;
+    let out = ok(
+        &hub,
+        "s",
+        "browser_evaluate",
+        json!({"expression": format!(
+            "(async () => {{ let last; for (let i = 0; i < {ROUNDS}; i++) {{ last = await new Promise((done) => {{ \
+             const ws = new WebSocket('ws://127.0.0.1:{ws_port}/live?x=' + i); \
+             ws.onopen = () => {{ ws.send('a'); ws.send('b'); ws.send('ping from page'); }}; \
+             let n = 0; \
+             ws.onmessage = (e) => {{ if (++n < 3) return; ws.onclose = () => done(e.data); ws.close(1000, 'done'); }}; }}); }} return last; }})()"
+        )}),
+    )
+    .await;
+    assert!(out.text.contains("ping from page"), "{}", out.text);
+    let mut events = Vec::new();
+    for _ in 0..100 {
+        events = dock_sandbox::audit::store::read(audit.path());
+        let closed = events
+            .iter()
+            .filter(|e| e["kind"] == "ws" && e["ws"]["part"]["done"] == true)
+            .count();
+        if closed >= ROUNDS {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let mut conns = Vec::new();
+    for i in 0..ROUNDS {
+        let path = format!("/live?x={i}");
+        let handshakes: Vec<&Value> = events
+            .iter()
+            .filter(|e| e["kind"] == "net" && e["path"] == path.as_str())
+            .collect();
+        assert_eq!(handshakes.len(), 1, "握手只记一条：{events:?}");
+        let hs = handshakes[0];
+        assert_eq!(
+            (&hs["scheme"], &hs["status"]),
+            (&json!("ws"), &json!(101)),
+            "{hs}"
+        );
+        conns.push(
+            hs["ws"]["conn"]
+                .as_str()
+                .expect("握手带 ws.conn")
+                .to_string(),
+        );
+        let detail = dock_sandbox::audit::packet::flow_detail(
+            audit.path(),
+            &dock_sandbox::audit::packet::record_id(hs).unwrap(),
+            false,
+        )
+        .unwrap();
+        let msgs: Vec<(String, String, String)> = detail["ws"]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| {
+                (
+                    m["dir"].as_str().unwrap().to_string(),
+                    m["op"].as_str().unwrap().to_string(),
+                    m["text"].as_str().unwrap_or("").to_string(),
+                )
+            })
+            .collect();
+        let ups: Vec<&str> = msgs
+            .iter()
+            .filter(|(dir, op, _)| dir == "up" && op == "text")
+            .map(|(_, _, text)| text.as_str())
+            .collect();
+        assert_eq!(ups, ["a", "b", "ping from page"], "第 {i} 条：{msgs:?}");
+        let downs = msgs
+            .iter()
+            .filter(|(dir, op, _)| dir == "down" && op == "text")
+            .count();
+        assert_eq!(downs, 3, "第 {i} 条：{msgs:?}");
+        assert_eq!(detail["ws"]["open"], false, "{detail}");
+    }
+    assert!(events
+        .iter()
+        .filter(|e| e["kind"] == "ws")
+        .all(|e| conns.iter().any(|c| e["ws"]["conn"] == c.as_str())));
+    assert!(dock_sandbox::audit::store::verify(audit.path())
+        .iter()
+        .all(|v| v.intact()));
+    hub.shutdown().await;
+}
+
+/// WebSocket 回声：握手（不接 permessage-deflate），之后收到的文本帧原样回，关闭帧回一个就断。
+fn ws_echo_site() -> u16 {
+    use std::io::{BufRead, BufReader, Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for conn in listener.incoming().flatten() {
+            std::thread::spawn(move || {
+                let mut conn = conn;
+                let mut reader = BufReader::new(conn.try_clone().unwrap());
+                let mut key = String::new();
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                        break;
+                    }
+                    if let Some(v) = line.to_ascii_lowercase().strip_prefix("sec-websocket-key:") {
+                        key = line[line.len() - v.len()..].trim().to_string();
+                    }
+                }
+                use base64::Engine as _;
+                let accept = base64::engine::general_purpose::STANDARD.encode(sha1(
+                    format!("{key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11").as_bytes(),
+                ));
+                let _ = write!(
+                    conn,
+                    "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n"
+                );
+                loop {
+                    let mut head = [0u8; 2];
+                    if reader.read_exact(&mut head).is_err() {
+                        return;
+                    }
+                    let mut len = (head[1] & 0x7f) as u64;
+                    if len == 126 {
+                        let mut b = [0u8; 2];
+                        reader.read_exact(&mut b).unwrap();
+                        len = u16::from_be_bytes(b) as u64;
+                    } else if len == 127 {
+                        let mut b = [0u8; 8];
+                        reader.read_exact(&mut b).unwrap();
+                        len = u64::from_be_bytes(b);
+                    }
+                    let mut mask = [0u8; 4];
+                    if head[1] & 0x80 != 0 {
+                        reader.read_exact(&mut mask).unwrap();
+                    }
+                    let mut payload = vec![0u8; len as usize];
+                    reader.read_exact(&mut payload).unwrap();
+                    for (i, b) in payload.iter_mut().enumerate() {
+                        *b ^= mask[i % 4];
+                    }
+                    let mut out = vec![head[0]];
+                    if payload.len() < 126 {
+                        out.push(payload.len() as u8);
+                    } else {
+                        out.push(126);
+                        out.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+                    }
+                    out.extend_from_slice(&payload);
+                    if conn.write_all(&out).is_err() || head[0] & 0x0f == 8 {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    port
+}
+
+/// 握手的 `Sec-WebSocket-Accept` 要 SHA-1（真 Chrome 会校验）。测试里够用的最小实现。
+fn sha1(data: &[u8]) -> [u8; 20] {
+    let mut h: [u32; 5] = [0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0];
+    let mut msg = data.to_vec();
+    msg.push(0x80);
+    while msg.len() % 64 != 56 {
+        msg.push(0);
+    }
+    msg.extend_from_slice(&((data.len() as u64) * 8).to_be_bytes());
+    for block in msg.chunks(64) {
+        let mut w = [0u32; 80];
+        for i in 0..16 {
+            w[i] = u32::from_be_bytes(block[i * 4..i * 4 + 4].try_into().unwrap());
+        }
+        for i in 16..80 {
+            w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
+        }
+        let [mut a, mut b, mut c, mut d, mut e] = h;
+        for (i, wi) in w.iter().enumerate() {
+            let (f, k) = match i {
+                0..=19 => ((b & c) | (!b & d), 0x5A827999),
+                20..=39 => (b ^ c ^ d, 0x6ED9EBA1),
+                40..=59 => ((b & c) | (b & d) | (c & d), 0x8F1BBCDC),
+                _ => (b ^ c ^ d, 0xCA62C1D6),
+            };
+            let t = a
+                .rotate_left(5)
+                .wrapping_add(f)
+                .wrapping_add(e)
+                .wrapping_add(k)
+                .wrapping_add(*wi);
+            e = d;
+            d = c;
+            c = b.rotate_left(30);
+            b = a;
+            a = t;
+        }
+        for (x, y) in h.iter_mut().zip([a, b, c, d, e]) {
+            *x = x.wrapping_add(y);
+        }
+    }
+    let mut out = [0u8; 20];
+    for (i, x) in h.iter().enumerate() {
+        out[i * 4..i * 4 + 4].copy_from_slice(&x.to_be_bytes());
+    }
+    out
+}
+
 /// 沙箱的主机规则（Dock 在 `_meta["dock/policy"]` 带来）拦这个会话标签页的请求：被阻断的
 /// 主机连不上，别的照常；规则清空就恢复。用 `no-cors`：跨源本来就读不到响应，别把 CORS
 /// 失败当成被拦。

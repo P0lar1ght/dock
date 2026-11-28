@@ -125,6 +125,51 @@ export function humanBytes(n: number): string {
 
 // ---- HTTP 历史 ----
 
+/** WebSocket 连接到目前为止的汇总（`sandbox/http` 的行、`sandbox/flow` 都带；老 Dock 没有）。 */
+export interface WsSummary {
+  /** 还开着：记它的那次运行还在写、还没记到关闭。 */
+  open: boolean;
+  /** 发出 / 收到的消息条数（含 ping / pong / 关闭帧，含没留下来的）。 */
+  sent: number;
+  received: number;
+  /** 超出一条连接的上限（2000 条）没留下来的条数。 */
+  omitted: number;
+  /** 关闭帧：谁先发的、关闭码、原因。 */
+  close: { by: "client" | "server"; code?: number; reason?: string } | null;
+  error: string | null;
+  note: string | null;
+  bytesUp: number;
+  bytesDown: number;
+  /** 连上到现在（或到关闭）多久。 */
+  durationMs: number | null;
+}
+
+/** 一条消息（分片拼好、压缩解开了的）。 */
+export interface WsMessage {
+  /** `up` 发出，`down` 收到。 */
+  dir: "up" | "down";
+  /** 连上之后第几毫秒。 */
+  at: number;
+  op: "text" | "binary" | "close" | "ping" | "pong";
+  size: number;
+  /** 文本消息给 `text`，其余给 `base64`（只有开头一段，看 `truncated`）。 */
+  text?: string;
+  base64?: string;
+  truncated?: boolean;
+  /** 按 permessage-deflate 解压过。 */
+  compressed?: boolean;
+  /** 内容没法看的原因（扩展不认识、解压失败）。 */
+  note?: string;
+  code?: number | null;
+  reason?: string;
+}
+
+export interface WsConversation extends WsSummary {
+  messages: WsMessage[];
+  /** 正文块不见了、读不回来的条数。 */
+  lost: number;
+}
+
 /** 一次出网（`sandbox/http` 的一行）：时间线的 `net` 行再加上请求的细节。 */
 export interface HttpRow extends TraceRow {
   /** 按它取完整的请求 / 响应包（`sandbox/flow`）。 */
@@ -136,6 +181,8 @@ export interface HttpRow extends TraceRow {
   status?: number | null;
   ms?: number | null;
   note?: string | null;
+  /** WebSocket（握手那一行，之后的消息汇总在这里）。 */
+  ws?: WsSummary;
 }
 
 export interface SandboxHttp {
@@ -186,6 +233,8 @@ export interface FlowDetail {
   /** 没解密的连接没有包，只有目的地和字节数。 */
   request: Packet | null;
   response: Packet | null;
+  /** WebSocket：这条连接到目前为止的消息（不是 WebSocket 是 `null`，老 Dock 没有这一项）。 */
+  ws?: WsConversation | null;
 }
 
 export const sandboxHttp = (threadId: string, limit = 1000) =>

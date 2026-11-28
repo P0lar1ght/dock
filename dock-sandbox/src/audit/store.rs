@@ -1,7 +1,7 @@
 //! 只追加的审计日志。一次审计一个目录，里面每个写入方一个 `*.jsonl`（Dock 自己写
 //! `events.jsonl`，浏览器服务写 `browser.jsonl`），各自一条哈希链：每行带上一行的 sha256
 //! （`prev`），改过或删过中间一行，之后的 `prev` 就对不上（[`verify`]）。正文块存在
-//! `bodies/<sha256>`，同样的内容只存一份。
+//! `bodies/<sha256>`，同样的内容只存一份（WebSocket 一段消息的内容也是一个块）。
 //!
 //! 写盘在后台任务里：调用方（代理的读写路径、工具调用钩子）只往有界通道里放，满了就丢掉、
 //! 计数，下一条落盘的记录里报 `dropped`——审计不能把 agent 拖慢。
@@ -138,11 +138,16 @@ impl Writer {
                 {
                     self.store_body(&mut msg.body);
                 }
+                if let Some(part) = flow.ws.as_mut().and_then(|w| w.part.as_mut()) {
+                    self.store_body(&mut part.messages);
+                }
+                // WebSocket 的一段消息单独一种（不算一次出网），其余都是 `net`。
+                let kind = if flow.kind == "ws" { "ws" } else { "net" };
                 let mut m = match serde_json::to_value(&flow) {
                     Ok(Value::Object(m)) => m,
                     _ => return,
                 };
-                m.insert("kind".into(), json!("net"));
+                m.insert("kind".into(), json!(kind));
                 m
             }
         };
@@ -290,11 +295,15 @@ pub fn verify(dir: &Path) -> Vec<Verified> {
                     broken_at = Some(i + 1);
                 }
                 prev = hex(&Sha256::digest(line.as_bytes()));
-                for side in ["request", "response"] {
-                    let Some(sha) = parsed
-                        .as_ref()
-                        .and_then(|v| v[side]["body"]["sha256"].as_str())
-                    else {
+                let refs = parsed.as_ref().map(|v| {
+                    [
+                        &v["request"]["body"]["sha256"],
+                        &v["response"]["body"]["sha256"],
+                        &v["ws"]["part"]["messages"]["sha256"],
+                    ]
+                });
+                for sha in refs.into_iter().flatten() {
+                    let Some(sha) = sha.as_str() else {
                         continue;
                     };
                     // 不是正文块的名字（日志被改过）：算对不上，也不拿它去读别处的文件。
@@ -419,6 +428,7 @@ mod tests {
             decrypted: true,
             note: None,
             error: None,
+            ws: None,
         }
     }
 

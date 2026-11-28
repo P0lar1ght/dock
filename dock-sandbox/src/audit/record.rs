@@ -3,14 +3,15 @@
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-/// 一次出网。解密了的 HTTPS / 明文 HTTP 是一次请求一条；没解密的是一条连接一条。
+/// 一次出网。解密了的 HTTPS / 明文 HTTP 是一次请求一条；没解密的是一条连接一条；
+/// WebSocket 握手是一条（`ws.conn`），之后的消息按段记成 `kind = "ws"`（[`crate::audit::ws`]）。
 #[derive(Debug, Clone, Serialize)]
 pub struct Flow {
     /// 这条流量属于谁（spine 开监听口时给的：会话、工具调用、命令）。
     pub tag: String,
-    /// `http`（看得到请求）或 `tunnel`（只有字节数）。
+    /// `http`（看得到请求）、`tunnel`（只有字节数）或 `ws`（WebSocket 的一段消息）。
     pub kind: &'static str,
-    /// `https` / `http` / `tcp`。
+    /// `https` / `http` / `wss` / `ws` / `tcp`。
     pub scheme: &'static str,
     pub host: String,
     pub port: u16,
@@ -28,13 +29,18 @@ pub struct Flow {
     pub bytes_down: u64,
     pub started_ms: u64,
     pub duration_ms: u64,
-    /// HTTPS 在代理处解密了没有。
+    /// HTTPS 在代理处解密了没有（浏览器的都是 true：浏览器里本来就是明文）。明文 HTTP / `ws://`
+    /// 是 false，可内容照样看得到——看不看得到内容要看有没有请求行（`method`），别只按它过滤。
+    /// WebSocket 的每一段和它的握手一致。
     pub decrypted: bool,
-    /// 没解密的原因、升级成了 WebSocket 之类。
+    /// 没解密的原因之类。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// WebSocket：握手那条带连接 id，之后的每一段还带消息（[`crate::audit::ws::Ws`]）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ws: Option<crate::audit::ws::Ws>,
 }
 
 /// 请求或响应的头和正文。

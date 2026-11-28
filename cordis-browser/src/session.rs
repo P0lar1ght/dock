@@ -22,7 +22,10 @@ use chromiumoxide::cdp::browser_protocol::input::{
 };
 use chromiumoxide::cdp::browser_protocol::network::{
     BlockPattern, EventLoadingFailed, EventLoadingFinished, EventRequestWillBeSent,
-    EventResponseReceived, GetResponseBodyParams, ResourceType, SetBlockedUrLsParams,
+    EventResponseReceived, EventWebSocketClosed, EventWebSocketCreated, EventWebSocketFrameError,
+    EventWebSocketFrameReceived, EventWebSocketFrameSent, EventWebSocketHandshakeResponseReceived,
+    EventWebSocketWillSendHandshakeRequest, GetResponseBodyParams, ResourceType,
+    SetBlockedUrLsParams, WebSocketFrame,
 };
 use chromiumoxide::cdp::browser_protocol::page::{
     EventFrameNavigated, EventJavascriptDialogClosed, EventJavascriptDialogOpening,
@@ -2160,12 +2163,39 @@ const AUDIT_BODY_FETCH_MAX: f64 = 4.0 * 1024.0 * 1024.0;
 /// 审计开着时把这一页的网络请求记成 [`dock_sandbox::audit::record::Flow`]（`tag = browser:<标签页>`）。
 /// 浏览器里看到的是明文：HTTPS 的网址、头、正文都在，`decrypted` 记成 true。审计关着时
 /// 只看一眼那一格就跳过。
+///
+/// WebSocket 不走上面那几个事件（CDP 单独报 `webSocket*`）：握手记一条 `net`（`ws` / `wss`、
+/// 101），之后的帧交给 [`dock_sandbox::audit::ws::Recorder`] 按段记（CDP 给的是解压好的内容，
+/// 字节数按内容算）。
 async fn audit_network(page: &Page, slot: AuditSlot) -> Option<JoinHandle<()>> {
     use dock_sandbox::audit::record::{header_pairs, now_ms, Captured, Flow, Message};
+    use dock_sandbox::audit::ws::Dir;
     let mut sent = page.event_listener::<EventRequestWillBeSent>().await.ok()?;
     let mut answered = page.event_listener::<EventResponseReceived>().await.ok()?;
     let mut finished = page.event_listener::<EventLoadingFinished>().await.ok()?;
     let mut failed = page.event_listener::<EventLoadingFailed>().await.ok()?;
+    let mut ws_created = page.event_listener::<EventWebSocketCreated>().await.ok()?;
+    let mut ws_request = page
+        .event_listener::<EventWebSocketWillSendHandshakeRequest>()
+        .await
+        .ok()?;
+    let mut ws_response = page
+        .event_listener::<EventWebSocketHandshakeResponseReceived>()
+        .await
+        .ok()?;
+    let mut ws_sent = page
+        .event_listener::<EventWebSocketFrameSent>()
+        .await
+        .ok()?;
+    let mut ws_received = page
+        .event_listener::<EventWebSocketFrameReceived>()
+        .await
+        .ok()?;
+    let mut ws_error = page
+        .event_listener::<EventWebSocketFrameError>()
+        .await
+        .ok()?;
+    let mut ws_closed = page.event_listener::<EventWebSocketClosed>().await.ok()?;
     let page = page.clone();
     let tag = format!("browser:{}", page.target_id().inner());
     Some(tokio::spawn(async move {
@@ -2193,8 +2223,13 @@ async fn audit_network(page: &Page, slot: AuditSlot) -> Option<JoinHandle<()>> {
         };
         let mut pending: HashMap<String, (Flow, Option<ResourceType>, std::time::Instant)> =
             HashMap::new();
+        let mut sockets = WsSockets::new(tag.clone(), cap, slot.clone());
         loop {
+            // 每种事件各走一条通道，跨通道的先后丢了；chromiumoxide 按到达顺序往各通道里放，
+            // 所以同时有好几条就绪时按生命周期从前往后取（请求先于响应、握手先于帧），
+            // 不然会先处理响应 / 帧、找不到还没登记的请求 / 连接而丢掉。
             tokio::select! {
+                biased;
                 Some(ev) = sent.next() => {
                     let on = slot.lock().unwrap().is_some();
                     if !on {
@@ -2229,6 +2264,7 @@ async fn audit_network(page: &Page, slot: AuditSlot) -> Option<JoinHandle<()>> {
                         decrypted: true,
                         note: ev.r#type.as_ref().map(|t| t.as_ref().to_string()),
                         error: None,
+                        ws: None,
                     };
                     let id = ev.request_id.inner().to_string();
                     // 重定向：同一个请求 id 又来一次，前一跳照样记一条。
@@ -2287,10 +2323,212 @@ async fn audit_network(page: &Page, slot: AuditSlot) -> Option<JoinHandle<()>> {
                         log.flow(flow);
                     }
                 }
+                Some(ev) = ws_created.next() => sockets.created(ev.request_id.inner(), &ev.url),
+                Some(ev) = ws_request.next() => sockets.request(ev.request_id.inner(), headers(&ev.request.headers)),
+                Some(ev) = ws_response.next() => {
+                    let r = &ev.response;
+                    let asked = r.request_headers.as_ref().map(&headers);
+                    sockets.response(ev.request_id.inner(), r.status, &r.status_text, headers(&r.headers), asked, *ev.timestamp.inner());
+                }
+                Some(ev) = ws_sent.next() => sockets.frame(ev.request_id.inner(), Dir::Up, &ev.response, *ev.timestamp.inner()),
+                Some(ev) = ws_received.next() => sockets.frame(ev.request_id.inner(), Dir::Down, &ev.response, *ev.timestamp.inner()),
+                Some(ev) = ws_error.next() => sockets.error(ev.request_id.inner(), &ev.error_message),
+                Some(ev) = ws_closed.next() => sockets.closed(ev.request_id.inner()),
                 else => break,
             }
         }
     }))
+}
+
+/// 一页上的 WebSocket（CDP 的 `webSocket*` 事件）记成 [`dock_sandbox::audit::ws`]：握手一回来
+/// 记握手那条、开 [`Recorder`]，之后的帧交给它。各种事件走不同的通道、先后会乱：赶在握手回来
+/// 之前到的帧先攒着，开了 Recorder 再按顺序补上。帧的时间用 CDP 自己的时间戳（从握手回来算）。
+struct WsSockets {
+    tag: String,
+    cap: usize,
+    slot: AuditSlot,
+    map: HashMap<String, Sock>,
+}
+
+enum Sock {
+    /// 握手还没回来：握手那条、什么时候开始的、先到的帧（方向、操作码、内容、CDP 时间）。
+    Pending(
+        Box<dock_sandbox::audit::record::Flow>,
+        std::time::Instant,
+        Vec<(dock_sandbox::audit::ws::Dir, u8, Vec<u8>, f64)>,
+    ),
+    /// 连上了：记录器和握手回来时的 CDP 时间。
+    Open(Arc<dock_sandbox::audit::ws::Recorder>, f64),
+}
+
+impl WsSockets {
+    fn new(tag: String, cap: usize, slot: AuditSlot) -> Self {
+        Self {
+            tag,
+            cap,
+            slot,
+            map: HashMap::new(),
+        }
+    }
+
+    fn emit(&self, flow: dock_sandbox::audit::record::Flow) {
+        let log = self.slot.lock().unwrap().clone();
+        if let Some(log) = log {
+            log.flow(flow);
+        }
+    }
+
+    fn created(&mut self, id: &str, url: &str) {
+        if self.slot.lock().unwrap().is_none() {
+            return;
+        }
+        let Some((scheme, host, port, path)) = split_url(url) else {
+            return;
+        };
+        let flow = dock_sandbox::audit::record::Flow {
+            tag: self.tag.clone(),
+            kind: "http",
+            scheme,
+            host,
+            port,
+            method: Some("GET".into()),
+            path: Some(path),
+            status: None,
+            request: None,
+            response: None,
+            bytes_up: 0,
+            bytes_down: 0,
+            started_ms: dock_sandbox::audit::record::now_ms(),
+            duration_ms: 0,
+            decrypted: true,
+            note: None,
+            error: None,
+            ws: None,
+        };
+        self.map.insert(
+            id.to_string(),
+            Sock::Pending(Box::new(flow), std::time::Instant::now(), Vec::new()),
+        );
+    }
+
+    fn request(&mut self, id: &str, headers: Vec<(String, String)>) {
+        if let Some(Sock::Pending(flow, _, _)) = self.map.get_mut(id) {
+            flow.request = Some(message(headers));
+        }
+    }
+
+    fn response(
+        &mut self,
+        id: &str,
+        status: i64,
+        status_text: &str,
+        headers: Vec<(String, String)>,
+        asked: Option<Vec<(String, String)>>,
+        ts: f64,
+    ) {
+        use dock_sandbox::audit::ws::{self, Recorder};
+        let Some(Sock::Pending(mut flow, t0, early)) = self.map.remove(id) else {
+            return;
+        };
+        flow.status = u16::try_from(status).ok();
+        flow.response = Some(message(headers));
+        if flow.request.is_none() {
+            flow.request = asked.map(message);
+        }
+        flow.duration_ms = t0.elapsed().as_millis() as u64;
+        if status != 101 {
+            flow.error = Some(
+                format!("握手没成：{status} {status_text}")
+                    .trim()
+                    .to_string(),
+            );
+            return self.emit(*flow);
+        }
+        let conn = ws::conn_id();
+        flow.ws = Some(ws::Ws {
+            conn: conn.clone(),
+            part: None,
+        });
+        let slot = self.slot.clone();
+        let sink: ws::Sink = Arc::new(move |flow| {
+            let log = slot.lock().unwrap().clone();
+            if let Some(log) = log {
+                log.flow(flow);
+            }
+        });
+        let rec = Recorder::start(
+            sink,
+            conn,
+            self.tag.clone(),
+            flow.scheme,
+            flow.host.clone(),
+            flow.port,
+            true,
+            self.cap,
+        );
+        self.emit(*flow);
+        for (dir, op, raw, at) in early {
+            ws::record_frame(&rec, dir, op, &raw, self.cap, Some(since(ts, at)));
+        }
+        self.map.insert(id.to_string(), Sock::Open(rec, ts));
+    }
+
+    fn frame(&mut self, id: &str, dir: dock_sandbox::audit::ws::Dir, f: &WebSocketFrame, ts: f64) {
+        let op = f.opcode as u8;
+        // 文本帧给的是字符串，其余是 base64。
+        let raw = if op == 1 {
+            f.payload_data.clone().into_bytes()
+        } else {
+            use base64::Engine;
+            base64::engine::general_purpose::STANDARD
+                .decode(&f.payload_data)
+                .unwrap_or_default()
+        };
+        match self.map.get_mut(id) {
+            Some(Sock::Open(rec, base)) => dock_sandbox::audit::ws::record_frame(
+                rec,
+                dir,
+                op,
+                &raw,
+                self.cap,
+                Some(since(*base, ts)),
+            ),
+            Some(Sock::Pending(_, _, early)) => early.push((dir, op, raw, ts)),
+            None => {}
+        }
+    }
+
+    fn error(&mut self, id: &str, error: &str) {
+        match self.map.get_mut(id) {
+            Some(Sock::Open(rec, _)) => rec.error(error),
+            Some(Sock::Pending(flow, _, _)) => flow.error = Some(error.to_string()),
+            None => {}
+        }
+    }
+
+    fn closed(&mut self, id: &str) {
+        match self.map.remove(id) {
+            Some(Sock::Open(rec, _)) => rec.finish(None),
+            Some(Sock::Pending(mut flow, t0, _)) => {
+                flow.duration_ms = t0.elapsed().as_millis() as u64;
+                flow.error.get_or_insert_with(|| "握手没完成就关了".into());
+                self.emit(*flow);
+            }
+            None => {}
+        }
+    }
+}
+
+fn message(headers: Vec<(String, String)>) -> dock_sandbox::audit::record::Message {
+    dock_sandbox::audit::record::Message {
+        headers,
+        body: Default::default(),
+    }
+}
+
+/// CDP 时间（秒）`from` 到 `to` 过了多少毫秒；先到的帧可能比握手还早一点，算 0。
+fn since(from: f64, to: f64) -> u64 {
+    ((to - from) * 1000.0).max(0.0) as u64
 }
 
 /// `https://host:port/path?q` → (`https`, host, port, `/path?q`)。`data:` / `blob:` 这类不算出网。
@@ -2700,6 +2938,70 @@ mod tests {
                 ("*://x.example:*/*".into(), true),
             ]
         );
+    }
+
+    /// 帧比握手先被处理（事件分通道、先后会乱）：先攒着，握手回来再按顺序补上，一条不丢；
+    /// 时间按 CDP 的时间戳从握手回来算。握手没成的记一条带原因的。
+    #[test]
+    fn websocket_frames_that_beat_the_handshake_are_kept() {
+        use chromiumoxide::cdp::browser_protocol::network::WebSocketFrame;
+        use dock_sandbox::audit::ws::Dir;
+        let dir = tempfile::tempdir().unwrap();
+        let log = Arc::new(
+            dock_sandbox::audit::store::AuditLog::open(dir.path(), "browser.jsonl").unwrap(),
+        );
+        let slot: AuditSlot = Arc::new(std::sync::Mutex::new(Some(log)));
+        let text = |s: &str| WebSocketFrame::new(1.0, true, s.to_string());
+        let mut socks = WsSockets::new("browser:T1".into(), 1024, slot.clone());
+        socks.created("1", "wss://chat.example/live?room=2");
+        socks.request("1", vec![("upgrade".into(), "websocket".into())]);
+        socks.frame("1", Dir::Up, &text("early"), 10.002);
+        socks.response("1", 101, "Switching Protocols", vec![], None, 10.0);
+        socks.frame("1", Dir::Down, &text("echo"), 10.250);
+        socks.closed("1");
+        socks.created("2", "ws://chat.example/denied");
+        socks.response("2", 403, "Forbidden", vec![], None, 11.0);
+        drop(socks);
+        *slot.lock().unwrap() = None;
+        let events = dock_sandbox::audit::store::read(dir.path());
+        let hs = events.iter().find(|e| e["path"] == "/live?room=2").unwrap();
+        assert_eq!(
+            (hs["scheme"].as_str(), hs["status"].as_u64()),
+            (Some("wss"), Some(101))
+        );
+        let detail = dock_sandbox::audit::packet::flow_detail(
+            dir.path(),
+            &dock_sandbox::audit::packet::record_id(hs).unwrap(),
+            false,
+        )
+        .unwrap();
+        let msgs: Vec<(String, String, u64)> = detail["ws"]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| {
+                (
+                    m["dir"].as_str().unwrap().into(),
+                    m["text"].as_str().unwrap().into(),
+                    m["at"].as_u64().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            msgs,
+            [
+                ("up".into(), "early".into(), 2),
+                ("down".into(), "echo".into(), 250)
+            ]
+        );
+        assert_eq!(detail["ws"]["open"], false);
+        let denied = events.iter().find(|e| e["path"] == "/denied").unwrap();
+        assert_eq!(denied["status"], 403);
+        assert!(
+            denied["error"].as_str().unwrap().contains("握手没成"),
+            "{denied}"
+        );
+        assert!(denied["ws"].is_null());
     }
 
     #[test]
