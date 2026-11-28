@@ -40,6 +40,17 @@ pub struct Summary {
     hosts: BTreeMap<String, BTreeMap<String, Count>>,
 }
 
+/// 出网是谁发的（链路图左边那一列）：浏览器、某条命令（`工具/程序`），认不出是「其他」。
+fn source_of(tag: &str, jobs: &HashMap<String, (String, String)>) -> String {
+    if tag.starts_with("browser") {
+        "浏览器".to_string()
+    } else if let Some((tool, program)) = jobs.get(tag) {
+        format!("{tool}/{program}")
+    } else {
+        "其他".to_string()
+    }
+}
+
 impl Summary {
     pub fn build(events: &[Value]) -> Self {
         let mut s = Summary::default();
@@ -68,6 +79,19 @@ impl Summary {
                         }
                     }
                 }
+                // WebSocket 握手之后的消息：流量算进那台主机，不算又一次出网。
+                "ws" => {
+                    let bytes =
+                        e["bytes_up"].as_u64().unwrap_or(0) + e["bytes_down"].as_u64().unwrap_or(0);
+                    s.bytes += bytes;
+                    let source = source_of(&str_of(e, "tag"), &jobs);
+                    s.hosts
+                        .entry(source)
+                        .or_default()
+                        .entry(str_of(e, "host"))
+                        .or_default()
+                        .bytes += bytes;
+                }
                 "net" => {
                     s.requests += 1;
                     if e["decrypted"].as_bool() == Some(true) {
@@ -76,14 +100,7 @@ impl Summary {
                     let bytes =
                         e["bytes_up"].as_u64().unwrap_or(0) + e["bytes_down"].as_u64().unwrap_or(0);
                     s.bytes += bytes;
-                    let tag = str_of(e, "tag");
-                    let source = if tag.starts_with("browser") {
-                        "浏览器".to_string()
-                    } else if let Some((tool, program)) = jobs.get(&tag) {
-                        format!("{tool}/{program}")
-                    } else {
-                        "其他".to_string()
-                    };
+                    let source = source_of(&str_of(e, "tag"), &jobs);
                     let c = s
                         .hosts
                         .entry(source)
@@ -361,7 +378,12 @@ pub fn timeline_entry(e: &Value) -> Option<Value> {
                 status.map(|s| format!(" · {s}")).unwrap_or_default()
             );
             detail.push_str(&format!(" · {}", human_bytes(bytes)));
-            if e["decrypted"].as_bool() != Some(true) {
+            if e["ws"].is_object() {
+                detail.push_str(" · WebSocket");
+            }
+            // 没解密 = 只有目的地和字节数的隧道（没有请求行）。明文 HTTP / ws:// 本来就看得到，
+            // `decrypted` 是 false 也不算。
+            if e["decrypted"].as_bool() != Some(true) && e["method"].is_null() {
                 detail.push_str(" · 未解密");
             }
             let error = e["error"]
@@ -401,12 +423,43 @@ pub fn timeline_entry(e: &Value) -> Option<Value> {
     Some(entry)
 }
 
-/// 最近 `limit` 次出网（按时间），HTTP 历史那一页用。
-pub fn requests(events: &[Value], limit: usize) -> Vec<Value> {
+/// 最近 `limit` 次出网（按时间），HTTP 历史那一页用。WebSocket 是握手那一行，之后的各段汇总进
+/// 它的 `ws`（[`crate::audit::ws::summary`]）、字节和耗时也算进去。`live` 是还在写的那次运行的
+/// 目录名（`source` 的前半）：别的运行里没记到关闭的连接不算开着。
+pub fn requests(events: &[Value], limit: usize, live: Option<&str>) -> Vec<Value> {
+    let mut parts: HashMap<&str, Vec<&Value>> = HashMap::new();
+    for e in events.iter().filter(|e| e["kind"] == "ws") {
+        if let Some(conn) = e["ws"]["conn"].as_str() {
+            parts.entry(conn).or_default().push(e);
+        }
+    }
     let rows: Vec<Value> = events
         .iter()
         .filter(|e| e["kind"] == "net")
-        .filter_map(timeline_entry)
+        .filter_map(|e| {
+            let mut row = timeline_entry(e)?;
+            if let Some(conn) = e["ws"]["conn"].as_str() {
+                let run = e["source"]
+                    .as_str()
+                    .and_then(|s| s.split_once('/'))
+                    .map(|(r, _)| r);
+                let ws = crate::audit::ws::summary(
+                    parts.get(conn).into_iter().flatten().copied(),
+                    live.is_some() && run == live,
+                );
+                let wire =
+                    ws["bytesUp"].as_u64().unwrap_or(0) + ws["bytesDown"].as_u64().unwrap_or(0);
+                row["bytes"] = json!(row["bytes"].as_u64().unwrap_or(0) + wire);
+                if let Some(ms) = ws["durationMs"].as_u64() {
+                    row["ms"] = json!(ms);
+                }
+                if row["error"].is_null() {
+                    row["error"] = ws["error"].clone();
+                }
+                row["ws"] = ws;
+            }
+            Some(row)
+        })
         .collect();
     let skip = rows.len().saturating_sub(limit);
     rows.into_iter().skip(skip).collect()
@@ -647,6 +700,68 @@ fn clock(ms: u64) -> String {
 
 /// 报告里每条正文最多展示这么多字符（全文在导出目录的 `bodies/` 里）。
 const BODY_PREVIEW: usize = 4000;
+/// 报告里一条 WebSocket 连接最多列这么多条消息，每条最多这么多字。
+const WS_PREVIEW_MESSAGES: usize = 200;
+const WS_PREVIEW_CHARS: usize = 300;
+
+/// 报告里 WebSocket 握手那一行底下：这条连接的消息（时间、方向、类型、大小、内容开头）。
+fn ws_details(parts: &[&Value], bodies: &Path) -> String {
+    // 导出的就是这次运行，还在写：没记到关闭的照实算开着。
+    let ws = crate::audit::ws::conversation(parts, bodies, true);
+    let messages = ws["messages"].as_array().cloned().unwrap_or_default();
+    let mut out = format!(
+        "── 消息（发出 {} · 收到 {}）──\n",
+        ws["sent"].as_u64().unwrap_or(0),
+        ws["received"].as_u64().unwrap_or(0)
+    );
+    for m in messages.iter().take(WS_PREVIEW_MESSAGES) {
+        let arrow = if m["dir"] == "up" { "↑" } else { "↓" };
+        let content = match m["op"].as_str() {
+            Some("close") => format!(
+                "{} {}",
+                m["code"]
+                    .as_u64()
+                    .map(|c| c.to_string())
+                    .unwrap_or_default(),
+                m["reason"].as_str().unwrap_or("")
+            ),
+            _ => m["text"]
+                .as_str()
+                .map(|t| clip(t, WS_PREVIEW_CHARS))
+                .or_else(|| m["note"].as_str().map(str::to_string))
+                .unwrap_or_default(),
+        };
+        out.push_str(&format!(
+            "+{:.2}s {arrow} {} {}  {}\n",
+            m["at"].as_u64().unwrap_or(0) as f64 / 1000.0,
+            m["op"].as_str().unwrap_or(""),
+            human_bytes(m["size"].as_u64().unwrap_or(0)),
+            content.trim_end()
+        ));
+    }
+    let hidden = messages.len().saturating_sub(WS_PREVIEW_MESSAGES) as u64
+        + ws["omitted"].as_u64().unwrap_or(0)
+        + ws["lost"].as_u64().unwrap_or(0);
+    if hidden > 0 {
+        out.push_str(&format!("（另有 {hidden} 条没列出来）\n"));
+    }
+    if let Some(close) = ws["close"].as_object() {
+        let by = if close.get("by").and_then(Value::as_str) == Some("client") {
+            "客户端"
+        } else {
+            "服务器"
+        };
+        out.push_str(&format!("{by}先关的\n"));
+    } else if ws["open"] == true {
+        out.push_str("（导出时还开着）\n");
+    }
+    for k in ["error", "note"] {
+        if let Some(t) = ws[k].as_str() {
+            out.push_str(&format!("{t}\n"));
+        }
+    }
+    out
+}
 
 /// 一条出网展开后的内容：请求 / 响应的头和正文开头（文本才显示，二进制只报大小）。
 fn net_details(e: &Value, bodies: Option<&Path>) -> String {
@@ -737,6 +852,7 @@ pub fn report_html(
         .filter(|e| {
             e["kind"] == "net"
                 && e["decrypted"].as_bool() != Some(true)
+                && e["method"].is_null()
                 && !str_of(e, "tag").starts_with("browser")
         })
         .map(|e| {
@@ -749,16 +865,27 @@ pub fn report_html(
             )
         })
         .collect();
+    let mut sockets: HashMap<&str, Vec<&Value>> = HashMap::new();
+    for e in events.iter().filter(|e| e["kind"] == "ws") {
+        if let Some(conn) = e["ws"]["conn"].as_str() {
+            sockets.entry(conn).or_default().push(e);
+        }
+    }
     let rows: String = events
         .iter()
         .filter_map(|e| timeline_row(e).map(|row| (e, row)))
         .map(|(e, (ts, kind, text))| {
             let cell =
                 if e["kind"] == "net" && (!e["request"].is_null() || !e["response"].is_null()) {
+                    let mut details = net_details(e, bodies);
+                    if let (Some(conn), Some(dir)) = (e["ws"]["conn"].as_str(), bodies) {
+                        let parts = sockets.get(conn).map(Vec::as_slice).unwrap_or_default();
+                        details.push_str(&ws_details(parts, dir));
+                    }
                     format!(
                         "<details><summary>{}</summary><pre>{}</pre></details>",
                         esc(&text),
-                        esc(&net_details(e, bodies))
+                        esc(&details)
                     )
                 } else {
                     esc(&text)
@@ -977,7 +1104,23 @@ mod tests {
         let mut events = sample();
         events.push(json!({"kind": "net", "tag": "job-1", "host": "api.example", "port": 443, "scheme": "https", "method": "POST", "path": "/v1", "status": 201, "decrypted": true,
             "request": {"headers": [["authorization", "[redacted len=9 sha256=00]"]], "body": {"size": 11, "truncated": false, "sha256": "abc"}}, "ts": 10}));
+        let blob = "c".repeat(64);
+        std::fs::write(
+            dir.path().join(&blob),
+            r#"[{"dir":"up","at":120,"op":"text","size":5,"text":"hello"},{"dir":"down","at":130,"op":"close","size":2,"code":1000,"reason":""}]"#,
+        )
+        .unwrap();
+        events.push(json!({"kind": "net", "tag": "job-1", "host": "chat.example", "port": 443, "scheme": "wss", "method": "GET", "path": "/live", "status": 101, "decrypted": true,
+            "request": {"headers": [["upgrade", "websocket"]], "body": {"size": 0, "truncated": false}}, "ws": {"conn": "c1"}, "ts": 11}));
+        events.push(json!({"kind": "ws", "tag": "job-1", "host": "chat.example", "port": 443, "scheme": "wss", "ts": 12,
+            "ws": {"conn": "c1", "part": {"n": 1, "count": 2, "sent": 1, "received": 1, "omitted": 0, "done": true, "close": {"by": "server", "code": 1000},
+            "messages": {"size": 10, "truncated": false, "sha256": blob}}}}));
         let html = report_html("审计", &events, &[], Some(dir.path()));
+        assert!(
+            html.contains("+0.12s ↑ text 5 B  hello"),
+            "WebSocket 的消息列在握手底下"
+        );
+        assert!(html.contains("服务器先关的"));
         assert!(html.contains("<details>"), "出网可以展开");
         assert!(html.contains("{&quot;ok&quot;:true}"), "正文开头要能看到");
         assert!(html.contains("authorization: [redacted"));
@@ -985,5 +1128,100 @@ mod tests {
         assert!(!html.contains("<script"), "报告里不带脚本、不出网");
         assert!(html.contains("客户端只说 h2"));
         assert!(html.contains("cargo build"));
+    }
+
+    /// WebSocket：各段汇总进握手那一行（条数、字节、关闭），不单独成行；链路图算上它们的流量。
+    /// 只有还在写的那次运行里、没记到关闭的才算开着。
+    #[test]
+    fn websocket_parts_fold_into_their_handshake_row() {
+        let hs = json!({"kind": "net", "tag": "job-1", "host": "chat.example", "port": 443, "scheme": "wss", "method": "GET",
+            "path": "/live", "status": 101, "decrypted": true, "bytes_up": 100, "bytes_down": 50, "ts": 1, "seq": 1,
+            "source": "run2/events.jsonl", "ws": {"conn": "c1"}});
+        let part = |n: u64, done: bool, ts: u64| {
+            let mut p = json!({"kind": "ws", "tag": "job-1", "host": "chat.example", "port": 443, "scheme": "wss",
+                "bytes_up": 10, "bytes_down": 20, "duration_ms": 1000 * n, "ts": ts, "seq": 1 + n, "source": "run2/events.jsonl",
+                "ws": {"conn": "c1", "part": {"n": n, "count": 1, "sent": n, "received": n, "omitted": 0, "done": done}}});
+            if done {
+                p["ws"]["part"]["close"] = json!({"by": "server", "code": 1000});
+            }
+            p
+        };
+        let open = vec![
+            json!({"kind": "command", "job": "job-1", "tool": "bash", "program": "node", "ts": 0}),
+            hs.clone(),
+            part(1, false, 2),
+        ];
+        let rows = requests(&open, 10, Some("run2"));
+        assert_eq!(rows.len(), 1, "段不单独成行：{rows:?}");
+        let row = &rows[0];
+        assert_eq!(
+            (row["ws"]["open"].as_bool(), row["ws"]["sent"].as_u64()),
+            (Some(true), Some(1))
+        );
+        assert_eq!(
+            (row["bytes"].as_u64(), row["ms"].as_u64()),
+            (Some(180), Some(1000))
+        );
+        assert!(row["detail"].as_str().unwrap().contains("WebSocket"));
+        // 那次运行已经结束（不是还在写的那份）：没记到关闭也不算开着，写明为什么。
+        let row = &requests(&open, 10, Some("run3"))[0];
+        assert_eq!(row["ws"]["open"], false);
+        assert!(row["ws"]["note"].as_str().unwrap().contains("结束时还开着"));
+
+        let mut closed = open.clone();
+        closed.push(part(2, true, 3));
+        let row = &requests(&closed, 10, Some("run2"))[0];
+        assert_eq!(
+            (row["ws"]["open"].as_bool(), row["ws"]["received"].as_u64()),
+            (Some(false), Some(2))
+        );
+        assert_eq!(row["ws"]["close"]["by"], "server");
+        assert_eq!(row["bytes"], 210);
+
+        let s = Summary::build(&closed);
+        assert_eq!(
+            (s.requests, s.bytes),
+            (1, 210),
+            "段的流量算进来、不算又一次出网"
+        );
+        let c = &s.hosts["bash/node"]["chat.example"];
+        assert_eq!((c.n, c.bytes), (1, 210));
+        assert!(
+            timeline(&closed, 10).iter().all(|r| r["kind"] != "ws"),
+            "时间线不列每一段"
+        );
+    }
+
+    /// 明文 HTTP / ws://（代理那边 `decrypted` 是 false，可内容都在）不算「未解密」：只有没有
+    /// 请求行的隧道才是。
+    #[test]
+    fn plain_http_is_not_called_undecrypted() {
+        let plain = json!({"kind": "net", "tag": "job-1", "host": "127.0.0.1", "port": 8080, "scheme": "ws", "method": "GET",
+            "path": "/py", "status": 101, "decrypted": false, "ts": 1, "ws": {"conn": "c9"}});
+        let tunnel = json!({"kind": "net", "tag": "job-1", "host": "static.example", "port": 443, "scheme": "https",
+            "decrypted": false, "note": "客户端只说 h2", "ts": 2});
+        let rows = timeline(&[plain.clone(), tunnel.clone()], 10);
+        assert!(
+            !rows[0]["detail"].as_str().unwrap().contains("未解密"),
+            "{}",
+            rows[0]
+        );
+        assert!(
+            rows[1]["detail"].as_str().unwrap().contains("未解密"),
+            "{}",
+            rows[1]
+        );
+        let html = report_html("审计", &[plain, tunnel], &[], None);
+        let opaque = html
+            .split("<h2>没解密的连接</h2>")
+            .nth(1)
+            .unwrap()
+            .split("<h2>")
+            .next()
+            .unwrap();
+        assert!(
+            opaque.contains("static.example") && !opaque.contains("127.0.0.1"),
+            "{opaque}"
+        );
     }
 }

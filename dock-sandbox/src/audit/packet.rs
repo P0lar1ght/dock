@@ -25,7 +25,9 @@ pub fn record_id(event: &Value) -> Option<String> {
 }
 
 /// 按 [`record_id`] 读回一条出网记录，拼成请求包 / 响应包。不是出网记录、找不到都是 `None`。
-pub fn flow_detail(dir: &Path, id: &str) -> Option<Value> {
+/// WebSocket 握手还带上这条连接到目前为止的消息（`ws`，[`crate::audit::ws::conversation`]）；
+/// `live` = 这份目录还在写（没记到关闭的连接才算开着）。
+pub fn flow_detail(dir: &Path, id: &str, live: bool) -> Option<Value> {
     let (file, seq) = id.rsplit_once(':')?;
     let seq: u64 = seq.parse().ok()?;
     // 只认审计目录里的 jsonl，不让 `../` 之类的读到别处。
@@ -33,14 +35,23 @@ pub fn flow_detail(dir: &Path, id: &str) -> Option<Value> {
         return None;
     }
     let text = std::fs::read_to_string(dir.join(file)).ok()?;
-    let e = text
+    let records: Vec<Value> = text
         .lines()
         .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-        .find(|v| v["seq"].as_u64() == Some(seq))?;
+        .collect();
+    let e = records.iter().find(|v| v["seq"].as_u64() == Some(seq))?;
     if e["kind"] != "net" {
         return None;
     }
     let bodies = dir.join(BODIES);
+    // 一条连接的各段和握手是同一个写入方写的，在同一个文件里。
+    let ws = e["ws"]["conn"].as_str().map(|conn| {
+        let parts: Vec<&Value> = records
+            .iter()
+            .filter(|r| r["kind"] == "ws" && r["ws"]["conn"].as_str() == Some(conn))
+            .collect();
+        crate::audit::ws::conversation(&parts, &bodies, live)
+    });
     let decrypted = e["decrypted"].as_bool() == Some(true);
     let request = (decrypted || e["request"].is_object()).then(|| {
         let line = format!(
@@ -80,6 +91,7 @@ pub fn flow_detail(dir: &Path, id: &str) -> Option<Value> {
         "bytesDown": e["bytes_down"],
         "request": request,
         "response": response,
+        "ws": ws,
     }))
 }
 
@@ -204,7 +216,7 @@ mod tests {
         });
         std::fs::write(dir.path().join("events.jsonl"), format!("{line}\n")).unwrap();
 
-        let d = flow_detail(dir.path(), "events.jsonl:7").expect("找得到");
+        let d = flow_detail(dir.path(), "events.jsonl:7", false).expect("找得到");
         assert_eq!(d["request"]["line"], "POST /v1/x?y=1 HTTP/1.1");
         assert_eq!(d["request"]["headers"][1][1], "[redacted 12 sha256:abcd]");
         assert_eq!(d["request"]["body"]["text"], "q=1");
@@ -214,11 +226,11 @@ mod tests {
         assert_eq!(d["response"]["contentType"], "application/json");
 
         assert!(
-            flow_detail(dir.path(), "events.jsonl:8").is_none(),
+            flow_detail(dir.path(), "events.jsonl:8", false).is_none(),
             "没有这条"
         );
         assert!(
-            flow_detail(dir.path(), "../x.jsonl:7").is_none(),
+            flow_detail(dir.path(), "../x.jsonl:7", false).is_none(),
             "不出审计目录"
         );
 
@@ -228,7 +240,7 @@ mod tests {
             "request": { "headers": [], "body": { "size": 10, "truncated": false, "sha256": "../secret.txt" } },
         });
         std::fs::write(dir.path().join("events.jsonl"), format!("{line}\n{evil}\n")).unwrap();
-        let d = flow_detail(dir.path(), "events.jsonl:9").expect("记录本身还在");
+        let d = flow_detail(dir.path(), "events.jsonl:9", false).expect("记录本身还在");
         assert_eq!(d["request"]["body"]["text"], "", "不读 bodies/ 以外的文件");
     }
 
@@ -247,5 +259,102 @@ mod tests {
             !bytes.is_empty() && long.as_bytes().starts_with(&bytes),
             "截断的压缩数据能解多少给多少"
         );
+    }
+
+    /// WebSocket 握手那条带上这条连接的消息：从各段的正文块读回来按顺序拼好；块被删了的计进 `lost`。
+    #[test]
+    fn a_websocket_handshake_comes_back_with_its_messages() {
+        use crate::audit::record::{Flow, Message};
+        use crate::audit::store::AuditLog;
+        use crate::audit::ws::{self, Dir, Op, Payload, Recorder};
+        let dir = tempfile::tempdir().unwrap();
+        let log = std::sync::Arc::new(AuditLog::open(dir.path(), "events.jsonl").unwrap());
+        let conn = ws::conn_id();
+        log.flow(Flow {
+            tag: "job-1".into(),
+            kind: "http",
+            scheme: "wss",
+            host: "chat.example".into(),
+            port: 443,
+            method: Some("GET".into()),
+            path: Some("/live".into()),
+            status: Some(101),
+            request: Some(Message {
+                headers: vec![("upgrade".into(), "websocket".into())],
+                body: Default::default(),
+            }),
+            response: Some(Message {
+                headers: vec![],
+                body: Default::default(),
+            }),
+            bytes_up: 0,
+            bytes_down: 0,
+            started_ms: 1,
+            duration_ms: 1,
+            decrypted: true,
+            note: None,
+            error: None,
+            ws: Some(ws::Ws {
+                conn: conn.clone(),
+                part: None,
+            }),
+        });
+        let start = |conn: String| {
+            let sink_log = log.clone();
+            Recorder::start(
+                std::sync::Arc::new(move |f| sink_log.flow(f)),
+                conn,
+                "job-1",
+                "wss",
+                "chat.example",
+                443,
+                true,
+                1024,
+            )
+        };
+        let text = |s: &'static str| Payload {
+            size: s.len() as u64,
+            sample: s.as_bytes(),
+            ..Payload::default()
+        };
+        let rec = start(conn);
+        // 同一个文件里另一条连接：它的消息不该串过来。
+        let other = start(ws::conn_id());
+        rec.message(Dir::Up, Op::Text, text("hi"));
+        other.message(Dir::Up, Op::Text, text("other"));
+        other.finish(None);
+        rec.finish(None);
+        drop((rec, other, log));
+        let d = flow_detail(dir.path(), "events.jsonl:1", false).expect("握手那条");
+        assert_eq!(
+            (d["scheme"].as_str(), d["status"].as_u64()),
+            (Some("wss"), Some(101))
+        );
+        let ws = &d["ws"];
+        assert_eq!(ws["messages"].as_array().map(Vec::len), Some(1), "{ws}");
+        assert_eq!(ws["messages"][0]["text"], "hi", "{ws}");
+        assert_eq!(
+            (
+                ws["sent"].as_u64(),
+                ws["open"].as_bool(),
+                ws["lost"].as_u64()
+            ),
+            (Some(1), Some(false), Some(0))
+        );
+
+        // 正文块没了：消息少了，`lost` 记下少了几条；哈希校验也报出来。
+        let blobs = dir.path().join(BODIES);
+        for entry in std::fs::read_dir(&blobs).unwrap().flatten() {
+            std::fs::remove_file(entry.path()).unwrap();
+        }
+        let d = flow_detail(dir.path(), "events.jsonl:1", false).unwrap();
+        assert_eq!(
+            (
+                d["ws"]["messages"].as_array().map(Vec::len),
+                d["ws"]["lost"].as_u64()
+            ),
+            (Some(0), Some(1))
+        );
+        assert!(!crate::audit::store::verify(dir.path())[0].intact());
     }
 }

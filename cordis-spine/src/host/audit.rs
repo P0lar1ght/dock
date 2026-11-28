@@ -908,12 +908,20 @@ pub fn sandbox_trace(page: &Context, limit: usize) -> Value {
 pub fn sandbox_http(page: &Context, limit: usize) -> Value {
     let runs = page_runs(page);
     let events = dock_sandbox::audit::store::read_runs(&runs);
+    let live = live_run(page);
     json!({
         "auditing": crate::host::sandbox::enabled(page),
         "runs": runs.len(),
         "records": events.len(),
-        "requests": dock_sandbox::audit::graph::requests(&events, limit),
+        "requests": dock_sandbox::audit::graph::requests(&events, limit, live.as_deref()),
     })
+}
+
+/// 这一页还在写的那份审计目录的名字：只有它里面没记到关闭的 WebSocket 才算还开着。
+fn live_run(page: &Context) -> Option<String> {
+    page.get::<Audit>(AUDIT)?
+        .current(page)
+        .and_then(|a| a.dir.file_name().map(|n| n.to_string_lossy().into_owned()))
 }
 
 /// dock.1 `sandbox/flow`：一次出网的请求包 / 响应包（首行、头、正文；压缩的解开）。
@@ -929,7 +937,8 @@ pub fn sandbox_flow(page: &Context, id: &str) -> Option<Value> {
         ),
         None => (runs.last()?, id),
     };
-    let mut detail = dock_sandbox::audit::packet::flow_detail(dir, rest)?;
+    let live = live_run(page).is_some_and(|name| dir.file_name().is_some_and(|n| *n == *name));
+    let mut detail = dock_sandbox::audit::packet::flow_detail(dir, rest, live)?;
     detail["id"] = json!(id);
     Some(detail)
 }

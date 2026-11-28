@@ -33,6 +33,7 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use crate::audit::ca::Authority;
 use crate::audit::record::{headers, now_ms, Captured, Flow, Message};
+use crate::audit::ws::{self, Dir};
 
 /// 每条流量记录交给谁（spine 那边落盘）。必须很快返回：在代理的读写路径上调用。
 pub type Sink = Arc<dyn Fn(Flow) + Send + Sync>;
@@ -298,6 +299,10 @@ impl Proxy {
         let started = now_ms();
         let t0 = Instant::now();
         let (prefix, hello) = peek_hello(&mut client).await;
+        if hello.is_none() && http_request_line(&prefix) {
+            self.plain_tunnel(tag, host, port, prefix, client).await;
+            return;
+        }
         let name = hello
             .as_ref()
             .and_then(|h| h.sni.clone())
@@ -480,6 +485,51 @@ impl Proxy {
             .await;
     }
 
+    /// CONNECT 隧道里跑的是明文 HTTP：`ws://`、`http://` 经 CONNECT 走代理的客户端（Python
+    /// websockets、curl --proxytunnel 之类）。和明文代理请求一样逐个请求记，WebSocket 照样认帧。
+    async fn plain_tunnel<S>(
+        self: Arc<Self>,
+        tag: Arc<str>,
+        host: String,
+        port: u16,
+        prefix: Vec<u8>,
+        client: S,
+    ) where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let tcp = match self.connect(&host, port).await {
+            Ok(s) => s,
+            Err(e) => return self.emit_error(&tag, "http", &host, port, e.to_string()),
+        };
+        let (sender, conn) = match hyper::client::conn::http1::Builder::new()
+            .preserve_header_case(true)
+            .handshake::<_, ProxyBody>(TokioIo::new(tcp))
+            .await
+        {
+            Ok(pair) => pair,
+            Err(e) => return self.emit_error(&tag, "http", &host, port, format!("上游 HTTP：{e}")),
+        };
+        tokio::spawn(conn.with_upgrades());
+        let target = Arc::new(Target {
+            scheme: "http",
+            host,
+            port,
+            sender: AsyncMutex::new(Some(sender)),
+        });
+        let proxy = self.clone();
+        let service = service_fn(move |req| {
+            let proxy = proxy.clone();
+            let tag = tag.clone();
+            let target = target.clone();
+            async move { Ok::<_, Infallible>(proxy.relay(tag, target, req).await) }
+        });
+        let _ = hyper::server::conn::http1::Builder::new()
+            .preserve_header_case(true)
+            .serve_connection(TokioIo::new(Rewind::new(prefix, client)), service)
+            .with_upgrades()
+            .await;
+    }
+
     /// 明文 HTTP 代理请求（`GET http://host/path`）：一个请求一条上游连接。
     async fn forward_plain(
         self: Arc<Self>,
@@ -561,6 +611,7 @@ impl Proxy {
                 decrypted: target.scheme == "https",
                 note: None,
                 error: None,
+                ws: None,
             },
         ));
         let client_upgrade = req
@@ -608,17 +659,82 @@ impl Proxy {
         if resp.status() == StatusCode::SWITCHING_PROTOCOLS {
             if let Some(client_upgrade) = client_upgrade {
                 let upstream_upgrade = hyper::upgrade::on(&mut resp);
-                let shared = shared.clone();
-                tokio::spawn(async move {
-                    if let (Ok(a), Ok(b)) = tokio::join!(client_upgrade, upstream_upgrade) {
-                        let mut a = TokioIo::new(a);
-                        let mut b = TokioIo::new(b);
-                        if let Ok((up, down)) = tokio::io::copy_bidirectional(&mut a, &mut b).await
-                        {
-                            shared.upgraded(up, down);
+                let protocol = resp
+                    .headers()
+                    .get(UPGRADE)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("")
+                    .to_string();
+                if protocol.eq_ignore_ascii_case("websocket") {
+                    let deflate = resp
+                        .headers()
+                        .get_all("sec-websocket-extensions")
+                        .iter()
+                        .filter_map(|v| v.to_str().ok())
+                        .flat_map(|v| v.split(','))
+                        .any(|ext| {
+                            ext.split(';').next().is_some_and(|name| {
+                                name.trim().eq_ignore_ascii_case("permessage-deflate")
+                            })
+                        });
+                    let conn = ws::conn_id();
+                    let rec = ws::Recorder::start(
+                        self.sink.clone(),
+                        conn.clone(),
+                        tag.to_string(),
+                        if target.scheme == "https" {
+                            "wss"
+                        } else {
+                            "ws"
+                        },
+                        target.host.clone(),
+                        target.port,
+                        true,
+                        self.opts.body_cap,
+                    );
+                    // 连接可能开很久：握手现在就记，之后的消息由 rec 按段记。
+                    shared.websocket(conn);
+                    shared.finish();
+                    let cap = self.opts.body_cap;
+                    tokio::spawn(async move {
+                        let (a, b) = match tokio::join!(client_upgrade, upstream_upgrade) {
+                            (Ok(a), Ok(b)) => (a, b),
+                            (Err(e), _) | (_, Err(e)) => {
+                                rec.finish(Some(format!("升级：{e}")));
+                                return;
+                            }
+                        };
+                        let (client_r, client_w) = tokio::io::split(TokioIo::new(a));
+                        let (server_r, server_w) = tokio::io::split(TokioIo::new(b));
+                        let up = pump(
+                            client_r,
+                            server_w,
+                            ws::Decoder::new(Dir::Up, cap, deflate),
+                            &rec,
+                        );
+                        let down = pump(
+                            server_r,
+                            client_w,
+                            ws::Decoder::new(Dir::Down, cap, deflate),
+                            &rec,
+                        );
+                        let ended = tokio::try_join!(up, down);
+                        rec.finish(ended.err().map(|e| e.to_string()));
+                    });
+                } else {
+                    let shared = shared.clone();
+                    tokio::spawn(async move {
+                        if let (Ok(a), Ok(b)) = tokio::join!(client_upgrade, upstream_upgrade) {
+                            let mut a = TokioIo::new(a);
+                            let mut b = TokioIo::new(b);
+                            if let Ok((up, down)) =
+                                tokio::io::copy_bidirectional(&mut a, &mut b).await
+                            {
+                                shared.upgraded(&protocol, up, down);
+                            }
                         }
-                    }
-                });
+                    });
+                }
             }
         }
         let (parts, body) = resp.into_parts();
@@ -662,6 +778,7 @@ impl Proxy {
             decrypted: false,
             note,
             error: None,
+            ws: None,
         };
         match self.connect(&host, port).await {
             Ok(mut upstream) => {
@@ -732,6 +849,7 @@ impl Proxy {
             decrypted: false,
             note: None,
             error: Some(error),
+            ws: None,
         });
     }
 }
@@ -791,6 +909,27 @@ fn rejects_certificate(e: &io::Error) -> bool {
             | A::CertificateExpired
             | A::CertificateRevoked
     )
+}
+
+/// 隧道的第一包是不是一行完整的 HTTP/1 请求行（`GET /path HTTP/1.1`）。只看方法像不像不够：
+/// IRC 的 `NICK x` 这类明文协议也是大写单词开头，认错了就把它们弄坏了——拿不准就原样转发。
+fn http_request_line(prefix: &[u8]) -> bool {
+    let Some(end) = prefix.windows(2).position(|w| w == b"\r\n") else {
+        return false;
+    };
+    let Ok(line) = std::str::from_utf8(&prefix[..end]) else {
+        return false;
+    };
+    let mut parts = line.split(' ');
+    let (Some(method), Some(target), Some(version), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return false;
+    };
+    (1..=16).contains(&method.len())
+        && method.bytes().all(|b| b.is_ascii_uppercase())
+        && !target.is_empty()
+        && matches!(version, "HTTP/1.1" | "HTTP/1.0")
 }
 
 async fn peek_hello<S: AsyncRead + Unpin>(io: &mut S) -> (Vec<u8>, Option<Hello>) {
@@ -885,16 +1024,11 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Rewind<S> {
     }
 }
 
-#[derive(Clone, Copy)]
-enum Dir {
-    Up,
-    Down,
-}
-
 /// 一次请求的记录。两边的正文（[`Tee`]）和处理函数各拿一份；最后一份放掉时（响应读完、
 /// 或者连接断了）补上耗时、交给 [`Sink`]——所以哪条路走完都只记一次。
 struct Shared {
-    flow: Mutex<Flow>,
+    /// 记过了（[`Shared::finish`]）就是 `None`。
+    flow: Mutex<Option<Flow>>,
     sink: Sink,
     t0: Instant,
 }
@@ -902,7 +1036,7 @@ struct Shared {
 impl Shared {
     fn new(sink: Sink, flow: Flow) -> Self {
         Self {
-            flow: Mutex::new(flow),
+            flow: Mutex::new(Some(flow)),
             sink,
             t0: Instant::now(),
         }
@@ -910,6 +1044,7 @@ impl Shared {
 
     fn push(&self, dir: Dir, chunk: &[u8], cap: usize) {
         let mut f = self.flow.lock().unwrap();
+        let Some(f) = f.as_mut() else { return };
         match dir {
             Dir::Up => {
                 f.bytes_up += chunk.len() as u64;
@@ -928,6 +1063,7 @@ impl Shared {
 
     fn respond(&self, status: u16, headers: Vec<(String, String)>) {
         let mut f = self.flow.lock().unwrap();
+        let Some(f) = f.as_mut() else { return };
         f.status = Some(status);
         f.response = Some(Message {
             headers,
@@ -936,43 +1072,67 @@ impl Shared {
     }
 
     fn fail(&self, error: String) {
-        self.flow.lock().unwrap().error = Some(error);
+        if let Some(f) = self.flow.lock().unwrap().as_mut() {
+            f.error = Some(error);
+        }
     }
 
-    fn upgraded(&self, up: u64, down: u64) {
-        let mut f = self.flow.lock().unwrap();
-        f.bytes_up += up;
-        f.bytes_down += down;
-        f.note = Some("升级成了 WebSocket（之后的帧只计字节）".into());
+    /// 升级成了 WebSocket：`scheme` 换成 `ws` / `wss`，带上连接 id（之后的消息按它串起来）。
+    fn websocket(&self, conn: String) {
+        if let Some(f) = self.flow.lock().unwrap().as_mut() {
+            f.scheme = if f.scheme == "https" { "wss" } else { "ws" };
+            f.ws = Some(ws::Ws { conn, part: None });
+        }
+    }
+
+    /// 升级成了别的协议：之后只计字节。
+    fn upgraded(&self, protocol: &str, up: u64, down: u64) {
+        if let Some(f) = self.flow.lock().unwrap().as_mut() {
+            f.bytes_up += up;
+            f.bytes_down += down;
+            f.note = Some(format!("升级成了 {protocol}（之后只计字节）"));
+        }
+    }
+
+    /// 现在就记（补上耗时）。之后的正文、字节都不再算进这条。
+    fn finish(&self) {
+        let flow = self.flow.lock().unwrap().take();
+        if let Some(mut flow) = flow {
+            flow.duration_ms = self.t0.elapsed().as_millis() as u64;
+            (self.sink)(flow);
+        }
     }
 }
 
 impl Drop for Shared {
     fn drop(&mut self) {
-        let mut flow = std::mem::replace(
-            self.flow.get_mut().unwrap(),
-            Flow {
-                tag: String::new(),
-                kind: "http",
-                scheme: "http",
-                host: String::new(),
-                port: 0,
-                method: None,
-                path: None,
-                status: None,
-                request: None,
-                response: None,
-                bytes_up: 0,
-                bytes_down: 0,
-                started_ms: 0,
-                duration_ms: 0,
-                decrypted: false,
-                note: None,
-                error: None,
-            },
-        );
-        flow.duration_ms = self.t0.elapsed().as_millis() as u64;
-        (self.sink)(flow);
+        self.finish();
+    }
+}
+
+/// 转发一个方向（WebSocket 升级之后）：原样写给另一边，同时喂给帧解析。读到头就把另一边的
+/// 写端关掉（半关闭照常传过去）。
+async fn pump<R, W>(
+    mut from: R,
+    mut to: W,
+    mut decoder: ws::Decoder,
+    rec: &ws::Recorder,
+) -> io::Result<()>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let dir = decoder.dir();
+    let mut buf = vec![0u8; 16 * 1024];
+    loop {
+        let n = from.read(&mut buf).await?;
+        if n == 0 {
+            let _ = to.shutdown().await;
+            return Ok(());
+        }
+        to.write_all(&buf[..n]).await?;
+        rec.wire(dir, n as u64);
+        decoder.feed(&buf[..n], rec);
     }
 }
 
@@ -1080,6 +1240,22 @@ mod base64_lite {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_whole_http_request_line_counts_as_http_in_a_tunnel() {
+        assert!(http_request_line(b"GET /chat HTTP/1.1\r\nHost: x\r\n"));
+        assert!(http_request_line(b"OPTIONS * HTTP/1.0\r\n"));
+        for no in [
+            &b"NICK dock\r\nUSER dock 0 * :Dock\r\n"[..],
+            b"GET /chat HTTP/1.1",
+            b"GET /chat HTTP/2\r\n",
+            b"get / HTTP/1.1\r\n",
+            b"\x16\x03\x01\x02\x00",
+            b"SSH-2.0-OpenSSH_9.6\r\n",
+        ] {
+            assert!(!http_request_line(no), "{:?}", String::from_utf8_lossy(no));
+        }
+    }
 
     #[test]
     fn upstream_proxy_parses_auth_and_no_proxy() {

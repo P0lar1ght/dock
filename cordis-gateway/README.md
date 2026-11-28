@@ -1074,7 +1074,10 @@ bash 里改的不算。轮次用投影里的 `turnId`（和 `item/user_message` 
 - `sandbox/status { threadId }`（能力 `sandboxTrace`；`sandbox/*` 四个都只认受信连接：命令全文、网址里的 query、请求包都是审计数据）→ 这一页沙箱的现状：`enabled`、`workspace`（`root` / `home` / `mode` / `branch`）、`cwd`、`auditing`、`records`、`intact`（哈希链和正文块）、`decrypt`、`egress`、`confine`、`network`、`backend`（`seatbelt` / `landlock`，本机用不了是 `null`）、`backendReason`（用不了的原因）、`limits`（这台机器上后端做不到的保证）、`runs`（这个会话记过几次，`records` / `intact` 算全部）、`rules`、`passthrough`。不给 `threadId` 是第 1 页（设置页只看后端和配置）。会验一遍日志，别每秒调。
 - `sandbox/trace { threadId, limit? }` → `{ auditing, runs, records, graph: { nodes, edges }, totals, timeline }`（这个会话记过的每一次接起来，跨 Dock 重启；`auditing` = 现在开着接着记，关着也照样给之前的；`runs` = 几次运行，之前几次的 job id 带 `@<第几次>`）：行为链路图（节点 `kind` = `session` / `tool` / `program` / `source` / `host` / `others`，带次数、出错、流量）和最近 `limit`（默认 300、最多 2000）条时间线。没开沙箱时 `auditing: false`、其余是空的。
 - `sandbox/http { threadId, limit? }` → `{ auditing, runs, records, requests }`（同样跨运行）：最近的出网（HTTP 历史），每行带 `id`、`method`、`host`、`path`、`status`、`bytes`、`ms`、`decrypted`、`note`。
+  WebSocket 是握手那一行（`scheme` 为 `ws` / `wss`、101），多一个 `ws`：`{ open, sent, received, omitted, close, error, note, bytesUp, bytesDown, durationMs }`；
+  之后的消息不单独成行，字节和耗时算进这一行。`open` 只在记它的那次运行还在写、还没记到关闭时为真。
 - `sandbox/flow { threadId, id }`（`id` 是 `<审计目录名>/<文件>:<序号>`，目录只认这个会话自己的）→ 一次出网的请求包 / 响应包：`request` / `response` 各有 `line`（请求行 / 状态行）、`headers`、`contentType`、`body`（`text` 或 `base64`，按 `Content-Encoding` 解开了什么、记了多少、截没截）；没解密的连接两边都是 `null`，看 `note`。正文没遮凭据（头遮了）。
+  WebSocket 握手还带 `ws`：上面那些字段加上 `messages`（按时间排：`dir` 为 `up` / `down`、`at` 连上后的毫秒、`op`、`size`、`text` 或 `base64`、`truncated`、`compressed`、关闭帧的 `code` / `reason`）和 `lost`（内容块读不回来的条数）。不是 WebSocket 是 `null`。
 - `vcs/worktree/diff { threadId | cwd }`（只认受信连接，能力 `worktreeDiff`）→ `{ available, diff, truncated, root, untrackedOmitted? }`：
   项目所在 git 仓库相对 HEAD 的全部改动（含暂存的；还没提交过就和空树比），加上未跟踪的新文件
   （按 `.gitignore`，最多 100 个，超过 1MB / 不是文本的只给文件头）。路径相对仓库根 `root`。
