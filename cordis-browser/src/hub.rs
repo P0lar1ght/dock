@@ -1,7 +1,8 @@
 //! 按会话管标签页组，把 `browser_*` 调用分派过去。
 //!
 //! 一个 [`Chromium`] 进程（懒启动），每个会话 id 一个 [`ConnectedSession`]。
-//! 同一会话的调用排队（组上一把锁），不同会话并行。最后一组关掉时 Chromium 也关。
+//! 同一会话的调用排队（组上一把锁），不同会话并行。最后一组关掉时离开 Chromium：
+//! 别的 Dock 进程还有页开在上面就只断开，否则关掉（[`BrowserHub::leave_chromium`]）。
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -65,6 +66,15 @@ impl CallOutput {
 
 type Group = Arc<Mutex<ConnectedSession>>;
 
+/// 名册文件名；`Default` 就领一个新的，`BrowserHub` 照样 `#[derive(Default)]`。
+struct Owner(String);
+
+impl Default for Owner {
+    fn default() -> Self {
+        Self(registry::next_owner())
+    }
+}
+
 /// 会话 → 标签页组。见模块文档。
 #[derive(Default)]
 pub struct BrowserHub {
@@ -75,6 +85,8 @@ pub struct BrowserHub {
     index: std::sync::Mutex<BTreeMap<String, SessionTabs>>,
     /// 测试把名册写到临时目录；`None` 用 `$DOCK_HOME/browser/sessions`。
     registry_dir: Option<std::path::PathBuf>,
+    /// 本 hub 的名册文件名（[`registry::next_owner`]）。
+    owner: Owner,
     /// `browser_js` 的 Node 执行器，第一次用时才起。
     js: Mutex<Option<Arc<JsRunner>>>,
     /// 开着审计的会话：审计目录和写进去的日志（`browser.jsonl`）。
@@ -90,17 +102,42 @@ impl BrowserHub {
 
     /// 名册写到 `dir`（测试用）。
     pub fn with_registry_dir(dir: std::path::PathBuf) -> Self {
-        Self {
-            registry_dir: Some(dir),
-            ..Self::default()
-        }
+        // 有 `Drop`，不能 `..Self::default()`。
+        let mut hub = Self::new();
+        hub.registry_dir = Some(dir);
+        hub
+    }
+
+    fn registry_dir(&self) -> PathBuf {
+        self.registry_dir
+            .clone()
+            .unwrap_or_else(registry::registry_dir)
     }
 
     fn publish(&self) {
         let snapshot = self.index.lock().unwrap().clone();
-        match &self.registry_dir {
-            Some(dir) => registry::publish_in(dir, &snapshot),
-            None => registry::publish(&snapshot),
+        registry::publish_in(&self.registry_dir(), &self.owner.0, &snapshot);
+    }
+
+    /// 本进程不再用 Chromium 了：别的 Dock 进程（名册里别的 hub）还有页开在上面就只断开，
+    /// 不然关掉整个浏览器——谁最后一个走谁关，拉起它的那个先走也不带走别人的页。
+    ///
+    /// 名册里的 target 要在这个 Chromium 里真有才算：别的进程可能还记着上一个 Chromium
+    /// 的页（它还没再调用、没发现浏览器换过），那些不能把这个留着不关。读不了名册、问不到
+    /// Chromium 时都当别人还在用：宁可留给还在的那个进程走时再关，也不关掉别人的页。
+    async fn leave_chromium(&self, chromium: Chromium) {
+        let in_use = match registry::others_in(&self.registry_dir(), &self.owner.0) {
+            Err(_) => true,
+            Ok(theirs) if theirs.is_empty() => false,
+            Ok(theirs) => match chromium.live_targets().await {
+                Ok(live) => live.iter().any(|t| theirs.contains(t)),
+                Err(_) => true,
+            },
+        };
+        if in_use {
+            chromium.disconnect();
+        } else {
+            chromium.close().await;
         }
     }
 
@@ -206,8 +243,9 @@ impl BrowserHub {
         if let Some(runner) = self.js.lock().await.take() {
             runner.shutdown().await;
         }
-        if let Some(chromium) = self.chromium.lock().await.take() {
-            chromium.shutdown().await;
+        let chromium = self.chromium.lock().await.take();
+        if let Some(chromium) = chromium {
+            self.leave_chromium(chromium).await;
         }
     }
 
@@ -470,7 +508,7 @@ impl BrowserHub {
         self.forget(None);
         self.groups.lock().await.clear();
         if let Some(dead) = self.chromium.lock().await.take() {
-            dead.shutdown().await;
+            dead.disconnect();
         }
     }
 
@@ -576,10 +614,29 @@ impl BrowserHub {
             }
         }
         if self.groups.lock().await.is_empty() {
-            if let Some(chromium) = self.chromium.lock().await.take() {
-                chromium.shutdown().await;
+            let chromium = self.chromium.lock().await.take();
+            if let Some(chromium) = chromium {
+                self.leave_chromium(chromium).await;
             }
         }
+    }
+}
+
+/// 没走 [`BrowserHub::shutdown`] 就被丢掉（测试中途 panic、服务读 stdin 出错提前返回）。
+/// 以前 chromiumoxide 的 `kill_on_drop` 会顺手杀掉自己拉起的 Chromium；现在它是脱开的进程
+/// （见 [`crate::session::Chromium`]），这里补上：名册里没有别的 hub 开着页才杀，别人在用的
+/// 照样留着；连上别人的那个不动。同步，不经 CDP（这里可能已经不在运行时里了）。
+impl Drop for BrowserHub {
+    fn drop(&mut self) {
+        let Some(chromium) = self.chromium.get_mut().take() else {
+            return;
+        };
+        self.forget(None);
+        // 读不了名册就不杀（同 `leave_chromium`：读不到不算没人在用）。
+        if registry::others_in(&self.registry_dir(), &self.owner.0).is_ok_and(|t| t.is_empty()) {
+            chromium.kill_launched();
+        }
+        chromium.disconnect();
     }
 }
 

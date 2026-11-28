@@ -1,15 +1,19 @@
 //! 会话 → 标签页的运行时名册：`$DOCK_HOME/browser/sessions/<pid>.json`。
 //!
 //! MCP 服务每次某个会话的标签页变了（开、关、切）就整份重写自己那一份（先写临时文件
-//! 再改名，读方不会读到半截）；都关了（或退出）就删掉。网关按它把「某个会话正在用的标签页」对到
-//! CDP target 上，好推画面（见 [`crate::view`]）。
+//! 再改名，读方不会读到半截）；都关了（或退出）就删掉。两个读方：
+//! - 网关按它把「某个会话正在用的标签页」对到 CDP target 上，好推画面（见 [`crate::view`]）。
+//! - 要离开 Chromium 的 hub 按它看别的 Dock 进程还有没有页开在上面（[`others_in`]），
+//!   有就不关浏览器。
 //!
-//! 一个进程一份：TUI 和 GUI 各起一个 Dock、共用一个 Chromium 时互不覆盖。进程被杀
-//! 留下的旧文件不影响正确性——读方最后还要去 Chromium 里找这个 target，找不到就当没有。
-//! 这是运行时状态，不是会话数据，不进会话目录。
+//! 一个 hub 一份（产品里一个进程只有一个 hub，就是 `<pid>.json`，见 [`next_owner`]）：
+//! TUI 和 GUI 各起一个 Dock、共用一个 Chromium 时互不覆盖。进程被杀留下的旧文件不影响
+//! 正确性——读方最后还要去 Chromium 里找这个 target，找不到就当没有；[`others_in`] 还
+//! 跳过进程已经不在的。这是运行时状态，不是会话数据，不进会话目录。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde_json::{json, Value};
 
@@ -26,17 +30,29 @@ pub fn registry_dir() -> PathBuf {
     dock_home().join("browser").join("sessions")
 }
 
-fn own_file(dir: &Path) -> PathBuf {
-    dir.join(format!("{}.json", std::process::id()))
+/// 新起一个 hub 的名册文件名（不带 `.json`）。进程里第一个就是 `<pid>`，之后的加序号
+/// （测试在一个进程里起好几个 hub 当几个 Dock 进程用，各写各的）。
+pub fn next_owner() -> String {
+    static SEQ: AtomicUsize = AtomicUsize::new(0);
+    let pid = std::process::id();
+    match SEQ.fetch_add(1, Ordering::Relaxed) {
+        0 => pid.to_string(),
+        n => format!("{pid}-{n}"),
+    }
 }
 
-/// 整份写下本进程的名册（空了就删文件）。写失败不影响工具调用，只是网关看不到画面。
-pub fn publish(entries: &BTreeMap<String, SessionTabs>) {
-    publish_in(&registry_dir(), entries);
+fn own_file(dir: &Path, owner: &str) -> PathBuf {
+    dir.join(format!("{owner}.json"))
 }
 
-pub fn publish_in(dir: &Path, entries: &BTreeMap<String, SessionTabs>) {
-    let file = own_file(dir);
+/// 整份写下 `owner` 这个 hub 的名册（空了就删文件）。写失败不影响工具调用，但网关看不到
+/// 画面，别的 Dock 进程离开 Chromium 时也看不到这些页（[`others_in`]），可能把浏览器关掉。
+pub fn publish(owner: &str, entries: &BTreeMap<String, SessionTabs>) {
+    publish_in(&registry_dir(), owner, entries);
+}
+
+pub fn publish_in(dir: &Path, owner: &str, entries: &BTreeMap<String, SessionTabs>) {
+    let file = own_file(dir, owner);
     if entries.is_empty() {
         let _ = std::fs::remove_file(&file);
         return;
@@ -54,10 +70,81 @@ pub fn publish_in(dir: &Path, entries: &BTreeMap<String, SessionTabs>) {
     if std::fs::create_dir_all(dir).is_err() {
         return;
     }
-    let tmp = dir.join(format!(".{}.json.tmp", std::process::id()));
+    let tmp = dir.join(format!(".{owner}.json.tmp"));
     if std::fs::write(&tmp, body).is_ok() {
         let _ = std::fs::rename(&tmp, &file);
     }
+}
+
+/// 别的 hub 名下的全部标签页 target id：跳过 `owner` 自己那份、进程已经不在的
+/// （`kill -9` 留下的旧文件）和不是名册的（解析不了的 JSON；名册先写临时文件再改名，
+/// 不会读到半截）。
+///
+/// 目录不存在 = 谁都没登记过，是空集。别的读错（没权限……）回 `Err`：调用方据此决定关不关
+/// 浏览器，读不到不能当成「没人在用」。
+pub fn others_in(dir: &Path, owner: &str) -> Result<HashSet<String>, String> {
+    let own = format!("{owner}.json");
+    let read = match std::fs::read_dir(dir) {
+        Ok(read) => read,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(HashSet::new()),
+        Err(e) => return Err(format!("read {}: {e}", dir.display())),
+    };
+    let mut out = HashSet::new();
+    for entry in read {
+        let path = entry
+            .map_err(|e| format!("read {}: {e}", dir.display()))?
+            .path();
+        if path.extension().is_none_or(|x| x != "json")
+            || path.file_name().is_some_and(|n| *n == *own)
+        {
+            continue;
+        }
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            // 列目录之后被它的主人删掉了（都关了 / 退出了）。
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(format!("read {}: {e}", path.display())),
+        };
+        let Ok(v) = serde_json::from_str::<Value>(&raw) else {
+            continue;
+        };
+        let alive = v
+            .get("pid")
+            .and_then(Value::as_u64)
+            .and_then(|p| u32::try_from(p).ok())
+            .is_some_and(pid_alive);
+        if !alive {
+            continue;
+        }
+        let sessions = v.get("sessions").and_then(Value::as_object);
+        for entry in sessions.into_iter().flat_map(|m| m.values()) {
+            let targets = entry.get("targets").and_then(Value::as_array);
+            out.extend(
+                targets
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|t| t.as_str().map(String::from)),
+            );
+        }
+    }
+    Ok(out)
+}
+
+/// 进程还在吗（僵尸也算在）。
+#[cfg(unix)]
+pub(crate) fn pid_alive(pid: u32) -> bool {
+    let Ok(pid) = i32::try_from(pid) else {
+        return false;
+    };
+    // SAFETY: signal 0 只做存在 / 权限检查，不发信号。
+    let rc = unsafe { libc::kill(pid, 0) };
+    rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+/// 非 unix 上查不了：当它还活着，不关别人可能还在用的浏览器。
+#[cfg(not(unix))]
+pub(crate) fn pid_alive(_pid: u32) -> bool {
+    true
 }
 
 /// 找某个会话的标签页。多份文件都有它时取最新写的那份。
@@ -107,7 +194,7 @@ mod tests {
                 active: Some("B".into()),
             },
         );
-        publish_in(dir.path(), &entries);
+        publish_in(dir.path(), "4242", &entries);
         let got = lookup_in(dir.path(), "t1").unwrap();
         assert_eq!(got.targets, vec!["A", "B"]);
         assert_eq!(got.active.as_deref(), Some("B"));
@@ -117,9 +204,9 @@ mod tests {
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
-        assert_eq!(names, vec![format!("{}.json", std::process::id())]);
+        assert_eq!(names, vec!["4242.json".to_string()]);
 
-        publish_in(dir.path(), &BTreeMap::new());
+        publish_in(dir.path(), "4242", &BTreeMap::new());
         assert!(lookup_in(dir.path(), "t1").is_none());
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
@@ -135,5 +222,86 @@ mod tests {
         std::fs::write(dir.path().join("broken.json"), "{not json").unwrap();
         let got = lookup_in(dir.path(), "gui").unwrap();
         assert_eq!(got.active.as_deref(), Some("X"));
+    }
+
+    #[test]
+    fn hubs_in_one_process_get_their_own_files() {
+        let a = next_owner();
+        let b = next_owner();
+        assert_ne!(a, b);
+        let pid = std::process::id().to_string();
+        assert!(a.starts_with(&pid) && b.starts_with(&pid), "{a} {b}");
+    }
+
+    #[test]
+    fn others_skip_own_file_and_dead_processes() {
+        let dir = tempfile::tempdir().unwrap();
+        let tabs = |ids: &[&str]| SessionTabs {
+            targets: ids.iter().map(|s| s.to_string()).collect(),
+            active: ids.last().map(|s| s.to_string()),
+        };
+        // 自己（和别的 hub 同一个进程，pid 活着）。
+        publish_in(
+            dir.path(),
+            "me",
+            &BTreeMap::from([("s".to_string(), tabs(&["MINE"]))]),
+        );
+        publish_in(
+            dir.path(),
+            "other",
+            &BTreeMap::from([
+                ("a".to_string(), tabs(&["X", "Y"])),
+                ("b".to_string(), tabs(&["Z"])),
+            ]),
+        );
+        // `kill -9` 留下的：进程早没了。
+        std::fs::write(
+            dir.path().join("99999999.json"),
+            r#"{"pid":99999999,"sessions":{"gui":{"targets":["DEAD"],"active":"DEAD"}}}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("broken.json"), "{not json").unwrap();
+        std::fs::write(dir.path().join("nopid.json"), r#"{"sessions":{}}"#).unwrap();
+
+        let mut got: Vec<String> = others_in(dir.path(), "me").unwrap().into_iter().collect();
+        got.sort();
+        assert_eq!(got, vec!["X", "Y", "Z"]);
+        // 谁都没登记过：目录还没建。
+        assert!(others_in(&dir.path().join("missing"), "me")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn unreadable_registry_is_an_error_not_an_empty_set() {
+        let dir = tempfile::tempdir().unwrap();
+        // 名册路径被一个普通文件占着：列不了目录。
+        let not_a_dir = dir.path().join("sessions");
+        std::fs::write(&not_a_dir, "x").unwrap();
+        assert!(others_in(&not_a_dir, "me").is_err());
+
+        // 别的 hub 那份读不了（没权限）。root 跑测试时权限挡不住，就不验这一半。
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let reg = dir.path().join("reg");
+            publish_in(
+                &reg,
+                "other",
+                &BTreeMap::from([(
+                    "a".to_string(),
+                    SessionTabs {
+                        targets: vec!["X".into()],
+                        active: None,
+                    },
+                )]),
+            );
+            let file = reg.join("other.json");
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+            if std::fs::read_to_string(&file).is_err() {
+                assert!(others_in(&reg, "me").is_err());
+            }
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
     }
 }
