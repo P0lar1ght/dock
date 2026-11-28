@@ -45,8 +45,8 @@ fn own_file(dir: &Path, owner: &str) -> PathBuf {
     dir.join(format!("{owner}.json"))
 }
 
-/// 整份写下 `owner` 这个 hub 的名册（空了就删文件）。写失败不影响工具调用，只是网关
-/// 看不到画面。
+/// 整份写下 `owner` 这个 hub 的名册（空了就删文件）。写失败不影响工具调用，但网关看不到
+/// 画面，别的 Dock 进程离开 Chromium 时也看不到这些页（[`others_in`]），可能把浏览器关掉。
 pub fn publish(owner: &str, entries: &BTreeMap<String, SessionTabs>) {
     publish_in(&registry_dir(), owner, entries);
 }
@@ -77,23 +77,35 @@ pub fn publish_in(dir: &Path, owner: &str, entries: &BTreeMap<String, SessionTab
 }
 
 /// 别的 hub 名下的全部标签页 target id：跳过 `owner` 自己那份、进程已经不在的
-/// （`kill -9` 留下的旧文件）和读不了的。
-pub fn others_in(dir: &Path, owner: &str) -> HashSet<String> {
+/// （`kill -9` 留下的旧文件）和不是名册的（解析不了的 JSON；名册先写临时文件再改名，
+/// 不会读到半截）。
+///
+/// 目录不存在 = 谁都没登记过，是空集。别的读错（没权限……）回 `Err`：调用方据此决定关不关
+/// 浏览器，读不到不能当成「没人在用」。
+pub fn others_in(dir: &Path, owner: &str) -> Result<HashSet<String>, String> {
     let own = format!("{owner}.json");
-    let Ok(read) = std::fs::read_dir(dir) else {
-        return HashSet::new();
+    let read = match std::fs::read_dir(dir) {
+        Ok(read) => read,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(HashSet::new()),
+        Err(e) => return Err(format!("read {}: {e}", dir.display())),
     };
     let mut out = HashSet::new();
-    for path in read.filter_map(Result::ok).map(|e| e.path()) {
+    for entry in read {
+        let path = entry
+            .map_err(|e| format!("read {}: {e}", dir.display()))?
+            .path();
         if path.extension().is_none_or(|x| x != "json")
             || path.file_name().is_some_and(|n| *n == *own)
         {
             continue;
         }
-        let Some(v) = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-        else {
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            // 列目录之后被它的主人删掉了（都关了 / 退出了）。
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(format!("read {}: {e}", path.display())),
+        };
+        let Ok(v) = serde_json::from_str::<Value>(&raw) else {
             continue;
         };
         let alive = v
@@ -115,7 +127,7 @@ pub fn others_in(dir: &Path, owner: &str) -> HashSet<String> {
             );
         }
     }
-    out
+    Ok(out)
 }
 
 /// 进程还在吗（僵尸也算在）。
@@ -251,9 +263,45 @@ mod tests {
         std::fs::write(dir.path().join("broken.json"), "{not json").unwrap();
         std::fs::write(dir.path().join("nopid.json"), r#"{"sessions":{}}"#).unwrap();
 
-        let mut got: Vec<String> = others_in(dir.path(), "me").into_iter().collect();
+        let mut got: Vec<String> = others_in(dir.path(), "me").unwrap().into_iter().collect();
         got.sort();
         assert_eq!(got, vec!["X", "Y", "Z"]);
-        assert!(others_in(&dir.path().join("missing"), "me").is_empty());
+        // 谁都没登记过：目录还没建。
+        assert!(others_in(&dir.path().join("missing"), "me")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn unreadable_registry_is_an_error_not_an_empty_set() {
+        let dir = tempfile::tempdir().unwrap();
+        // 名册路径被一个普通文件占着：列不了目录。
+        let not_a_dir = dir.path().join("sessions");
+        std::fs::write(&not_a_dir, "x").unwrap();
+        assert!(others_in(&not_a_dir, "me").is_err());
+
+        // 别的 hub 那份读不了（没权限）。root 跑测试时权限挡不住，就不验这一半。
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let reg = dir.path().join("reg");
+            publish_in(
+                &reg,
+                "other",
+                &BTreeMap::from([(
+                    "a".to_string(),
+                    SessionTabs {
+                        targets: vec!["X".into()],
+                        active: None,
+                    },
+                )]),
+            );
+            let file = reg.join("other.json");
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+            if std::fs::read_to_string(&file).is_err() {
+                assert!(others_in(&reg, "me").is_err());
+            }
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
     }
 }

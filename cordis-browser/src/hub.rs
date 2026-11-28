@@ -123,15 +123,17 @@ impl BrowserHub {
     /// 不然关掉整个浏览器——谁最后一个走谁关，拉起它的那个先走也不带走别人的页。
     ///
     /// 名册里的 target 要在这个 Chromium 里真有才算：别的进程可能还记着上一个 Chromium
-    /// 的页（它还没再调用、没发现浏览器换过），那些不能把这个留着不关。问不到 Chromium
-    /// 时当别人还在用：宁可留给还在的那个进程走时再关，也不关掉别人的页。
+    /// 的页（它还没再调用、没发现浏览器换过），那些不能把这个留着不关。读不了名册、问不到
+    /// Chromium 时都当别人还在用：宁可留给还在的那个进程走时再关，也不关掉别人的页。
     async fn leave_chromium(&self, chromium: Chromium) {
-        let theirs = registry::others_in(&self.registry_dir(), &self.owner.0);
-        let in_use = !theirs.is_empty()
-            && match chromium.live_targets().await {
+        let in_use = match registry::others_in(&self.registry_dir(), &self.owner.0) {
+            Err(_) => true,
+            Ok(theirs) if theirs.is_empty() => false,
+            Ok(theirs) => match chromium.live_targets().await {
                 Ok(live) => live.iter().any(|t| theirs.contains(t)),
                 Err(_) => true,
-            };
+            },
+        };
         if in_use {
             chromium.disconnect();
         } else {
@@ -630,7 +632,8 @@ impl Drop for BrowserHub {
             return;
         };
         self.forget(None);
-        if registry::others_in(&self.registry_dir(), &self.owner.0).is_empty() {
+        // 读不了名册就不杀（同 `leave_chromium`：读不到不算没人在用）。
+        if registry::others_in(&self.registry_dir(), &self.owner.0).is_ok_and(|t| t.is_empty()) {
             chromium.kill_launched();
         }
         chromium.disconnect();

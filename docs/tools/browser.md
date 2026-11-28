@@ -162,7 +162,7 @@ Codex 那套是闭源插件，这里用开源的 playwright-core 自己实现。
   - 别的会话的页开的不收。
 - **Chromium 不归任何一个 Dock**：谁最后一个走谁关。
   - 本进程最后一组关掉（或 stdin 关了）时看名册：别的 Dock 进程还有页开在这个 Chromium 里，就只断开自己的连接；没有了才发 `Browser.close`。
-  - 名册里的页要在 Chromium 里真有才算（别的进程可能还记着上一个 Chromium 的页），进程已经不在的那份不算（`kill -9` 留下的）。
+  - 名册里的页要在 Chromium 里真有才算（别的进程可能还记着上一个 Chromium 的页），进程已经不在的那份不算（`kill -9` 留下的）；读不了名册（没权限……）或问不到 Chromium 时当有人在用，不关。
   - 所以先开的 TUI 关了，GUI 里会话的标签页还在；最后一个也走了，不留孤儿 Chromium。
   - 关的时候先经 `SystemInfo.getProcessInfo` 记下浏览器进程的 pid，等它真退了才返回（最多 10 秒）：不然紧跟着的 `browser_open` 会按还没删的 `DevToolsActivePort` 连上正在退出的那个，开页报 `Failed to open a new tab`。
   - hub 没走 `shutdown` 就被丢掉（测试中途 panic、服务读 stdin 出错提前返回）：自己拉起的、名册里也没人在用就直接杀掉（以前 `kill_on_drop` 管的就是这个），别人在用的照样留着。

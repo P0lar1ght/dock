@@ -239,9 +239,11 @@ impl Chromium {
             .await
             .map_err(|e| format!("launch Chromium ({exe}): {e}"))?;
         // 视口不模拟（chromiumoxide 的 `HandlerConfig` 默认就是 `None`，和连上别人拉起的
-        // 那个一样）：有头时窗口说了算，无头时就是窗口大小。
+        // 那个一样）：有头时窗口说了算，无头时就是窗口大小。连接用 LAUNCH_TIMEOUT，不用
+        // ATTACH_TIMEOUT：那个是「连别人的、连不上就是没在跑」，这里进程刚起来，机器忙时
+        // 3 秒可能不够（以前 `Browser::launch` 把连接也算在 LAUNCH_TIMEOUT 里）。
         let connected = with_timeout(
-            ATTACH_TIMEOUT,
+            LAUNCH_TIMEOUT,
             async {
                 Browser::connect(launched.ws.clone())
                     .await

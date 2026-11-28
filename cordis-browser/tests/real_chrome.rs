@@ -192,11 +192,35 @@ async fn dropped_hub_does_not_leave_its_chromium_behind() {
     ok(&hub, "a", "browser_open", json!({"url": "about:blank"})).await;
     let ws = cordis_browser::devtools_ws_url(&cordis_browser::browser_user_data_dir())
         .expect("hub launched Chromium");
+    let user_data = cordis_browser::browser_user_data_dir();
     drop(hub);
     assert!(
         chromium_gone(&ws).await,
         "a dropped hub must not orphan the Chromium it launched"
     );
+    // 主进程之外的 GPU / renderer / utility 进程也不能留下（它们的命令行都带这个 profile）。
+    let mut left = Vec::new();
+    for _ in 0..50 {
+        left = processes_using(&user_data);
+        if left.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(left.is_empty(), "Chromium helpers left behind: {left:?}");
+}
+
+/// 命令行里带 `dir` 的进程（`pgrep -fl`）。
+fn processes_using(dir: &std::path::Path) -> Vec<String> {
+    let out = std::process::Command::new("pgrep")
+        .arg("-fl")
+        .arg(dir.to_string_lossy().as_ref())
+        .output()
+        .expect("pgrep");
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|l| l.chars().take(160).collect())
+        .collect()
 }
 
 #[tokio::test]
