@@ -15,7 +15,9 @@
 
 - 跟着沙箱走：`/sandbox on` 开当前页（别名 `/audit`），`/sandbox off` 关。
 - `$DOCK_HOME/config.toml` 写 `[sandbox] enabled = true`，新开的页默认开。
-- 只认用户配置：项目 `.dock/config.toml` 里的 `[sandbox]` 不认，仓库作者不能替你关掉审计或者停止遮凭据。
+- 开关跟着会话落盘（`meta.json` 的 `sandbox_enabled`）：开着沙箱的会话，Dock 重启后打开还是开着，接着记、接着限制。
+  老会话没记这个字段，按配置的默认。
+- 只认用户配置：项目 `.dock/config.toml` 里的 `[sandbox]` 不认，仓库作者不能替你关掉审计、改它记什么。
 - 子代理（含工作流派的）记进派它那一页的审计。
 - **关着时什么都不做**：不起出口代理、不注入环境变量、不写盘，开销为零。
 
@@ -66,14 +68,19 @@
     - `/sandbox passthrough` 列出名单（标出哪些只在这次运行里），`/sandbox passthrough clear [主机]` 从盘上和正在跑的代理里一起清掉。
   - 已知不读证书环境变量的：macOS 上的 Go、Java（看 CONNECT 的 User-Agent）。
   - 不是 TLS 的隧道（SSH over CONNECT 之类）。
-- 凭据类的头（`Authorization`、`Cookie`、`Set-Cookie`、`X-Api-Key`…）遮住，留长度和 sha256 前 12 位：
-  能比对是不是同一个，看不到原文。`redact_secrets = false` 关掉。
+- 凭据类的头（`Authorization`、`Cookie`、`Set-Cookie`、`X-Api-Key`…）默认原样记：HTTP 历史里看得到真实的请求，能照着复现。
+  `redact_secrets = true` 遮住，留长度和 sha256 前 12 位：能比对是不是同一个，看不到原文。
+  原样记时审计日志里就有这些凭据（含内置浏览器登录站点的 Cookie），导出、分享前留意。
   **正文不遮**：只按 `body_cap_kb` 截断。登录接口回的 token、表单里提交的密码会原样留在 `bodies/` 里，导出报告前留意。
 - 本机实测（2026-11，macOS）：curl、git、python urllib、npm、Node 原生 fetch 都能解密；Go 原样转发。
 
 ## 存哪、怎么证明
 
 - `$DOCK_HOME/audit/<开始时刻>-<会话>/`：`events.jsonl`（Dock 写）、`browser.jsonl`（浏览器服务写）、`bodies/<sha256>`（正文块，同内容只存一份）。
+- Dock 每起一次、会话开着沙箱就另开一份目录；一页换了会话，前一个记「结束」、新的另开。
+  行为轨迹、HTTP 历史、`/sandbox graph`、`/sandbox status` 把这个会话的每一份按时间接起来看
+  （沙箱现在关着也照样看得到之前的）。之前几次的 job id 后面带 `@<第几次>`：job 每次都从 `job-1` 数起，不改会串。
+  `/sandbox export` 只导出这一次运行的那份。
 - 只追加。每行带上一行的 sha256（`prev`），改过或删过中间一行，之后的链就断了；记录引用的正文块不见了、内容对不上哈希也算。`/sandbox` 状态里和导出的 `verify.txt` 都会说。
 - 写盘在单独的线程上：调用方只往有界队列（8192 条）里放，满了丢掉、计数，下一条记录里报 `dropped`。审计不拖慢 agent。关掉沙箱、退出时等这个线程把队列写完。
 - 正文最多记 `body_cap_kb`（默认 256KB），之后只计长度。浏览器只取页面文档、XHR、fetch 的正文，大于 4MB 的不取。

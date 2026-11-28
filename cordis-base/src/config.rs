@@ -1290,7 +1290,8 @@ pub struct SandboxConfig {
     pub decrypt: bool,
     /// 请求 / 响应正文最多记这么多 KB（之后只计长度）。
     pub body_cap_kb: u64,
-    /// `Authorization`、`Cookie` 这类凭据头遮住（留长度和哈希）。
+    /// `Authorization`、`Cookie` 这类凭据头遮住（留长度和哈希）。默认不遮：HTTP 历史里看得到
+    /// 原样的请求，能照着复现。
     pub redact_secrets: bool,
     /// 命令在系统沙箱里跑（只能写工作区等、读不到密钥）。默认不限制。
     pub confine: bool,
@@ -1341,7 +1342,7 @@ impl Default for SandboxConfig {
             enabled: false,
             decrypt: true,
             body_cap_kb: 256,
-            redact_secrets: true,
+            redact_secrets: false,
             confine: false,
             network: SandboxNetwork::Allow,
             build_caches: true,
@@ -1379,7 +1380,8 @@ struct SandboxSection {
 struct RuleRow {
     host: Option<String>,
     command: Option<String>,
-    action: String,
+    /// 可缺：缺了这一条不要（必填的话 serde 会把整段 `[sandbox]` 都拒掉）。
+    action: Option<String>,
 }
 
 /// Live-read `[sandbox]` from `$DOCK_HOME/config.toml` only.
@@ -1409,7 +1411,7 @@ pub fn load_sandbox_config_from(path: &Path) -> SandboxConfig {
         .unwrap_or_default()
         .into_iter()
         .filter_map(|r| {
-            let action = match r.action.trim() {
+            let action = match r.action.as_deref().unwrap_or("").trim() {
                 "allow" => RuleAction::Allow,
                 "ask" => RuleAction::Ask,
                 "deny" => RuleAction::Deny,
@@ -1469,8 +1471,8 @@ mod sandbox_config_tests {
         assert_eq!(cfg.network, SandboxNetwork::Off, "布尔值照样认");
         assert!(cfg.build_caches);
         assert!(
-            !cfg.confine && cfg.decrypt && cfg.redact_secrets,
-            "默认不限制、解密、遮凭据"
+            !cfg.confine && cfg.decrypt && !cfg.redact_secrets,
+            "默认不限制、解密、凭据头原样记"
         );
         assert_eq!(cfg.writable_roots, vec!["~/build".to_string()]);
     }
@@ -1520,6 +1522,29 @@ action = "maybe"
                     action: RuleAction::Ask
                 },
             ]
+        );
+    }
+
+    /// 回归：少写 `action` 的规则只丢它自己。以前 `action` 是必填字段，serde 整段拒掉，
+    /// `confine = true` 跟着没了（限制悄悄关掉）。
+    #[test]
+    fn a_rule_without_an_action_drops_only_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[sandbox]\nconfine = true\n[[sandbox.rules]]\nhost = \"a\"\n[[sandbox.rules]]\nhost = \"b\"\naction = \"deny\"\n",
+        )
+        .unwrap();
+        let cfg = load_sandbox_config_from(&path);
+        assert!(cfg.confine, "整段没被丢掉");
+        assert_eq!(
+            cfg.rules,
+            vec![SandboxRule {
+                host: Some("b".into()),
+                command: None,
+                action: RuleAction::Deny
+            }]
         );
     }
 

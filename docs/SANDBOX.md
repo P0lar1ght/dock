@@ -58,7 +58,8 @@
   模型会收到一句提醒（之后在工作树里读写，原项目的文件别再改）。正在跑的页不让换。
 - `/sandbox inplace`：回原项目，工作树和分支留着。
   合回去在项目里 `git merge dock/<id>`，不要了 `git worktree remove <路径>`。
-- 会话记着自己在哪：`meta.json` 的 `sandbox`（根、项目目录、模式、分支）和 `workdir`（当前目录）。
+- 会话记着自己在哪：`meta.json` 的 `sandbox`（根、项目目录、模式、分支）和 `workdir`（当前目录）；
+  沙箱开没开记在 `sandbox_enabled`，打开会话时切回来（老会话没有，按 `[sandbox] enabled`）。
   就在归档目录原地的会话不写这两个字段。打开会话时回到它记的位置；工作树删了就回项目目录。
 
 开销：工作区缓存在会话对象里，取 cwd 和以前一样是一次锁读；建工作树是一次 `git worktree add`。
@@ -83,7 +84,7 @@ action = "ask"
 - `command`：`bash` / `monitor` 的命令，`tools/pre-execute` 上判。`deny` 拒掉这次调用，`ask` 要人点头（自动批准不算数）。
 - 这次任务临时放行：`/sandbox allow <域名通配>`、`/sandbox allow-cmd <命令通配>`。
   排在配置的规则前面，沙箱关掉就作废，审计里记一条。
-- 写错的规则（`host` / `command` 两个都写或都不写、`action` 不认识）整条不要。
+- 写错的规则（`host` / `command` 两个都写或都不写、`action` 不认识或没写）整条不要，别的规则和设置照常。
 
 ## 限制（`confine = true`）
 
@@ -224,6 +225,9 @@ Landlock 只能「放行」，所以：
 
 ## 配置
 
+GUI：设置 › 沙箱 改的就是下面这一段（规则能上下挪；写错的规则标「不生效」）。
+行为轨迹面板头栏的齿轮直接打开这一页。
+
 只认 `$DOCK_HOME/config.toml`（项目 `.dock/config.toml` 里的 `[sandbox]` 不认：
 那是仓库作者写的，不能替你关掉或放宽沙箱）。规则和限制每次现读，改了不用重启；
 审计的 `decrypt` / `body_cap_kb` / `redact_secrets` 在出口代理第一次起时读，改了要重启。
@@ -234,7 +238,7 @@ enabled = false          # 新开的页默认开不开；/sandbox 按页切
 # 审计（docs/AUDIT.md）
 decrypt = true           # 命令的 HTTPS 在出口代理处解密
 body_cap_kb = 256        # 正文最多记多少 KB
-redact_secrets = true    # 遮住 Authorization / Cookie 这类凭据头
+redact_secrets = false   # true = 遮住 Authorization / Cookie 这类凭据头（默认原样记）
 # 限制（默认不限）
 confine = false          # 命令进系统沙箱
 network = "allow"        # "allow" | "proxy" | "off"（true / false 也认）

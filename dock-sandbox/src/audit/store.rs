@@ -221,6 +221,44 @@ pub fn read(dir: &Path) -> Vec<Value> {
     out
 }
 
+/// 同一个会话的好几次运行（Dock 每起一次，开了沙箱的会话各开一份目录）接起来读，按时间排。
+///
+/// - `source` 写成 `<目录名>/<文件名>`：按它找得回是哪一份目录（[`crate::audit::packet::record_id`]）。
+/// - 命令的 job id 每次运行都从 `job-1` 数起。除了最后一次，其余运行的 `job` 和命令出网的
+///   `tag` 后面接 `@<第几次>`：不然前一次的出网会算到后一次同名的命令头上。浏览器的 `tag`
+///   （`browser:…`）不动，它按前缀认。
+pub fn read_runs(dirs: &[PathBuf]) -> Vec<Value> {
+    let last = dirs.len().saturating_sub(1);
+    let mut out = Vec::new();
+    for (i, dir) in dirs.iter().enumerate() {
+        let name = dir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        for mut v in read(dir) {
+            let file = v["source"].as_str().unwrap_or("").to_string();
+            v["source"] = json!(format!("{name}/{file}"));
+            if i < last {
+                let run = i + 1;
+                if let Some(job) = v["job"].as_str().map(str::to_string) {
+                    v["job"] = json!(format!("{job}@{run}"));
+                }
+                if let Some(tag) = v["tag"]
+                    .as_str()
+                    .filter(|t| !t.starts_with("browser"))
+                    .map(str::to_string)
+                {
+                    v["tag"] = json!(format!("{tag}@{run}"));
+                }
+            }
+            out.push(v);
+        }
+    }
+    // 稳定排序：同一毫秒里保持目录内的顺序。
+    out.sort_by_key(|v| v["ts"].as_u64().unwrap_or(0));
+    out
+}
+
 /// 校验结果：每个文件多少条、链断在哪（`None` = 完好）、哪些正文块不见了或被改过。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Verified {
@@ -311,6 +349,53 @@ fn logs(dir: &Path) -> Vec<(String, Vec<String>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 两次运行都有 `job-1`：接起来以后前一次的改名，出网仍跟着自己那次的命令走。
+    #[test]
+    fn runs_are_stitched_in_order_and_job_ids_do_not_collide() {
+        let root = tempfile::tempdir().unwrap();
+        let one = root.path().join("20261128-111307-s");
+        let two = root.path().join("20261128-120123-s");
+        for (dir, program) in [(&one, "curl"), (&two, "git")] {
+            let log = AuditLog::open(dir, "events.jsonl").unwrap();
+            log.record("command", json!({ "job": "job-1", "program": program }));
+            log.record(
+                "net",
+                json!({ "tag": "job-1", "host": format!("{program}.example") }),
+            );
+            log.record("net", json!({ "tag": "browser:T1", "host": "b.example" }));
+            drop(log);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let events = read_runs(&[one, two]);
+        let summary: Vec<(String, String, String)> = events
+            .iter()
+            .map(|e| {
+                (
+                    e["source"].as_str().unwrap().to_string(),
+                    e["job"].as_str().or(e["tag"].as_str()).unwrap().to_string(),
+                    e["host"]
+                        .as_str()
+                        .or(e["program"].as_str())
+                        .unwrap()
+                        .to_string(),
+                )
+            })
+            .collect();
+        let src1 = "20261128-111307-s/events.jsonl".to_string();
+        let src2 = "20261128-120123-s/events.jsonl".to_string();
+        assert_eq!(
+            summary,
+            vec![
+                (src1.clone(), "job-1@1".into(), "curl".into()),
+                (src1.clone(), "job-1@1".into(), "curl.example".into()),
+                (src1, "browser:T1".into(), "b.example".into()),
+                (src2.clone(), "job-1".into(), "git".into()),
+                (src2.clone(), "job-1".into(), "git.example".into()),
+                (src2, "browser:T1".into(), "b.example".into()),
+            ]
+        );
+    }
     use crate::audit::record::Message;
 
     fn flow(body: &[u8]) -> Flow {

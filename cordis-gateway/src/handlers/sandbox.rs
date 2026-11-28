@@ -7,7 +7,7 @@
 //!
 //! - `sandbox/http { threadId, limit? }` → `{ auditing, records, requests }`：最近的出网（HTTP 历史）。
 //! - `sandbox/flow { threadId, id }` → 一次出网的请求包 / 响应包（首行、头、正文，压缩的解开）。
-//!   正文没遮凭据（头遮了）。
+//!   正文不遮；凭据头遮不遮看 `[sandbox] redact_secrets`（默认不遮）。
 //!
 //! 四个方法都只给受信连接：命令全文、网址（query 里可能带 token）、请求包都是审计数据，
 //! 配对的网页不该看到。
