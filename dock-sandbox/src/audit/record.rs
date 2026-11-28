@@ -29,7 +29,9 @@ pub struct Flow {
     pub bytes_down: u64,
     pub started_ms: u64,
     pub duration_ms: u64,
-    /// HTTPS 在代理处解密了没有。
+    /// HTTPS 在代理处解密了没有（浏览器的都是 true：浏览器里本来就是明文）。明文 HTTP / `ws://`
+    /// 是 false，可内容照样看得到——看不看得到内容要看有没有请求行（`method`），别只按它过滤。
+    /// WebSocket 的每一段和它的握手一致。
     pub decrypted: bool,
     /// 没解密的原因之类。
     #[serde(skip_serializing_if = "Option::is_none")]

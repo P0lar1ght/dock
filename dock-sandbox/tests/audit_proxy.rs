@@ -825,6 +825,14 @@ async fn websocket_messages_are_recorded_both_ways_while_the_connection_is_open(
         .iter()
         .filter(|f| f.kind == "ws")
         .all(|f| f.ws.as_ref().unwrap().conn == conn));
+    let hs = flows.iter().find(|f| f.kind == "http").unwrap();
+    assert!(
+        flows
+            .iter()
+            .filter(|f| f.kind == "ws")
+            .all(|f| f.decrypted == hs.decrypted),
+        "每一段的 decrypted 和握手一致"
+    );
     let (msgs, done) = ws_messages(&flows);
     let done = done.expect("关了要有最后一段");
     let brief: Vec<(String, String, serde_json::Value)> = msgs

@@ -994,6 +994,38 @@ mod tests {
         );
     }
 
+    /// 协商了 `*_no_context_takeover`：对端每条消息换一个新的压缩流、也不以 BFINAL 结束。
+    /// 不用按参数重置：每条消息都结束在块边界上（同步块），新流的回引只指向它自己的内容，
+    /// 一路接着解的 inflater 照样解得对。用重复的内容逼出回引，确保真走了这条路。
+    #[test]
+    fn deflate_without_context_takeover_decodes_without_a_reset() {
+        use flate2::{Compress, Compression, FlushCompress};
+        let texts = [
+            "hello hello hello hello",
+            "world world world world",
+            "hello world hello world",
+        ];
+        let mut wire = Vec::new();
+        for t in texts {
+            let mut z = Compress::new(Compression::default(), false);
+            let mut out = Vec::with_capacity(128);
+            z.compress_vec(t.as_bytes(), &mut out, FlushCompress::Sync)
+                .unwrap();
+            assert!(out.ends_with(&DEFLATE_TAIL));
+            out.truncate(out.len() - 4);
+            assert!(out.len() < t.len(), "内容要压得动（有回引）");
+            wire.extend(frame(0xc1, &out, None));
+        }
+        let (rec, flows) = rig(1024);
+        Decoder::new(Dir::Down, 1024, true).feed(&wire, &rec);
+        rec.finish(None);
+        let got: Vec<String> = messages(&flows.lock().unwrap())
+            .iter()
+            .map(|m| m["text"].as_str().unwrap_or("<没解开>").to_string())
+            .collect();
+        assert_eq!(got, texts);
+    }
+
     /// 内容按方向合计截到 `cap`；超过 [`KEEP`] 条只计数。
     #[test]
     fn content_and_message_count_are_capped() {

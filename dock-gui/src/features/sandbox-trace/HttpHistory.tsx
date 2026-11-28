@@ -217,11 +217,16 @@ function Packets({ flow }: { flow: FlowDetail }) {
   return (
     <div className="@container flex min-h-0 flex-1 flex-col">
       <div className="enter-fade grid min-h-0 flex-1 grid-cols-1 gap-2 @[560px]:grid-cols-2">
-        <PacketView title="请求" packet={flow.request} hostLine={`${flow.scheme ?? "https"}://${flow.host}${flow.port && ![80, 443].includes(flow.port) ? `:${flow.port}` : ""}`} />
+        <PacketView title="请求" packet={flow.request} hostLine={`${flow.scheme ?? "https"}://${flow.host}${portSuffix(flow.port)}`} />
         <PacketView title="响应" packet={flow.response} hostLine={flow.error ? `出错：${flow.error}` : flow.durationMs != null ? `${flow.durationMs} ms` : ""} />
       </div>
     </div>
   );
+}
+
+/** 不是默认端口（80 / 443）就带上 `:端口`。 */
+function portSuffix(port: number | null | undefined): string {
+  return port && ![80, 443].includes(port) ? `:${port}` : "";
 }
 
 /** 时长：短的给毫秒，长的给秒 / 分。 */
@@ -262,7 +267,7 @@ function WsView({ flow, ws }: { flow: FlowDetail; ws: WsConversation }) {
     <div className="enter-fade flex min-h-0 flex-1 flex-col gap-2">
       <div className="flex shrink-0 items-center gap-2 text-[11.5px]">
         <span className="min-w-0 flex-1 truncate tabular-nums text-ink-3">
-          <span className="font-medium text-ink-2">{`${flow.scheme ?? "ws"}://${flow.host}${flow.path ?? ""}`}</span>
+          <span className="font-medium text-ink-2">{`${flow.scheme ?? "ws"}://${flow.host}${portSuffix(flow.port)}${flow.path ?? ""}`}</span>
           {` · ↑${ws.sent} ↓${ws.received} · ${humanBytes(ws.bytesUp + ws.bytesDown)}`}
           {ws.durationMs != null ? ` · ${duration(ws.durationMs)}` : ""}
           {" · "}

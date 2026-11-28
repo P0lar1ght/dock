@@ -689,7 +689,8 @@ impl Proxy {
                         },
                         target.host.clone(),
                         target.port,
-                        true,
+                        // 和握手那条一致：`decrypted` 说的是 HTTPS 在代理处解密了没有。
+                        target.scheme == "https",
                         self.opts.body_cap,
                     );
                     // 连接可能开很久：握手现在就记，之后的消息由 rec 按段记。
